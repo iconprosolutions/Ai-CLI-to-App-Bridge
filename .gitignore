@@ -1,0 +1,25 @@
+# Dependencies
+node_modules/
+
+# Environment — never commit your actual keys
+.env
+
+# Context files with real client data — keep only templates
+claude-bridge/contexts/clients/*.md
+!claude-bridge/contexts/clients/_template.md
+gemini-bridge/contexts/clients/*.md
+!gemini-bridge/contexts/clients/_template.md
+
+# Personal agency context is committed as a generic template.
+# If you customize it with private info, add it to your own .gitignore.
+
+# Docker build artifacts
+.dockerignore
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*

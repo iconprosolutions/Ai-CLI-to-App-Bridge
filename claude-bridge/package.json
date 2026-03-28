@@ -1,0 +1,14 @@
+{
+  "name": "claude-cli-bridge",
+  "version": "1.0.0",
+  "description": "HTTP bridge that wraps the Claude Code CLI for use with AI-powered apps",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.21.0"
+  }
+}

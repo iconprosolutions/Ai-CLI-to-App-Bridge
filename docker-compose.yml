@@ -1,0 +1,50 @@
+services:
+
+  # ──────────────────────────────────────────────────────────────
+  # Claude CLI Bridge  →  http://localhost:9002
+  # Wraps the Claude Code CLI (claude -p) as an HTTP service.
+  # Auth: set ANTHROPIC_API_KEY in .env  (uses API billing)
+  #       or mount your Claude Code auth dir via the volume below
+  #       (uses your existing claude subscription / login)
+  # ──────────────────────────────────────────────────────────────
+  claude-bridge:
+    build: ./claude-bridge
+    container_name: claude-bridge
+    ports:
+      - "${CLAUDE_PORT:-9002}:9002"
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - CLAUDE_MODEL=${CLAUDE_MODEL:-}
+      - AGENCY_NAME=${AGENCY_NAME:-Your Agency}
+      - TEAM_MEMBERS=${TEAM_MEMBERS:-Team Member or Client}
+    volumes:
+      # Persist context files (client notes, agency context) on the host
+      - ./claude-bridge/contexts:/app/contexts
+      # Mount your Claude Code auth dir if using Claude subscription instead of API key
+      # Comment this out if you're using ANTHROPIC_API_KEY above
+      - ${HOME}/.claude:/root/.claude:ro
+    restart: unless-stopped
+
+  # ──────────────────────────────────────────────────────────────
+  # Gemini CLI Bridge  →  http://localhost:9003
+  # Wraps the Gemini CLI (gemini -p) as an HTTP service.
+  # Auth: you must authenticate the Gemini CLI on the host first
+  #       (run: gemini   and sign in), then the ~/.gemini dir
+  #       is mounted read-only into the container.
+  # ──────────────────────────────────────────────────────────────
+  gemini-bridge:
+    build: ./gemini-bridge
+    container_name: gemini-bridge
+    ports:
+      - "${GEMINI_PORT:-9003}:9003"
+    environment:
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.5-flash}
+      - AGENCY_NAME=${AGENCY_NAME:-Your Agency}
+      - TEAM_MEMBERS=${TEAM_MEMBERS:-Team Member or Client}
+    volumes:
+      # Persist context files on the host
+      - ./gemini-bridge/contexts:/app/contexts
+      # Mount Gemini CLI credentials from host (must be authenticated already)
+      - ${HOME}/.gemini:/root/.gemini:ro
+      - ${HOME}/.config:/root/.config:ro
+    restart: unless-stopped
