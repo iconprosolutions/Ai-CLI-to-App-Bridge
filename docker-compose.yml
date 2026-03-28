@@ -1,8 +1,10 @@
 services:
 
   # ──────────────────────────────────────────────────────────────
-  # Claude CLI Bridge  →  http://localhost:9002
+  # Claude CLI Bridge  →  http://<this-machine-ip>:9002
   # Wraps the Claude Code CLI (claude -p) as an HTTP service.
+  # Access via the host machine's IP or Tailscale IP — not "localhost"
+  # if Meeting Hub runs on a different machine (e.g. NAS).
   # Auth: set ANTHROPIC_API_KEY in .env  (uses API billing)
   #       or mount your Claude Code auth dir via the volume below
   #       (uses your existing claude subscription / login)
@@ -26,8 +28,10 @@ services:
     restart: unless-stopped
 
   # ──────────────────────────────────────────────────────────────
-  # Gemini CLI Bridge  →  http://localhost:9003
+  # Gemini CLI Bridge  →  http://<this-machine-ip>:9003
   # Wraps the Gemini CLI (gemini -p) as an HTTP service.
+  # Access via the host machine's IP or Tailscale IP — not "localhost"
+  # if Meeting Hub runs on a different machine (e.g. NAS).
   # Auth: you must authenticate the Gemini CLI on the host first
   #       (run: gemini   and sign in), then the ~/.gemini dir
   #       is mounted read-only into the container.
