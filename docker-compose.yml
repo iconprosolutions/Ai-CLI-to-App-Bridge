@@ -3,11 +3,12 @@ services:
   # ──────────────────────────────────────────────────────────────
   # Claude CLI Bridge  →  http://<this-machine-ip>:9002
   # Wraps the Claude Code CLI (claude -p) as an HTTP service.
-  # Access via the host machine's IP or Tailscale IP — not "localhost"
-  # if Meeting Hub runs on a different machine (e.g. NAS).
-  # Auth: set ANTHROPIC_API_KEY in .env  (uses API billing)
-  #       or mount your Claude Code auth dir via the volume below
-  #       (uses your existing claude subscription / login)
+  # Auth: copy ~/.claude from your Mac to ./claude-auth/ on the host,
+  #       then mount it below. No API key needed — uses your Claude
+  #       Code subscription via OAuth (already authenticated on Mac).
+  #
+  # On your Mac:
+  #   scp -r ~/.claude user@nas-ip:/path/to/ai-cli-bridge/claude-auth
   # ──────────────────────────────────────────────────────────────
   claude-bridge:
     build: ./claude-bridge
@@ -15,26 +16,25 @@ services:
     ports:
       - "${CLAUDE_PORT:-9002}:9002"
     environment:
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - CLAUDE_MODEL=${CLAUDE_MODEL:-}
       - AGENCY_NAME=${AGENCY_NAME:-Your Agency}
       - TEAM_MEMBERS=${TEAM_MEMBERS:-Team Member or Client}
     volumes:
       # Persist context files (client notes, agency context) on the host
       - ./claude-bridge/contexts:/app/contexts
-      # Mount your Claude Code auth dir if using Claude subscription instead of API key
-      # Comment this out if you're using ANTHROPIC_API_KEY above
-      - ${HOME}/.claude:/root/.claude:ro
+      # Claude Code OAuth credentials — copied from ~/.claude on your Mac
+      - ./claude-auth:/root/.claude:ro
     restart: unless-stopped
 
   # ──────────────────────────────────────────────────────────────
   # Gemini CLI Bridge  →  http://<this-machine-ip>:9003
   # Wraps the Gemini CLI (gemini -p) as an HTTP service.
-  # Access via the host machine's IP or Tailscale IP — not "localhost"
-  # if Meeting Hub runs on a different machine (e.g. NAS).
-  # Auth: you must authenticate the Gemini CLI on the host first
-  #       (run: gemini   and sign in), then the ~/.gemini dir
-  #       is mounted read-only into the container.
+  # Auth: copy ~/.gemini from your Mac to ./gemini-auth/ on the host,
+  #       then mount it below. No API key needed — uses your Google
+  #       OAuth session (already authenticated on Mac).
+  #
+  # On your Mac:
+  #   scp -r ~/.gemini user@nas-ip:/path/to/ai-cli-bridge/gemini-auth
   # ──────────────────────────────────────────────────────────────
   gemini-bridge:
     build: ./gemini-bridge
@@ -48,7 +48,6 @@ services:
     volumes:
       # Persist context files on the host
       - ./gemini-bridge/contexts:/app/contexts
-      # Mount Gemini CLI credentials from host (must be authenticated already)
-      - ${HOME}/.gemini:/root/.gemini:ro
-      - ${HOME}/.config:/root/.config:ro
+      # Gemini CLI OAuth credentials — copied from ~/.gemini on your Mac
+      - ./gemini-auth:/root/.gemini:ro
     restart: unless-stopped
