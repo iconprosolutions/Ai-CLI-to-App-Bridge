@@ -407,18 +407,17 @@ Respond with plain text only. No JSON, no markdown formatting.`;
 // First call returns all candidates while a background probe runs.
 // Subsequent calls within PROBE_CACHE_MS return the probed (accurate) list.
 // Pass ?refresh=true to force a fresh probe.
-app.get('/models', async (req, res) => {
+app.get('/models', (req, res) => {
   const forceRefresh = req.query.refresh === 'true';
 
+  // Always kick off a background probe if stale or force-refresh requested.
+  // Never block the response waiting for it — the probe can take minutes.
   if (forceRefresh || (!modelCache && !probeRunning)) {
-    if (forceRefresh) {
-      probeRunning = false; // allow restart
-      await probeAllModels();
-      return res.json(modelCache);
-    }
-    probeAllModels().catch(console.error); // background
+    if (forceRefresh) probeRunning = false; // allow restart
+    probeAllModels().catch(console.error);
   }
 
+  // Return cached probed list if available, otherwise full candidate list.
   const cacheValid = modelCache && (Date.now() - probeLastRan) < PROBE_CACHE_MS;
   res.json(cacheValid ? modelCache : CANDIDATE_MODELS.map(({ ...m }) => m));
 });
