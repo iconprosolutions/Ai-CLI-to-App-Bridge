@@ -4,7 +4,7 @@
   "private": true,
   "description": "HTTP bridges wrapping the Claude and Gemini CLIs, plus an MCP delegate.",
   "scripts": {
-    "test": "node tests/security.test.js",
-    "check": "node --check claude-bridge/server.js && node --check gemini-bridge/server.js && node --check tests/security.test.js"
+    "test": "node tests/security.test.js && node tests/provider.test.js",
+    "check": "node --check claude-bridge/server.js && node --check gemini-bridge/server.js && node --check provider-bridge/server.js && node --check tests/security.test.js && node --check tests/provider.test.js"
   }
 }

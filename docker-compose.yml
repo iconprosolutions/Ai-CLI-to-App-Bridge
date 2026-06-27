@@ -57,3 +57,32 @@ services:
       # Gemini CLI OAuth credentials from the host (CLI must be authenticated)
       - ${HOME}/.gemini:/root/.gemini:ro
     restart: unless-stopped
+
+  # ──────────────────────────────────────────────────────────────
+  # Provider Bridge  →  http://<this-machine-ip>:9010
+  # OpenAI-style HTTP facade for Waqar's own apps. Routes requests to
+  # the Claude and Gemini HTTP bridges over the compose network — never
+  # spawns the CLIs directly. Hermes keeps using the MCP delegate.
+  # Auth: requires Authorization: Bearer <PROVIDER_API_KEY> on /v1/*.
+  #       Falls back to BRIDGE_API_KEY for local single-key setups.
+  # ──────────────────────────────────────────────────────────────
+  provider-bridge:
+    build: ./provider-bridge
+    container_name: provider-bridge
+    ports:
+      - "${PROVIDER_PORT:-9010}:9010"
+    environment:
+      # Incoming auth for /v1/* endpoints. Falls back to BRIDGE_API_KEY.
+      - PROVIDER_API_KEY=${PROVIDER_API_KEY:-}
+      # Also used as the outgoing bearer token when calling the bridges.
+      - BRIDGE_API_KEY=${BRIDGE_API_KEY:-}
+      # Inside compose, reach the sibling bridges by service name.
+      - CLAUDE_BRIDGE_URL=http://claude-bridge:9002
+      - GEMINI_BRIDGE_URL=http://gemini-bridge:9003
+      - PROVIDER_MAX_CONCURRENT_PER_ENGINE=${PROVIDER_MAX_CONCURRENT_PER_ENGINE:-1}
+      - PROVIDER_UPSTREAM_TIMEOUT_MS=${PROVIDER_UPSTREAM_TIMEOUT_MS:-}
+      - CORS_ORIGINS=${CORS_ORIGINS:-}
+    depends_on:
+      - claude-bridge
+      - gemini-bridge
+    restart: unless-stopped
