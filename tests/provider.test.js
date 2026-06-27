@@ -210,8 +210,8 @@ async function main() {
     path: '/v1/chat/completions', method: 'POST',
     body: { model: 'gemini-cli-pro', messages: [{ role: 'user', content: 'x' }] },
   });
-  assert(gemini.received[gemini.received.length - 1].body.model === 'gemini-2.5-pro',
-    'gemini-cli-pro → gemini-2.5-pro upstream');
+  assert(gemini.received[gemini.received.length - 1].body.model === 'Gemini 3.1 Pro (Low)',
+    'gemini-cli-pro → Gemini 3.1 Pro (Low) upstream');
   await request(OPEN_PORT, {
     path: '/v1/chat/completions', method: 'POST',
     body: { model: 'gemini-cli-flash', messages: [{ role: 'user', content: 'x' }] },

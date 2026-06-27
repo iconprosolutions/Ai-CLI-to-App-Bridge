@@ -36,7 +36,7 @@ const ALIASES = {
   'claude-subscription-sonnet': { engine: 'claude', model: 'claude-sonnet-4-6' },
   'claude-subscription-opus': { engine: 'claude', model: 'claude-opus-4-5' },
   'gemini-cli-flash': { engine: 'gemini' },
-  'gemini-cli-pro': { engine: 'gemini', model: 'gemini-2.5-pro' },
+  'gemini-cli-pro': { engine: 'gemini', model: 'Gemini 3.1 Pro (Low)' },
 };
 
 const inflight = { claude: 0, gemini: 0 };

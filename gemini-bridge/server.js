@@ -27,9 +27,10 @@ const SESSION_TIMEOUT_MS = 24 * 60 * 60 * 1000; // 24 hours
 const AGENCY_NAME = process.env.AGENCY_NAME || 'Your Agency';
 const TEAM_MEMBERS = process.env.TEAM_MEMBERS || 'Team Member or Client';
 
-// Gemini CLI config
-const GEMINI_PATH = process.env.GEMINI_PATH || 'gemini';
-const DEFAULT_MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+// Antigravity CLI config. GEMINI_PATH is kept as a backward-compatible env var
+// name for existing scripts, but the default command is now `agy`.
+const GEMINI_PATH = process.env.GEMINI_PATH || process.env.AGY_PATH || 'agy';
+const DEFAULT_MODEL = process.env.GEMINI_MODEL || 'Gemini 3.5 Flash (Low)';
 const CLI_TIMEOUT_MS = Number(process.env.CLI_TIMEOUT_MS) || 5 * 60 * 1000; // 5 min
 const MAX_CLI_OUTPUT_BYTES = Number(process.env.MAX_CLI_OUTPUT_BYTES) || 10 * 1024 * 1024; // 10 MB
 
@@ -91,13 +92,13 @@ function assertValidType(type, res) {
   return true;
 }
 
-// All Gemini models that may exist across accounts — the probe will filter to only available ones.
+// Antigravity model names are display names, not old Gemini API model ids.
 const CANDIDATE_MODELS = [
-  { id: 'gemini-3.1-pro-preview',  name: 'Gemini 3.1 Pro Preview',  description: 'Most capable Gemini 3.1 model. Requires higher quota.', contextWindow: 1000000, isFree: false },
-  { id: 'gemini-3-flash-preview',  name: 'Gemini 3 Flash Preview',  description: 'Recommended free model — the Gemini CLI default.', contextWindow: 1000000, isFree: true },
-  { id: 'gemini-2.5-pro',         name: 'Gemini 2.5 Pro',          description: 'High-capability Gemini 2.5 model. Requires higher quota.', contextWindow: 1000000, isFree: false },
-  { id: 'gemini-2.5-flash',       name: 'Gemini 2.5 Flash',        description: 'Fast and capable Gemini 2.5 model. Free tier available.', contextWindow: 1000000, isFree: true },
-  { id: 'gemini-2.5-flash-lite',  name: 'Gemini 2.5 Flash Lite',   description: 'Lightest Gemini 2.5 model. Lowest quota usage.', contextWindow: 1000000, isFree: true },
+  { id: 'Gemini 3.5 Flash (Low)',    name: 'Gemini 3.5 Flash (Low)',    description: 'Fast Antigravity Gemini 3.5 Flash mode for routine app work.', contextWindow: 1000000, isFree: false },
+  { id: 'Gemini 3.5 Flash (Medium)', name: 'Gemini 3.5 Flash (Medium)', description: 'Balanced Antigravity Gemini 3.5 Flash mode.', contextWindow: 1000000, isFree: false },
+  { id: 'Gemini 3.5 Flash (High)',   name: 'Gemini 3.5 Flash (High)',   description: 'Higher-reasoning Antigravity Gemini 3.5 Flash mode.', contextWindow: 1000000, isFree: false },
+  { id: 'Gemini 3.1 Pro (Low)',      name: 'Gemini 3.1 Pro (Low)',      description: 'Lower-latency Antigravity Gemini 3.1 Pro mode.', contextWindow: 1000000, isFree: false },
+  { id: 'Gemini 3.1 Pro (High)',     name: 'Gemini 3.1 Pro (High)',     description: 'Most capable Antigravity Gemini 3.1 Pro mode available here.', contextWindow: 1000000, isFree: false },
 ];
 
 // ─────────────────────────────────────────────
@@ -138,11 +139,19 @@ async function probeAllModels() {
 }
 
 const MODEL_ALIASES = {
-  'gemini-1.5-pro': 'gemini-2.5-flash',
-  'gemini-1.5-flash': 'gemini-2.5-flash',
-  'gemini-2.0-flash': 'gemini-2.5-flash',
-  'gemini-2.0-flash-thinking-exp': 'gemini-2.5-flash',
-  'gemini-2.5-flash-8b': 'gemini-2.5-flash',
+  'gemini-1.5-pro': 'Gemini 3.5 Flash (Low)',
+  'gemini-1.5-flash': 'Gemini 3.5 Flash (Low)',
+  'gemini-2.0-flash': 'Gemini 3.5 Flash (Low)',
+  'gemini-2.0-flash-thinking-exp': 'Gemini 3.5 Flash (Low)',
+  'gemini-2.5-flash-8b': 'Gemini 3.5 Flash (Low)',
+  'gemini-2.5-flash': 'Gemini 3.5 Flash (Low)',
+  'gemini-2.5-pro': 'Gemini 3.1 Pro (Low)',
+  'gemini-3-flash-preview': 'Gemini 3.5 Flash (Low)',
+  'gemini-3.5-flash': 'Gemini 3.5 Flash (Low)',
+  'gemini-3.1-pro': 'Gemini 3.1 Pro (Low)',
+  'gemini-3.1-pro-preview': 'Gemini 3.1 Pro (Low)',
+  'Gemini 3.5 Flash': 'Gemini 3.5 Flash (Low)',
+  'Gemini 3.1 Pro': 'Gemini 3.1 Pro (Low)',
 };
 
 function normalizeModel(model) {
@@ -259,10 +268,8 @@ function runGemini(prompt, model) {
   return new Promise((resolve, reject) => {
     const selectedModel = normalizeModel(model);
 
-    // -p: non-interactive (headless) mode
-    // -y: auto-accept all actions (YOLO) — needed for unattended runs
-    // -m: model selection
-    const args = ['-p', prompt, '-y', '-m', selectedModel];
+    // agy --print: non-interactive mode; --model selects the Antigravity model.
+    const args = ['--print', prompt, '--model', selectedModel, '--print-timeout', `${Math.ceil(CLI_TIMEOUT_MS / 1000)}s`];
 
     const child = spawn(GEMINI_PATH, args, {
       cwd: __dirname,
@@ -315,7 +322,7 @@ function runGemini(prompt, model) {
       if (room > 0) stderr += data.toString().slice(0, room);
       // Fail immediately on known terminal errors instead of waiting for CLI retries
       if (stderr.includes('You have exhausted your capacity on this model')) {
-        settle(true, new Error(`The Gemini model "${selectedModel}" is temporarily unavailable — quota exceeded. Try again later or use Gemini 2.5 Flash.`));
+        settle(true, new Error(`The Gemini model "${selectedModel}" is temporarily unavailable — quota exceeded. Try again later or use Gemini 3.5 Flash.`));
       } else if (stderr.includes('Requested entity was not found')) {
         settle(true, new Error(`The Gemini model "${selectedModel}" is not available in this CLI session.`));
       }
@@ -773,15 +780,14 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`Session timeout: ${SESSION_TIMEOUT_MS / 3600000}h`);
 
   try {
-    // execFileSync (no shell) avoids shell-injection via GEMINI_PATH — the old
-    // `${GEMINI_PATH} --version` string was interpolated straight into a shell.
+    // execFileSync (no shell) avoids shell-injection via GEMINI_PATH.
     const version = execFileSync(GEMINI_PATH, ['--version'], {
       encoding: 'utf-8',
       timeout: 5000,
       stdio: ['ignore', 'pipe', 'pipe'],
     }).trim();
-    console.log(`Gemini CLI: ${version}`);
+    console.log(`Antigravity CLI: ${version}`);
   } catch (_) {
-    console.warn('WARNING: Could not detect Gemini CLI. Make sure "gemini" is in PATH or GEMINI_PATH is set.');
+    console.warn('WARNING: Could not detect Antigravity CLI. Make sure "agy" is in PATH or GEMINI_PATH/AGY_PATH is set.');
   }
 });

@@ -30,9 +30,9 @@ services:
     restart: unless-stopped
 
   # ──────────────────────────────────────────────────────────────
-  # Gemini CLI Bridge  →  http://<this-machine-ip>:9003
-  # Wraps the Gemini CLI (gemini -p) as an HTTP service.
-  # Auth: mounts ~/.gemini from the host. The CLI must already be
+  # Gemini/Antigravity Bridge  →  http://<this-machine-ip>:9003
+  # Wraps the Antigravity CLI (agy --print) as an HTTP service.
+  # Auth: mounts local CLI credentials from the host. The CLI must already be
   #       installed and authenticated on the host machine.
   # ──────────────────────────────────────────────────────────────
   gemini-bridge:
@@ -41,7 +41,7 @@ services:
     ports:
       - "${GEMINI_PORT:-9003}:9003"
     environment:
-      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.5-flash}
+      - GEMINI_MODEL=${GEMINI_MODEL:-Gemini 3.5 Flash (Low)}
       - AGENCY_NAME=${AGENCY_NAME:-Your Agency}
       - TEAM_MEMBERS=${TEAM_MEMBERS:-Team Member or Client}
       # Shared secret for the HTTP API. Leave blank ONLY for local dev.
@@ -54,7 +54,7 @@ services:
     volumes:
       # Persist context files on the host
       - ./gemini-bridge/contexts:/app/contexts
-      # Gemini CLI OAuth credentials from the host (CLI must be authenticated)
+      # Antigravity/Gemini CLI credentials from the host (CLI must be authenticated)
       - ${HOME}/.gemini:/root/.gemini:ro
     restart: unless-stopped
 
