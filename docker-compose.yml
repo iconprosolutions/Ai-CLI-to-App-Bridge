@@ -15,6 +15,13 @@ services:
       - CLAUDE_MODEL=${CLAUDE_MODEL:-}
       - AGENCY_NAME=${AGENCY_NAME:-Your Agency}
       - TEAM_MEMBERS=${TEAM_MEMBERS:-Team Member or Client}
+      # Shared secret for the HTTP API. Leave blank ONLY for local dev.
+      # When set, callers must send `Authorization: Bearer <key>`.
+      - BRIDGE_API_KEY=${BRIDGE_API_KEY:-}
+      # Optional CORS allowlist + CLI execution limits (see .env.example).
+      - CORS_ORIGINS=${CORS_ORIGINS:-}
+      - CLI_TIMEOUT_MS=${CLI_TIMEOUT_MS:-}
+      - MAX_CLI_OUTPUT_BYTES=${MAX_CLI_OUTPUT_BYTES:-}
     volumes:
       # Persist context files (client notes, agency context) on the host
       - ./claude-bridge/contexts:/app/contexts
@@ -37,6 +44,13 @@ services:
       - GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.5-flash}
       - AGENCY_NAME=${AGENCY_NAME:-Your Agency}
       - TEAM_MEMBERS=${TEAM_MEMBERS:-Team Member or Client}
+      # Shared secret for the HTTP API. Leave blank ONLY for local dev.
+      # When set, callers must send `Authorization: Bearer <key>`.
+      - BRIDGE_API_KEY=${BRIDGE_API_KEY:-}
+      # Optional CORS allowlist + CLI execution limits (see .env.example).
+      - CORS_ORIGINS=${CORS_ORIGINS:-}
+      - CLI_TIMEOUT_MS=${CLI_TIMEOUT_MS:-}
+      - MAX_CLI_OUTPUT_BYTES=${MAX_CLI_OUTPUT_BYTES:-}
     volumes:
       # Persist context files on the host
       - ./gemini-bridge/contexts:/app/contexts

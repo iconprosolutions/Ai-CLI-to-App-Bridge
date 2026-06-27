@@ -1,0 +1,10 @@
+{
+  "name": "ai-cli-bridge",
+  "version": "1.0.0",
+  "private": true,
+  "description": "HTTP bridges wrapping the Claude and Gemini CLIs, plus an MCP delegate.",
+  "scripts": {
+    "test": "node tests/security.test.js",
+    "check": "node --check claude-bridge/server.js && node --check gemini-bridge/server.js && node --check tests/security.test.js"
+  }
+}
