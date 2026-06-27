@@ -6,6 +6,7 @@
 - Claude HTTP bridge: app-facing HTTP wrapper around Claude Code print mode.
 - Gemini/Antigravity HTTP bridge: app-facing HTTP wrapper around Antigravity `agy --print`.
 - Provider bridge: private OpenAI-style `/v1` facade for Waqar's own apps.
+- Provider dashboard: local browser view for provider health, engine reachability, aliases, inflight counts, and recent non-sensitive calls.
 
 ## Working Model Aliases
 

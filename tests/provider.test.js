@@ -150,6 +150,24 @@ async function main() {
   assert(typeof health.inflightClaude === 'number' && typeof health.inflightGemini === 'number',
     'health exposes inflight counts');
 
+  console.log('\n## Browser dashboard');
+  r = await request(OPEN_PORT, { path: '/' });
+  assert(r.status === 200, 'dashboard root returns 200');
+  assert((r.headers['content-type'] || '').includes('text/html'), 'dashboard root returns HTML');
+  assert(r.body.includes('AI CLI Bridge'), 'dashboard HTML includes title');
+  r = await request(OPEN_PORT, { path: '/dashboard/status' });
+  assert(r.status === 200, 'dashboard status returns 200');
+  const dashboard = JSON.parse(r.body || '{}');
+  assert(dashboard.status === 'ok' && dashboard.engine === 'provider-bridge',
+    'dashboard status reports provider-bridge ok');
+  assert(dashboard.engines && dashboard.engines.claude && dashboard.engines.gemini,
+    'dashboard status includes both engine health records');
+  assert(dashboard.engines.claude.ok === true && dashboard.engines.gemini.ok === true,
+    'dashboard status marks fake upstreams online');
+  assert(Array.isArray(dashboard.aliases) && dashboard.aliases.some((a) => a.id === 'auto-fast'),
+    'dashboard status includes aliases');
+  assert(Array.isArray(dashboard.recentRequests), 'dashboard status includes recent request list');
+
   console.log('\n## POST /v1/chat/completions — Claude routing + shape');
   r = await request(OPEN_PORT, {
     path: '/v1/chat/completions', method: 'POST',

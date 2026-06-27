@@ -40,6 +40,8 @@ const ALIASES = {
 };
 
 const inflight = { claude: 0, gemini: 0 };
+const recentRequests = [];
+const MAX_RECENT_REQUESTS = 50;
 
 function newRequestId() {
   return crypto.randomBytes(6).toString('hex');
@@ -49,6 +51,15 @@ function logReq(reqId, fields) {
   const parts = [`[req ${reqId}]`];
   for (const [k, v] of Object.entries(fields)) parts.push(`${k}=${v}`);
   console.log(parts.join(' '));
+  recentRequests.unshift({
+    id: reqId,
+    at: new Date().toISOString(),
+    alias: fields.alias,
+    engine: fields.engine,
+    status: fields.status,
+    durationMs: fields.duration,
+  });
+  recentRequests.splice(MAX_RECENT_REQUESTS);
 }
 
 function openaiErrorBody(message, type, param) {
@@ -98,6 +109,243 @@ function callUpstream(engine, payload) {
   });
 }
 
+function checkEngineHealth(engine) {
+  const url = new URL(ENGINES[engine].url + '/health');
+  return new Promise((resolve) => {
+    const started = Date.now();
+    const req = http.request(url, { method: 'GET', timeout: 1500 }, (res) => {
+      let data = '';
+      res.on('data', (c) => (data += c));
+      res.on('end', () => {
+        let body = null;
+        try { body = JSON.parse(data || '{}'); } catch (_) {}
+        resolve({
+          ok: res.statusCode >= 200 && res.statusCode < 300,
+          status: res.statusCode,
+          durationMs: Date.now() - started,
+          detail: body && (body.engine || body.status || body.message || body.error),
+        });
+      });
+    });
+    req.on('timeout', () => req.destroy(new Error('timeout')));
+    req.on('error', (err) => resolve({
+      ok: false,
+      status: 0,
+      durationMs: Date.now() - started,
+      detail: err.message,
+    }));
+    req.end();
+  });
+}
+
+function dashboardHtml() {
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI CLI Bridge</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f6f7f9;
+      --panel: #ffffff;
+      --text: #17191f;
+      --muted: #667085;
+      --line: #d9dee8;
+      --good: #147d4f;
+      --bad: #b42318;
+      --warn: #b54708;
+      --accent: #2563eb;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    main { max-width: 1120px; margin: 0 auto; padding: 28px 18px 40px; }
+    header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 18px;
+      margin-bottom: 22px;
+    }
+    h1 { margin: 0; font-size: 30px; line-height: 1.1; letter-spacing: 0; }
+    h2 { margin: 0 0 12px; font-size: 16px; letter-spacing: 0; }
+    p { margin: 6px 0 0; color: var(--muted); }
+    button {
+      appearance: none;
+      border: 1px solid var(--line);
+      background: var(--panel);
+      color: var(--text);
+      min-height: 38px;
+      padding: 0 14px;
+      border-radius: 8px;
+      font-weight: 650;
+      cursor: pointer;
+    }
+    button:hover { border-color: var(--accent); }
+    .grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+    .two { grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr); margin-top: 14px; }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 16px;
+    }
+    .metric { font-size: 28px; font-weight: 750; margin-top: 8px; }
+    .muted { color: var(--muted); }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 26px;
+      padding: 0 10px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      font-size: 13px;
+      font-weight: 650;
+      color: var(--muted);
+      background: #fbfcfe;
+    }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+    .ok .dot { background: var(--good); }
+    .down .dot { background: var(--bad); }
+    .busy .dot { background: var(--warn); }
+    .engine-row, .alias-row, .request-row {
+      display: grid;
+      gap: 8px;
+      align-items: center;
+      padding: 10px 0;
+      border-top: 1px solid var(--line);
+    }
+    .engine-row { grid-template-columns: 110px 110px 1fr 90px; }
+    .alias-row { grid-template-columns: 1.2fr 90px 1fr; }
+    .request-row { grid-template-columns: 88px 1fr 90px 88px; }
+    .engine-row:first-of-type, .alias-row:first-of-type, .request-row:first-of-type { border-top: 0; }
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 13px;
+      background: #f1f4f8;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 2px 6px;
+      overflow-wrap: anywhere;
+    }
+    .small { font-size: 13px; }
+    .empty { color: var(--muted); padding: 12px 0 4px; }
+    @media (max-width: 820px) {
+      header { display: block; }
+      button { margin-top: 14px; width: 100%; }
+      .grid, .two { grid-template-columns: 1fr; }
+      .engine-row, .alias-row, .request-row { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <h1>AI CLI Bridge</h1>
+        <p>Local provider facade for Claude Code and Antigravity/Gemini CLI.</p>
+      </div>
+      <button id="refresh">Refresh</button>
+    </header>
+
+    <section class="grid">
+      <div class="panel">
+        <h2>Provider</h2>
+        <span id="provider-pill" class="pill"><span class="dot"></span><span>Loading</span></span>
+        <div id="uptime" class="metric">-</div>
+        <div class="muted small">uptime</div>
+      </div>
+      <div class="panel">
+        <h2>Claude Slot</h2>
+        <div id="claude-inflight" class="metric">-</div>
+        <div class="muted small">requests running</div>
+      </div>
+      <div class="panel">
+        <h2>Gemini Slot</h2>
+        <div id="gemini-inflight" class="metric">-</div>
+        <div class="muted small">requests running</div>
+      </div>
+    </section>
+
+    <section class="grid two">
+      <div class="panel">
+        <h2>Engines</h2>
+        <div id="engines"></div>
+      </div>
+      <div class="panel">
+        <h2>Model Aliases</h2>
+        <div id="aliases"></div>
+      </div>
+    </section>
+
+    <section class="panel" style="margin-top: 14px;">
+      <h2>Recent Calls</h2>
+      <div id="requests"></div>
+    </section>
+  </main>
+  <script>
+    const fmtUptime = (seconds) => {
+      if (!Number.isFinite(seconds)) return '-';
+      const s = Math.floor(seconds % 60);
+      const m = Math.floor((seconds / 60) % 60);
+      const h = Math.floor(seconds / 3600);
+      return h ? h + 'h ' + m + 'm' : m ? m + 'm ' + s + 's' : s + 's';
+    };
+    const clsFor = (ok, busy) => ok ? (busy ? 'busy' : 'ok') : 'down';
+    const pill = (label, cls) => '<span class="pill ' + cls + '"><span class="dot"></span><span>' + label + '</span></span>';
+    const esc = (v) => String(v == null ? '' : v).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+    async function refresh() {
+      const res = await fetch('/dashboard/status');
+      const data = await res.json();
+      document.getElementById('provider-pill').className = 'pill ok';
+      document.querySelector('#provider-pill span:last-child').textContent = data.status;
+      document.getElementById('uptime').textContent = fmtUptime(data.uptime);
+      document.getElementById('claude-inflight').textContent = data.inflight.claude;
+      document.getElementById('gemini-inflight').textContent = data.inflight.gemini;
+
+      document.getElementById('engines').innerHTML = Object.entries(data.engines).map(([name, e]) => {
+        const busy = data.inflight[name] > 0;
+        return '<div class="engine-row">' +
+          '<strong>' + esc(name) + '</strong>' +
+          pill(e.ok ? (busy ? 'busy' : 'online') : 'down', clsFor(e.ok, busy)) +
+          '<code>' + esc(e.url) + '</code>' +
+          '<span class="muted small">' + esc(e.durationMs) + 'ms</span>' +
+        '</div>';
+      }).join('');
+
+      document.getElementById('aliases').innerHTML = data.aliases.map((a) =>
+        '<div class="alias-row">' +
+          '<code>' + esc(a.id) + '</code>' +
+          '<span class="muted">' + esc(a.engine) + '</span>' +
+          '<span class="small">' + esc(a.upstreamModel || 'bridge default') + '</span>' +
+        '</div>'
+      ).join('');
+
+      document.getElementById('requests').innerHTML = data.recentRequests.length ? data.recentRequests.map((r) =>
+        '<div class="request-row">' +
+          '<span class="muted small">' + esc(new Date(r.at).toLocaleTimeString()) + '</span>' +
+          '<code>' + esc(r.alias) + '</code>' +
+          '<span class="muted">' + esc(r.engine) + '</span>' +
+          '<span class="small">' + esc(r.status) + ' / ' + esc(r.durationMs) + 'ms</span>' +
+        '</div>'
+      ).join('') : '<div class="empty">No calls recorded since this provider bridge started.</div>';
+    }
+    document.getElementById('refresh').addEventListener('click', refresh);
+    refresh();
+    setInterval(refresh, 5000);
+  </script>
+</body>
+</html>`;
+}
+
 app.use('/v1', (req, res, next) => {
   if (!API_KEY) return next();
   const token = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
@@ -107,6 +355,34 @@ app.use('/v1', (req, res, next) => {
     return sendError(res, 401, 'Missing or invalid Authorization bearer token.', 'invalid_request_error', 'Authorization');
   }
   next();
+});
+
+app.get(['/', '/dashboard'], (req, res) => {
+  res.type('html').send(dashboardHtml());
+});
+
+app.get('/dashboard/status', async (req, res) => {
+  const [claudeHealth, geminiHealth] = await Promise.all([
+    checkEngineHealth('claude'),
+    checkEngineHealth('gemini'),
+  ]);
+  res.json({
+    status: 'ok',
+    engine: 'provider-bridge',
+    authEnabled: Boolean(API_KEY),
+    uptime: process.uptime(),
+    inflight: { ...inflight },
+    engines: {
+      claude: { url: CLAUDE_BRIDGE_URL, ...claudeHealth },
+      gemini: { url: GEMINI_BRIDGE_URL, ...geminiHealth },
+    },
+    aliases: Object.keys(ALIASES).map((id) => ({
+      id,
+      engine: ALIASES[id].engine,
+      upstreamModel: ALIASES[id].model || null,
+    })),
+    recentRequests,
+  });
 });
 
 app.get('/health', (req, res) => {
