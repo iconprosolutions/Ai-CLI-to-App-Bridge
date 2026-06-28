@@ -51,6 +51,10 @@ const providerKey = cred.key;
 const geminiPath = process.env.GEMINI_PATH || process.env.AGY_PATH || 'agy';
 const claudePath = process.env.CLAUDE_PATH || 'claude';
 
+// Flags (position-independent).
+const OPEN = process.argv.includes('--open') || process.env.BRIDGE_OPEN === '1';
+const FOLLOW = process.argv.includes('--follow');
+
 const ports = {
   claude: Number(process.env.CLAUDE_PORT || process.env.PORT_CLAUDE) || 9002,
   gemini: Number(process.env.GEMINI_PORT || process.env.PORT_GEMINI) || 9003,
@@ -102,6 +106,18 @@ const services = {
     },
   },
 };
+
+const DASHBOARD_URL = `http://127.0.0.1:${ports.provider}/dashboard`;
+
+// The optional positional service-name arg (e.g. `bridge:logs gemini`).
+function parseOnly() {
+  const arg = process.argv[3];
+  return arg && services[arg] ? arg : null;
+}
+
+function serviceNames(only) {
+  return only ? [only] : Object.keys(services);
+}
 
 function pidFile(name) {
   return path.join(RUNTIME_DIR, `${name}.pid`);
@@ -155,6 +171,15 @@ function tailLog(name, n = 15) {
   } catch (_) { /* no log yet */ }
 }
 
+function openUrl(url) {
+  const opener = process.platform === 'darwin' ? 'open'
+    : process.platform === 'win32' ? 'start' : 'xdg-open';
+  try {
+    spawn(opener, [url], { detached: true, stdio: 'ignore' }).unref();
+    console.log(`Opening ${url}`);
+  } catch (_) { /* best effort */ }
+}
+
 function requestHealth(port) {
   return new Promise((resolve) => {
     const req = http.request(
@@ -164,6 +189,29 @@ function requestHealth(port) {
         res.on('data', (chunk) => (data += chunk));
         res.on('end', () => {
           resolve({ ok: res.statusCode >= 200 && res.statusCode < 300, status: res.statusCode, body: data });
+        });
+      },
+    );
+    req.on('timeout', () => req.destroy(new Error('timeout')));
+    req.on('error', (err) => resolve({ ok: false, status: 0, error: err.message }));
+    req.end();
+  });
+}
+
+// Authenticated JSON GET against a local bridge/provider port.
+function httpGetJson(port, pathName) {
+  return new Promise((resolve) => {
+    const headers = {};
+    if (providerKey) headers.Authorization = `Bearer ${providerKey}`;
+    const req = http.request(
+      { hostname: '127.0.0.1', port, path: pathName, method: 'GET', headers, timeout: 4000 },
+      (res) => {
+        let data = '';
+        res.on('data', (c) => (data += c));
+        res.on('end', () => {
+          let body = null;
+          try { body = JSON.parse(data); } catch (_) {}
+          resolve({ ok: res.statusCode >= 200 && res.statusCode < 300, status: res.statusCode, body });
         });
       },
     );
@@ -192,21 +240,22 @@ async function statusOne(name, svc) {
   return { name, svc, pid, owned, health };
 }
 
-async function status() {
-  for (const [name, svc] of Object.entries(services)) {
-    const s = await statusOne(name, svc);
+async function status(only) {
+  for (const name of serviceNames(only)) {
+    const s = await statusOne(name, services[name]);
     const state = s.health.ok ? 'online' : (s.owned ? 'starting/down' : 'offline');
     const owner = s.owned ? `pid ${s.pid}` : 'no launcher pid';
-    console.log(`${name.padEnd(8)} ${state.padEnd(14)} ${owner.padEnd(18)} http://127.0.0.1:${svc.port}`);
+    console.log(`${name.padEnd(8)} ${state.padEnd(14)} ${owner.padEnd(18)} http://127.0.0.1:${services[name].port}`);
   }
-  console.log(`\nDashboard: http://127.0.0.1:${ports.provider}/dashboard`);
+  console.log(`\nDashboard: ${DASHBOARD_URL}`);
   console.log(`API key (${cred.source}): ${providerKey}`);
 }
 
-async function up() {
+async function up(only) {
   ensureRuntimeDir();
   console.log(`Provider API key (${cred.source}): ${providerKey}`);
-  for (const [name, svc] of Object.entries(services)) {
+  for (const name of serviceNames(only)) {
+    const svc = services[name];
     const existing = await statusOne(name, svc);
     if (existing.health.ok) {
       console.log(`${name}: already online at http://127.0.0.1:${svc.port}`);
@@ -248,13 +297,18 @@ async function up() {
     console.log(`${name}: started pid ${child.pid}`);
     await waitForHealth(name, svc.port, () => exitedEarly);
   }
-  console.log(`\nOpen the dashboard: http://127.0.0.1:${ports.provider}/dashboard`);
+  console.log(`\nOpen the dashboard: ${DASHBOARD_URL}`);
   console.log(`Use this API key in the dashboard tester: ${providerKey}`);
+  if (OPEN) {
+    const health = await requestHealth(ports.provider);
+    if (health.ok) openUrl(DASHBOARD_URL);
+    else console.log('(--open skipped: provider not healthy yet)');
+  }
 }
 
-async function down() {
+async function down(only) {
   ensureRuntimeDir();
-  for (const [name] of Object.entries(services).reverse()) {
+  for (const name of serviceNames(only).reverse()) {
     const pid = readPid(name);
     if (!pid || !isPidAlive(pid)) {
       console.log(`${name}: no launcher-owned process running`);
@@ -267,13 +321,105 @@ async function down() {
   }
 }
 
+async function restart(only) {
+  await down(only);
+  await new Promise((r) => setTimeout(r, 500));
+  await up(only);
+}
+
+// Print available model routes + each engine's reported model catalogue.
+// Read-only: reuses the bridges' existing /models (cached); never POSTs a
+// completion, so it costs no quota.
+async function probe() {
+  const dash = await httpGetJson(ports.provider, '/dashboard/status');
+  if (!dash.ok || !dash.body) {
+    console.error(`probe: provider not reachable on ${ports.provider} (${dash.status || dash.error}). Run "npm run bridge:up" first.`);
+    process.exitCode = 1;
+    return;
+  }
+  const routes = dash.body.routes || [];
+  console.log('Provider routes (use the id as the `model`):\n');
+  for (const r of routes) {
+    console.log(`  ${String(r.id).padEnd(44)} ${String(r.engine).padEnd(8)} → ${r.upstreamModel}`);
+  }
+  const [cl, ge] = await Promise.all([
+    httpGetJson(ports.claude, '/models'),
+    httpGetJson(ports.gemini, '/models'),
+  ]);
+  const list = (r) => (r.ok && Array.isArray(r.body)
+    ? (r.body.map((m) => m.name || m.id).join(', ') || '(none reported)')
+    : `unreachable (${r.status || r.error})`);
+  console.log('\nEngine model catalogues (engine-reported, availability is per-account for Gemini):');
+  console.log(`  claude: ${list(cl)}`);
+  console.log(`  gemini: ${list(ge)}`);
+}
+
+// Write a paste-ready connection bundle (base URL, key, routes, snippets)
+// to .bridge-runtime/connection.json, single-sourced from the live provider.
+async function connect() {
+  ensureRuntimeDir();
+  const baseUrl = `http://127.0.0.1:${ports.provider}/v1`;
+  const dash = await httpGetJson(ports.provider, '/dashboard/status');
+  const routes = (dash.ok && dash.body && dash.body.routes) || [];
+  const defaultRoute = (dash.ok && dash.body && dash.body.defaultRoute) || 'bridge-agy-gemini-3.5-flash-medium-pulse';
+  if (!dash.ok) console.log(`(provider not reachable — writing config with defaults; run "npm run bridge:up" to refresh routes)`);
+
+  const modelLines = routes.length
+    ? routes.map((r) => `      - ${r.id}`).join('\n')
+    : `      - ${defaultRoute}`;
+  const conn = {
+    baseUrl,
+    apiKey: providerKey,
+    defaultRoute,
+    routes: routes.map((r) => ({ id: r.id, engine: r.engine, upstreamModel: r.upstreamModel })),
+    generatedAt: new Date().toISOString(),
+    snippets: {
+      curl: `curl ${baseUrl}/chat/completions -H "Authorization: Bearer ${providerKey}" -H "Content-Type: application/json" -d '{"model":"${defaultRoute}","messages":[{"role":"user","content":"Hello"}]}'`,
+      openaiPython: `from openai import OpenAI\nclient = OpenAI(base_url="${baseUrl}", api_key="${providerKey}")`,
+      hermesEnv: `AI_CLI_BRIDGE_API_KEY=${providerKey}`,
+      hermesConfig: `providers:\n  ai-cli-bridge:\n    type: openai\n    base_url: ${baseUrl}\n    api_key: \${AI_CLI_BRIDGE_API_KEY}\n    models:\n${modelLines}`,
+    },
+  };
+  const file = path.join(RUNTIME_DIR, 'connection.json');
+  fs.writeFileSync(file, `${JSON.stringify(conn, null, 2)}\n`);
+  console.log(`Wrote ${path.relative(ROOT, file)}`);
+  console.log(`Base URL: ${baseUrl}`);
+  console.log(`API key:  ${providerKey}`);
+  console.log(`Default:  ${defaultRoute}`);
+  console.log(`\nHermes (~/.hermes/config.yaml):\n${conn.snippets.hermesConfig}`);
+}
+
+function logs(only, follow) {
+  const names = serviceNames(only);
+  if (follow) {
+    const files = names.map(logFile).filter((f) => fs.existsSync(f));
+    if (!files.length) {
+      console.log('No logs yet. Start the bridges with "npm run bridge:up".');
+      return undefined;
+    }
+    spawn('tail', ['-n', '40', '-f', ...files], { stdio: 'inherit' });
+    return new Promise(() => {}); // run until Ctrl-C
+  }
+  for (const name of names) {
+    console.log(`=== ${name} (${path.relative(ROOT, logFile(name))}) ===`);
+    tailLog(name, 40);
+  }
+  return undefined;
+}
+
 async function main() {
   const command = process.argv[2] || 'status';
-  if (command === 'up') return up();
-  if (command === 'down') return down();
-  if (command === 'status') return status();
-  console.error('Usage: npm run bridge:up | bridge:down | bridge:status   [-- --insecure]');
+  const only = parseOnly();
+  if (command === 'up') return up(only);
+  if (command === 'down') return down(only);
+  if (command === 'status') return status(only);
+  if (command === 'restart') return restart(only);
+  if (command === 'probe') return probe();
+  if (command === 'connect') return connect();
+  if (command === 'logs') return logs(only, FOLLOW);
+  console.error('Usage: bridge.js <up|down|status|restart|probe|connect|logs> [service] [--open|--follow|--insecure]');
   process.exitCode = 2;
+  return undefined;
 }
 
 main().catch((err) => {
