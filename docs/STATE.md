@@ -5,8 +5,9 @@
 - Provider bridge v1 is implemented and committed.
 - Gemini/Antigravity provider path is verified with real `agy`.
 - Claude provider path is verified through the provider bridge.
-- Provider bridge now includes a local browser dashboard at `/` and `/dashboard`.
-- Tests pass with 54 bridge hardening checks and 104 provider checks.
+- Provider bridge now includes a local browser dashboard at `/` and `/dashboard`, including a prompt tester.
+- Local launcher scripts are available through `npm run bridge:up`, `npm run bridge:down`, and `npm run bridge:status`.
+- Tests pass with bridge hardening and provider checks.
 
 ## Local Test Ports
 
@@ -16,6 +17,5 @@
 
 ## Known Gaps
 
-- No runbook yet.
-- No one-command local launcher yet.
 - Docker not installed locally and not currently needed.
+- No always-on LaunchAgent/NAS service yet.

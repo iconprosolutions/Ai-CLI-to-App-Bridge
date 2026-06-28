@@ -155,6 +155,8 @@ async function main() {
   assert(r.status === 200, 'dashboard root returns 200');
   assert((r.headers['content-type'] || '').includes('text/html'), 'dashboard root returns HTML');
   assert(r.body.includes('AI CLI Bridge'), 'dashboard HTML includes title');
+  assert(r.body.includes('Prompt Tester'), 'dashboard HTML includes prompt tester');
+  assert(r.body.includes('/v1/chat/completions'), 'dashboard can call provider completions');
   r = await request(OPEN_PORT, { path: '/dashboard/status' });
   assert(r.status === 200, 'dashboard status returns 200');
   const dashboard = JSON.parse(r.body || '{}');

@@ -9,3 +9,4 @@
 - Verified provider to Gemini 3.5 Flash and Gemini 3.1 Pro end to end.
 - Verified provider to Claude end to end.
 - Added the provider dashboard for local health, aliases, inflight counts, and recent non-sensitive calls.
+- Added dashboard prompt testing and a local three-process bridge launcher.

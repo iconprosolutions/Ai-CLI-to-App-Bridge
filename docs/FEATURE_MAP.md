@@ -6,7 +6,8 @@
 - Claude HTTP bridge: app-facing HTTP wrapper around Claude Code print mode.
 - Gemini/Antigravity HTTP bridge: app-facing HTTP wrapper around Antigravity `agy --print`.
 - Provider bridge: private OpenAI-style `/v1` facade for Waqar's own apps.
-- Provider dashboard: local browser view for provider health, engine reachability, aliases, inflight counts, and recent non-sensitive calls.
+- Provider dashboard: local browser view for provider health, engine reachability, aliases, inflight counts, recent non-sensitive calls, and quick prompt tests.
+- Local launcher: `npm run bridge:up`, `npm run bridge:status`, and `npm run bridge:down` manage the three local HTTP bridge processes when they were started by the launcher.
 
 ## Working Model Aliases
 

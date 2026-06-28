@@ -188,8 +188,44 @@ function dashboardHtml() {
       cursor: pointer;
     }
     button:hover { border-color: var(--accent); }
+    select, textarea, input {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #ffffff;
+      color: var(--text);
+      font: inherit;
+    }
+    select, input { min-height: 38px; padding: 0 10px; }
+    textarea {
+      min-height: 118px;
+      resize: vertical;
+      padding: 10px;
+      line-height: 1.4;
+    }
+    label {
+      display: block;
+      margin: 0 0 6px;
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 650;
+    }
+    pre {
+      min-height: 118px;
+      margin: 0;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 10px;
+      background: #f8fafc;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 13px;
+      line-height: 1.4;
+    }
     .grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
     .two { grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr); margin-top: 14px; }
+    .tester-grid { grid-template-columns: minmax(0, .9fr) minmax(0, 1.1fr); margin-top: 14px; }
     .panel {
       background: var(--panel);
       border: 1px solid var(--line);
@@ -237,10 +273,14 @@ function dashboardHtml() {
     }
     .small { font-size: 13px; }
     .empty { color: var(--muted); padding: 12px 0 4px; }
+    .form-row { margin-top: 12px; }
+    .actions { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
+    .actions button { background: var(--accent); border-color: var(--accent); color: white; }
+    .actions button:disabled { cursor: wait; opacity: .7; }
     @media (max-width: 820px) {
       header { display: block; }
       button { margin-top: 14px; width: 100%; }
-      .grid, .two { grid-template-columns: 1fr; }
+      .grid, .two, .tester-grid { grid-template-columns: 1fr; }
       .engine-row, .alias-row, .request-row { grid-template-columns: 1fr; }
     }
   </style>
@@ -285,6 +325,32 @@ function dashboardHtml() {
       </div>
     </section>
 
+    <section class="grid tester-grid">
+      <div class="panel">
+        <h2>Prompt Tester</h2>
+        <div class="form-row">
+          <label for="api-key">Provider API Key</label>
+          <input id="api-key" type="password" autocomplete="off" placeholder="Bearer token">
+        </div>
+        <div class="form-row">
+          <label for="model">Model Alias</label>
+          <select id="model"></select>
+        </div>
+        <div class="form-row">
+          <label for="prompt">Prompt</label>
+          <textarea id="prompt">Reply with exactly: bridge-dashboard-ok</textarea>
+        </div>
+        <div class="actions">
+          <button id="run-test">Run</button>
+          <span id="tester-status" class="muted small">Ready</span>
+        </div>
+      </div>
+      <div class="panel">
+        <h2>Response</h2>
+        <pre id="tester-output">No response yet.</pre>
+      </div>
+    </section>
+
     <section class="panel" style="margin-top: 14px;">
       <h2>Recent Calls</h2>
       <div id="requests"></div>
@@ -301,6 +367,8 @@ function dashboardHtml() {
     const clsFor = (ok, busy) => ok ? (busy ? 'busy' : 'ok') : 'down';
     const pill = (label, cls) => '<span class="pill ' + cls + '"><span class="dot"></span><span>' + label + '</span></span>';
     const esc = (v) => String(v == null ? '' : v).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const apiKey = document.getElementById('api-key');
+    apiKey.value = localStorage.getItem('providerApiKey') || '';
 
     async function refresh() {
       const res = await fetch('/dashboard/status');
@@ -337,8 +405,50 @@ function dashboardHtml() {
           '<span class="small">' + esc(r.status) + ' / ' + esc(r.durationMs) + 'ms</span>' +
         '</div>'
       ).join('') : '<div class="empty">No calls recorded since this provider bridge started.</div>';
+
+      const model = document.getElementById('model');
+      const selected = model.value || 'auto-fast';
+      model.innerHTML = data.aliases.map((a) =>
+        '<option value="' + esc(a.id) + '">' + esc(a.id) + ' - ' + esc(a.engine) + '</option>'
+      ).join('');
+      model.value = data.aliases.some((a) => a.id === selected) ? selected : 'auto-fast';
+    }
+
+    async function runPrompt() {
+      const button = document.getElementById('run-test');
+      const status = document.getElementById('tester-status');
+      const output = document.getElementById('tester-output');
+      localStorage.setItem('providerApiKey', apiKey.value);
+      button.disabled = true;
+      status.textContent = 'Running';
+      output.textContent = '';
+      try {
+        const res = await fetch('/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Authorization': 'Bearer ' + apiKey.value,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            model: document.getElementById('model').value,
+            messages: [{ role: 'user', content: document.getElementById('prompt').value }],
+          }),
+        });
+        const data = await res.json();
+        output.textContent = data.choices && data.choices[0]
+          ? data.choices[0].message.content
+          : JSON.stringify(data, null, 2);
+        status.textContent = res.ok ? 'Done' : 'Error ' + res.status;
+      } catch (err) {
+        output.textContent = err.message;
+        status.textContent = 'Network error';
+      } finally {
+        button.disabled = false;
+        refresh();
+      }
     }
     document.getElementById('refresh').addEventListener('click', refresh);
+    document.getElementById('run-test').addEventListener('click', runPrompt);
     refresh();
     setInterval(refresh, 5000);
   </script>

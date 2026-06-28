@@ -2,13 +2,13 @@
 
 ## Now
 
-- Add a local runbook for the three-process startup flow.
-- Restart the provider bridge and use the dashboard during manual testing.
-- Connect one real app to `http://127.0.0.1:9010/v1/chat/completions`.
+- Use the one-command launcher and dashboard for manual testing.
+- Connect one real app to `http://127.0.0.1:9011/v1/chat/completions`.
 
 ## Next
 
-- Add a small local launcher script so Gemini bridge, Claude bridge, and provider bridge can start together.
+- Add an always-on Mac LaunchAgent once the local workflow feels stable.
+- Add a fuller runbook for app integration examples.
 - Decide whether streaming is needed after one real app uses provider mode successfully.
 
 ## Later

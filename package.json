@@ -4,7 +4,10 @@
   "private": true,
   "description": "HTTP bridges wrapping the Claude and Gemini CLIs, plus an MCP delegate.",
   "scripts": {
+    "bridge:up": "node scripts/bridge.js up",
+    "bridge:down": "node scripts/bridge.js down",
+    "bridge:status": "node scripts/bridge.js status",
     "test": "node tests/security.test.js && node tests/provider.test.js",
-    "check": "node --check claude-bridge/server.js && node --check gemini-bridge/server.js && node --check provider-bridge/server.js && node --check tests/security.test.js && node --check tests/provider.test.js"
+    "check": "node --check claude-bridge/server.js && node --check gemini-bridge/server.js && node --check provider-bridge/server.js && node --check scripts/bridge.js && node --check tests/security.test.js && node --check tests/provider.test.js"
   }
 }
