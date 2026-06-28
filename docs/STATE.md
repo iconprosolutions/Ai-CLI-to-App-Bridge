@@ -7,7 +7,8 @@
 - Claude provider path is verified through the provider bridge.
 - Provider bridge now includes a local browser dashboard at `/` and `/dashboard`, including a prompt tester.
 - Local launcher scripts are available through `npm run bridge:up`, `npm run bridge:down`, and `npm run bridge:status`.
-- Tests pass with bridge hardening and provider checks.
+- Public app-facing model routes are now `bridge-fast`, `bridge-smart`, `bridge-long`, and `bridge-deep`, with direct `gemini-*` and `claude-*` routes available.
+- Tests pass with 54 bridge hardening checks and 114 provider checks.
 
 ## Local Test Ports
 

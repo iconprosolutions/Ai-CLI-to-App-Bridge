@@ -28,16 +28,74 @@ const ENGINES = {
   gemini: { url: GEMINI_BRIDGE_URL },
 };
 
-const ALIASES = {
-  'auto-reasoning': { engine: 'claude' },
-  'auto-fast': { engine: 'gemini' },
-  'auto-long-context': { engine: 'gemini' },
-  'claude-subscription-default': { engine: 'claude' },
-  'claude-subscription-sonnet': { engine: 'claude', model: 'claude-sonnet-4-6' },
-  'claude-subscription-opus': { engine: 'claude', model: 'claude-opus-4-5' },
-  'gemini-cli-flash': { engine: 'gemini' },
-  'gemini-cli-pro': { engine: 'gemini', model: 'Gemini 3.1 Pro (Low)' },
-};
+const ROUTES = [
+  {
+    id: 'bridge-fast',
+    label: 'Fast',
+    engine: 'gemini',
+    model: 'Gemini 3.5 Flash (Low)',
+    bestFor: 'Quick app calls, summaries, drafts',
+  },
+  {
+    id: 'bridge-smart',
+    label: 'Smart',
+    engine: 'claude',
+    model: 'claude-sonnet-4-6',
+    bestFor: 'Planning, coding, careful reasoning',
+  },
+  {
+    id: 'bridge-long',
+    label: 'Long Context',
+    engine: 'gemini',
+    model: 'Gemini 3.1 Pro (Low)',
+    bestFor: 'Long documents and broad project scans',
+  },
+  {
+    id: 'bridge-deep',
+    label: 'Deep',
+    engine: 'claude',
+    model: 'claude-opus-4-5',
+    bestFor: 'Hard reasoning when limits allow',
+  },
+  {
+    id: 'gemini-flash',
+    label: 'Gemini Flash',
+    engine: 'gemini',
+    model: 'Gemini 3.5 Flash (Low)',
+    bestFor: 'Direct Gemini fast route',
+  },
+  {
+    id: 'gemini-pro',
+    label: 'Gemini Pro',
+    engine: 'gemini',
+    model: 'Gemini 3.1 Pro (Low)',
+    bestFor: 'Direct Gemini stronger route',
+  },
+  {
+    id: 'claude-sonnet',
+    label: 'Claude Sonnet',
+    engine: 'claude',
+    model: 'claude-sonnet-4-6',
+    bestFor: 'Direct Claude Sonnet route',
+  },
+  {
+    id: 'claude-opus',
+    label: 'Claude Opus',
+    engine: 'claude',
+    model: 'claude-opus-4-5',
+    bestFor: 'Direct Claude Opus route',
+  },
+  { id: 'auto-fast', hidden: true, legacyOf: 'bridge-fast', engine: 'gemini', model: 'Gemini 3.5 Flash (Low)' },
+  { id: 'auto-reasoning', hidden: true, legacyOf: 'bridge-smart', engine: 'claude', model: 'claude-sonnet-4-6' },
+  { id: 'auto-long-context', hidden: true, legacyOf: 'bridge-long', engine: 'gemini', model: 'Gemini 3.1 Pro (Low)' },
+  { id: 'gemini-cli-flash', hidden: true, legacyOf: 'gemini-flash', engine: 'gemini', model: 'Gemini 3.5 Flash (Low)' },
+  { id: 'gemini-cli-pro', hidden: true, legacyOf: 'gemini-pro', engine: 'gemini', model: 'Gemini 3.1 Pro (Low)' },
+  { id: 'claude-subscription-default', hidden: true, legacyOf: 'bridge-smart', engine: 'claude', model: 'claude-sonnet-4-6' },
+  { id: 'claude-subscription-sonnet', hidden: true, legacyOf: 'claude-sonnet', engine: 'claude', model: 'claude-sonnet-4-6' },
+  { id: 'claude-subscription-opus', hidden: true, legacyOf: 'claude-opus', engine: 'claude', model: 'claude-opus-4-5' },
+];
+const ALIASES = Object.fromEntries(ROUTES.map((route) => [route.id, route]));
+const VISIBLE_ROUTES = ROUTES.filter((route) => !route.hidden);
 
 const inflight = { claude: 0, gemini: 0 };
 const recentRequests = [];
@@ -165,7 +223,7 @@ function dashboardHtml() {
       color: var(--text);
       font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     }
-    main { max-width: 1120px; margin: 0 auto; padding: 28px 18px 40px; }
+    main { max-width: 1280px; margin: 0 auto; padding: 28px 18px 40px; }
     header {
       display: flex;
       align-items: flex-start;
@@ -224,7 +282,8 @@ function dashboardHtml() {
       line-height: 1.4;
     }
     .grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
-    .two { grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr); margin-top: 14px; }
+    .overview-grid { grid-template-columns: .9fr .75fr .75fr 1.4fr; }
+    .two { grid-template-columns: minmax(0, .9fr) minmax(0, 1.5fr); margin-top: 14px; }
     .tester-grid { grid-template-columns: minmax(0, .9fr) minmax(0, 1.1fr); margin-top: 14px; }
     .panel {
       background: var(--panel);
@@ -251,17 +310,17 @@ function dashboardHtml() {
     .ok .dot { background: var(--good); }
     .down .dot { background: var(--bad); }
     .busy .dot { background: var(--warn); }
-    .engine-row, .alias-row, .request-row {
+    .engine-row, .model-row, .request-row {
       display: grid;
       gap: 8px;
       align-items: center;
       padding: 10px 0;
       border-top: 1px solid var(--line);
     }
-    .engine-row { grid-template-columns: 110px 110px 1fr 90px; }
-    .alias-row { grid-template-columns: 1.2fr 90px 1fr; }
-    .request-row { grid-template-columns: 88px 1fr 90px 88px; }
-    .engine-row:first-of-type, .alias-row:first-of-type, .request-row:first-of-type { border-top: 0; }
+    .engine-row { grid-template-columns: 86px 96px minmax(0, 1fr) 62px; }
+    .model-row { grid-template-columns: minmax(150px, .8fr) minmax(120px, .6fr) minmax(180px, 1fr) minmax(180px, 1fr); }
+    .request-row { grid-template-columns: 88px minmax(140px, 1fr) 90px 88px; }
+    .engine-row:first-of-type, .model-row:first-of-type, .request-row:first-of-type { border-top: 0; }
     code {
       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       font-size: 13px;
@@ -271,6 +330,17 @@ function dashboardHtml() {
       padding: 2px 6px;
       overflow-wrap: anywhere;
     }
+    .kv {
+      display: grid;
+      grid-template-columns: 78px minmax(0, 1fr);
+      gap: 8px;
+      align-items: center;
+      margin-top: 10px;
+    }
+    .kv span, .model-meta { color: var(--muted); font-size: 13px; }
+    .model-name { font-weight: 750; }
+    .model-id { margin-top: 3px; }
+    .model-id code, .kv code, .engine-row code, .request-row code { display: block; width: 100%; }
     .small { font-size: 13px; }
     .empty { color: var(--muted); padding: 12px 0 4px; }
     .form-row { margin-top: 12px; }
@@ -280,8 +350,8 @@ function dashboardHtml() {
     @media (max-width: 820px) {
       header { display: block; }
       button { margin-top: 14px; width: 100%; }
-      .grid, .two, .tester-grid { grid-template-columns: 1fr; }
-      .engine-row, .alias-row, .request-row { grid-template-columns: 1fr; }
+      .grid, .overview-grid, .two, .tester-grid { grid-template-columns: 1fr; }
+      .engine-row, .model-row, .request-row, .kv { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -295,7 +365,7 @@ function dashboardHtml() {
       <button id="refresh">Refresh</button>
     </header>
 
-    <section class="grid">
+    <section class="grid overview-grid">
       <div class="panel">
         <h2>Provider</h2>
         <span id="provider-pill" class="pill"><span class="dot"></span><span>Loading</span></span>
@@ -312,6 +382,12 @@ function dashboardHtml() {
         <div id="gemini-inflight" class="metric">-</div>
         <div class="muted small">requests running</div>
       </div>
+      <div class="panel">
+        <h2>App Connection</h2>
+        <div class="kv"><span>Base</span><code id="base-url">-</code></div>
+        <div class="kv"><span>Header</span><code>Authorization: Bearer &lt;key&gt;</code></div>
+        <div class="kv"><span>Default</span><code>bridge-fast</code></div>
+      </div>
     </section>
 
     <section class="grid two">
@@ -320,7 +396,7 @@ function dashboardHtml() {
         <div id="engines"></div>
       </div>
       <div class="panel">
-        <h2>Model Aliases</h2>
+        <h2>Models For Apps</h2>
         <div id="aliases"></div>
       </div>
     </section>
@@ -333,7 +409,7 @@ function dashboardHtml() {
           <input id="api-key" type="password" autocomplete="off" placeholder="Bearer token">
         </div>
         <div class="form-row">
-          <label for="model">Model Alias</label>
+          <label for="model">Model Route</label>
           <select id="model"></select>
         </div>
         <div class="form-row">
@@ -378,6 +454,7 @@ function dashboardHtml() {
       document.getElementById('uptime').textContent = fmtUptime(data.uptime);
       document.getElementById('claude-inflight').textContent = data.inflight.claude;
       document.getElementById('gemini-inflight').textContent = data.inflight.gemini;
+      document.getElementById('base-url').textContent = data.connection.baseUrl;
 
       document.getElementById('engines').innerHTML = Object.entries(data.engines).map(([name, e]) => {
         const busy = data.inflight[name] > 0;
@@ -390,28 +467,29 @@ function dashboardHtml() {
       }).join('');
 
       document.getElementById('aliases').innerHTML = data.aliases.map((a) =>
-        '<div class="alias-row">' +
-          '<code>' + esc(a.id) + '</code>' +
-          '<span class="muted">' + esc(a.engine) + '</span>' +
-          '<span class="small">' + esc(a.upstreamModel || 'bridge default') + '</span>' +
+        '<div class="model-row">' +
+          '<div><div class="model-name">' + esc(a.label) + '</div><div class="model-id"><code>' + esc(a.id) + '</code></div></div>' +
+          '<span class="model-meta">' + esc(a.engine) + '</span>' +
+          '<span class="small">' + esc(a.bestFor) + '</span>' +
+          '<span class="small">' + esc(a.upstreamModel) + '</span>' +
         '</div>'
       ).join('');
 
       document.getElementById('requests').innerHTML = data.recentRequests.length ? data.recentRequests.map((r) =>
         '<div class="request-row">' +
           '<span class="muted small">' + esc(new Date(r.at).toLocaleTimeString()) + '</span>' +
-          '<code>' + esc(r.alias) + '</code>' +
+          '<div><div class="model-name">' + esc(r.label || r.alias) + '</div><div class="model-id"><code>' + esc(r.alias) + '</code></div></div>' +
           '<span class="muted">' + esc(r.engine) + '</span>' +
           '<span class="small">' + esc(r.status) + ' / ' + esc(r.durationMs) + 'ms</span>' +
         '</div>'
       ).join('') : '<div class="empty">No calls recorded since this provider bridge started.</div>';
 
       const model = document.getElementById('model');
-      const selected = model.value || 'auto-fast';
+      const selected = model.value || 'bridge-fast';
       model.innerHTML = data.aliases.map((a) =>
-        '<option value="' + esc(a.id) + '">' + esc(a.id) + ' - ' + esc(a.engine) + '</option>'
+        '<option value="' + esc(a.id) + '">' + esc(a.label) + ' - ' + esc(a.id) + '</option>'
       ).join('');
-      model.value = data.aliases.some((a) => a.id === selected) ? selected : 'auto-fast';
+      model.value = data.aliases.some((a) => a.id === selected) ? selected : 'bridge-fast';
     }
 
     async function runPrompt() {
@@ -476,6 +554,7 @@ app.get('/dashboard/status', async (req, res) => {
     checkEngineHealth('claude'),
     checkEngineHealth('gemini'),
   ]);
+  const origin = `${req.protocol}://${req.get('host')}`;
   res.json({
     status: 'ok',
     engine: 'provider-bridge',
@@ -486,12 +565,22 @@ app.get('/dashboard/status', async (req, res) => {
       claude: { url: CLAUDE_BRIDGE_URL, ...claudeHealth },
       gemini: { url: GEMINI_BRIDGE_URL, ...geminiHealth },
     },
-    aliases: Object.keys(ALIASES).map((id) => ({
-      id,
-      engine: ALIASES[id].engine,
-      upstreamModel: ALIASES[id].model || null,
+    connection: {
+      baseUrl: `${origin}/v1`,
+      chatCompletionsUrl: `${origin}/v1/chat/completions`,
+      authHeader: API_KEY ? 'Authorization: Bearer <key>' : 'none',
+    },
+    aliases: VISIBLE_ROUTES.map((route) => ({
+      id: route.id,
+      label: route.label,
+      engine: route.engine,
+      bestFor: route.bestFor,
+      upstreamModel: route.model,
     })),
-    recentRequests,
+    recentRequests: recentRequests.map((request) => ({
+      ...request,
+      label: ALIASES[request.alias] ? ALIASES[request.alias].label || ALIASES[request.alias].legacyOf : request.alias,
+    })),
   });
 });
 
@@ -507,11 +596,11 @@ app.get('/health', (req, res) => {
 
 app.get('/v1/models', (req, res) => {
   const created = Math.floor(Date.now() / 1000);
-  const data = Object.keys(ALIASES).map((id) => ({
-    id,
+  const data = VISIBLE_ROUTES.map((route) => ({
+    id: route.id,
     object: 'model',
     created,
-    owned_by: ALIASES[id].engine,
+    owned_by: route.engine,
   }));
   res.json({ object: 'list', data });
 });
@@ -543,7 +632,7 @@ app.post('/v1/chat/completions', async (req, res) => {
   const mapping = ALIASES[alias];
   if (!mapping) {
     logEnd(400, '-');
-    return sendError(res, 400, `Model "${alias}" is not a known provider alias.`, 'invalid_model', 'model');
+    return sendError(res, 400, `Model "${alias}" is not a known provider route.`, 'invalid_model', 'model');
   }
 
   const messages = body.messages;

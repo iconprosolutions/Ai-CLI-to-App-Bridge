@@ -131,11 +131,14 @@ async function main() {
   assert(Array.isArray(modelsBody.data), 'models payload data is array');
   const ids = modelsBody.data.map((m) => m.id);
   for (const expected of [
-    'auto-reasoning', 'auto-fast', 'auto-long-context',
-    'claude-subscription-default', 'claude-subscription-sonnet', 'claude-subscription-opus',
-    'gemini-cli-flash', 'gemini-cli-pro',
+    'bridge-fast', 'bridge-smart', 'bridge-long', 'bridge-deep',
+    'gemini-flash', 'gemini-pro',
+    'claude-sonnet', 'claude-opus',
   ]) {
     assert(ids.includes(expected), `alias exposed: ${expected}`);
+  }
+  for (const hidden of ['auto-fast', 'auto-reasoning', 'gemini-cli-pro', 'claude-subscription-sonnet']) {
+    assert(!ids.includes(hidden), `legacy alias hidden from /v1/models: ${hidden}`);
   }
   for (const m of modelsBody.data) {
     assert(m.object === 'model' && (m.owned_by === 'claude' || m.owned_by === 'gemini'),
@@ -166,20 +169,24 @@ async function main() {
     'dashboard status includes both engine health records');
   assert(dashboard.engines.claude.ok === true && dashboard.engines.gemini.ok === true,
     'dashboard status marks fake upstreams online');
-  assert(Array.isArray(dashboard.aliases) && dashboard.aliases.some((a) => a.id === 'auto-fast'),
+  assert(Array.isArray(dashboard.aliases) && dashboard.aliases.some((a) => a.id === 'bridge-fast'),
     'dashboard status includes aliases');
+  assert(dashboard.aliases.some((a) => a.label === 'Smart' && a.bestFor.includes('Planning')),
+    'dashboard status includes friendly model labels and usage guidance');
+  assert(dashboard.connection && dashboard.connection.baseUrl.endsWith('/v1'),
+    'dashboard status includes app connection base URL');
   assert(Array.isArray(dashboard.recentRequests), 'dashboard status includes recent request list');
 
   console.log('\n## POST /v1/chat/completions — Claude routing + shape');
   r = await request(OPEN_PORT, {
     path: '/v1/chat/completions', method: 'POST',
-    body: { model: 'auto-reasoning', messages: [{ role: 'user', content: 'hi there' }] },
+    body: { model: 'bridge-smart', messages: [{ role: 'user', content: 'hi there' }] },
   });
-  assert(r.status === 200, 'auto-reasoning returns 200');
+  assert(r.status === 200, 'bridge-smart returns 200');
   let completion = JSON.parse(r.body || '{}');
   assert(completion.object === 'chat.completion', 'object is chat.completion');
   assert(completion.id && String(completion.id).startsWith('chatcmpl-'), 'id has chatcmpl- prefix');
-  assert(completion.model === 'auto-reasoning', 'echoes requested model alias');
+  assert(completion.model === 'bridge-smart', 'echoes requested model alias');
   assert(completion.choices && completion.choices[0].message.role === 'assistant', 'choice[0] is assistant');
   assert(typeof completion.choices[0].message.content === 'string' && completion.choices[0].message.content.length > 0,
     'choice[0].message.content is a non-empty string');
@@ -191,13 +198,13 @@ async function main() {
   assert(typeof lastClaude.body.prompt === 'string' && lastClaude.body.prompt.includes('hi there'),
     'upstream prompt includes message content');
   assert(lastClaude.body.prompt.includes('[USER]'), 'prompt carries clear role labels');
-  assert(lastClaude.body.model === undefined, 'default claude alias does not pin a model upstream');
+  assert(lastClaude.body.model === 'claude-sonnet-4-6', 'bridge-smart pins Claude Sonnet upstream');
 
   console.log('\n## POST /v1/chat/completions — Gemini routing + multi-turn prompt');
   r = await request(OPEN_PORT, {
     path: '/v1/chat/completions', method: 'POST',
     body: {
-      model: 'auto-fast',
+      model: 'bridge-fast',
       messages: [
         { role: 'system', content: 'You are a duck.' },
         { role: 'user', content: 'quack' },
@@ -206,7 +213,7 @@ async function main() {
       ],
     },
   });
-  assert(r.status === 200, 'auto-fast returns 200');
+  assert(r.status === 200, 'bridge-fast returns 200');
   const lastGem = gemini.received[gemini.received.length - 1];
   assert(lastGem.body.prompt.includes('[SYSTEM]') && lastGem.body.prompt.includes('[USER]') && lastGem.body.prompt.includes('[ASSISTANT]'),
     'all three role labels present in prompt');
@@ -216,28 +223,42 @@ async function main() {
   console.log('\n## Model alias → upstream model mapping');
   await request(OPEN_PORT, {
     path: '/v1/chat/completions', method: 'POST',
-    body: { model: 'claude-subscription-sonnet', messages: [{ role: 'user', content: 'x' }] },
+    body: { model: 'claude-sonnet', messages: [{ role: 'user', content: 'x' }] },
   });
   assert(claude.received[claude.received.length - 1].body.model === 'claude-sonnet-4-6',
-    'claude-subscription-sonnet → claude-sonnet-4-6 upstream');
+    'claude-sonnet → claude-sonnet-4-6 upstream');
+  await request(OPEN_PORT, {
+    path: '/v1/chat/completions', method: 'POST',
+    body: { model: 'claude-opus', messages: [{ role: 'user', content: 'x' }] },
+  });
+  assert(claude.received[claude.received.length - 1].body.model === 'claude-opus-4-5',
+    'claude-opus → claude-opus-4-5 upstream');
+  await request(OPEN_PORT, {
+    path: '/v1/chat/completions', method: 'POST',
+    body: { model: 'gemini-pro', messages: [{ role: 'user', content: 'x' }] },
+  });
+  assert(gemini.received[gemini.received.length - 1].body.model === 'Gemini 3.1 Pro (Low)',
+    'gemini-pro → Gemini 3.1 Pro (Low) upstream');
+  await request(OPEN_PORT, {
+    path: '/v1/chat/completions', method: 'POST',
+    body: { model: 'gemini-flash', messages: [{ role: 'user', content: 'x' }] },
+  });
+  assert(gemini.received[gemini.received.length - 1].body.model === 'Gemini 3.5 Flash (Low)',
+    'gemini-flash → Gemini 3.5 Flash (Low) upstream');
+
+  console.log('\n## Legacy aliases still route for old configs');
+  await request(OPEN_PORT, {
+    path: '/v1/chat/completions', method: 'POST',
+    body: { model: 'auto-fast', messages: [{ role: 'user', content: 'x' }] },
+  });
+  assert(gemini.received[gemini.received.length - 1].body.model === 'Gemini 3.5 Flash (Low)',
+    'legacy auto-fast still routes to Gemini Flash');
   await request(OPEN_PORT, {
     path: '/v1/chat/completions', method: 'POST',
     body: { model: 'claude-subscription-opus', messages: [{ role: 'user', content: 'x' }] },
   });
   assert(claude.received[claude.received.length - 1].body.model === 'claude-opus-4-5',
-    'claude-subscription-opus → claude-opus-4-5 upstream');
-  await request(OPEN_PORT, {
-    path: '/v1/chat/completions', method: 'POST',
-    body: { model: 'gemini-cli-pro', messages: [{ role: 'user', content: 'x' }] },
-  });
-  assert(gemini.received[gemini.received.length - 1].body.model === 'Gemini 3.1 Pro (Low)',
-    'gemini-cli-pro → Gemini 3.1 Pro (Low) upstream');
-  await request(OPEN_PORT, {
-    path: '/v1/chat/completions', method: 'POST',
-    body: { model: 'gemini-cli-flash', messages: [{ role: 'user', content: 'x' }] },
-  });
-  assert(gemini.received[gemini.received.length - 1].body.model === undefined,
-    'gemini-cli-flash does not pin a model (uses bridge default)');
+    'legacy claude-subscription-opus still routes to Claude Opus');
 
   console.log('\n## Unsupported parameters → 400 unsupported_parameter');
   for (const [name, val] of [
@@ -251,7 +272,7 @@ async function main() {
   ]) {
     r = await request(OPEN_PORT, {
       path: '/v1/chat/completions', method: 'POST',
-      body: { model: 'auto-reasoning', messages: [{ role: 'user', content: 'x' }], [name]: val },
+      body: { model: 'bridge-smart', messages: [{ role: 'user', content: 'x' }], [name]: val },
     });
     assert(r.status === 400, `${name} rejected with 400`);
     assert(errType(r) === 'unsupported_parameter', `${name} error type unsupported_parameter`);
@@ -262,7 +283,7 @@ async function main() {
   r = await request(OPEN_PORT, {
     path: '/v1/chat/completions', method: 'POST',
     body: {
-      model: 'auto-reasoning',
+      model: 'bridge-smart',
       messages: [{ role: 'user', content: [{ type: 'text', text: 'look at this' }, { type: 'image_url', image_url: { url: 'x' } }] }],
     },
   });
@@ -283,27 +304,27 @@ async function main() {
   console.log('\n## Bad / missing messages → 400 invalid_request_error');
   r = await request(OPEN_PORT, {
     path: '/v1/chat/completions', method: 'POST',
-    body: { model: 'auto-reasoning' },
+    body: { model: 'bridge-smart' },
   });
   assert(r.status === 400 && errType(r) === 'invalid_request_error', 'missing messages rejected');
   r = await request(OPEN_PORT, {
     path: '/v1/chat/completions', method: 'POST',
-    body: { model: 'auto-reasoning', messages: [] },
+    body: { model: 'bridge-smart', messages: [] },
   });
   assert(r.status === 400 && errType(r) === 'invalid_request_error', 'empty messages array rejected');
   r = await request(OPEN_PORT, {
     path: '/v1/chat/completions', method: 'POST',
-    body: { model: 'auto-reasoning', messages: 'hello' },
+    body: { model: 'bridge-smart', messages: 'hello' },
   });
   assert(r.status === 400 && errType(r) === 'invalid_request_error', 'non-array messages rejected');
   r = await request(OPEN_PORT, {
     path: '/v1/chat/completions', method: 'POST',
-    body: { model: 'auto-reasoning', messages: [{ role: 'alien', content: 'x' }] },
+    body: { model: 'bridge-smart', messages: [{ role: 'alien', content: 'x' }] },
   });
   assert(r.status === 400 && errType(r) === 'invalid_request_error', 'bad role rejected');
   r = await request(OPEN_PORT, {
     path: '/v1/chat/completions', method: 'POST',
-    body: { model: 'auto-reasoning', messages: [{ role: 'user', content: 42 }] },
+    body: { model: 'bridge-smart', messages: [{ role: 'user', content: 42 }] },
   });
   assert(r.status === 400 && errType(r) === 'invalid_request_error', 'non-string content rejected');
 
@@ -325,12 +346,12 @@ async function main() {
   r = await request(AUTH_PORT, {
     path: '/v1/chat/completions', method: 'POST',
     headers: { Authorization: 'Bearer prov-secret' },
-    body: { model: 'auto-reasoning', messages: [{ role: 'user', content: 'x' }] },
+    body: { model: 'bridge-smart', messages: [{ role: 'user', content: 'x' }] },
   });
   assert(r.status === 200, 'chat accepted with bearer token under auth');
   r = await request(AUTH_PORT, {
     path: '/v1/chat/completions', method: 'POST',
-    body: { model: 'auto-reasoning', messages: [{ role: 'user', content: 'x' }] },
+    body: { model: 'bridge-smart', messages: [{ role: 'user', content: 'x' }] },
   });
   assert(r.status === 401, 'chat without token rejected under auth');
 
@@ -359,7 +380,7 @@ async function main() {
   await request(UP_PORT, {
     path: '/v1/chat/completions', method: 'POST',
     headers: { Authorization: 'Bearer prov-secret' },
-    body: { model: 'auto-reasoning', messages: [{ role: 'user', content: 'x' }] },
+    body: { model: 'bridge-smart', messages: [{ role: 'user', content: 'x' }] },
   });
   assert(authedClaude.received[authedClaude.received.length - 1].headers.authorization === 'Bearer upstream-key',
     'BRIDGE_API_KEY forwarded as bearer to upstream');
@@ -374,7 +395,7 @@ async function main() {
   });
   await request(UP2_PORT, {
     path: '/v1/chat/completions', method: 'POST',
-    body: { model: 'auto-reasoning', messages: [{ role: 'user', content: 'x' }] },
+    body: { model: 'bridge-smart', messages: [{ role: 'user', content: 'x' }] },
   });
   assert(!bareClaude.received[bareClaude.received.length - 1].headers.authorization,
     'no Authorization header sent upstream when BRIDGE_API_KEY unset');
@@ -389,7 +410,7 @@ async function main() {
   });
   r = await request(FAIL_PORT, {
     path: '/v1/chat/completions', method: 'POST',
-    body: { model: 'auto-reasoning', messages: [{ role: 'user', content: 'x' }] },
+    body: { model: 'bridge-smart', messages: [{ role: 'user', content: 'x' }] },
   });
   assert(r.status === 502, 'upstream 500 mapped to provider 502');
   assert(errType(r) === 'upstream_error', 'upstream error type set');
@@ -405,7 +426,7 @@ async function main() {
   });
   r = await request(DEAD_PORT, {
     path: '/v1/chat/completions', method: 'POST',
-    body: { model: 'auto-reasoning', messages: [{ role: 'user', content: 'x' }] },
+    body: { model: 'bridge-smart', messages: [{ role: 'user', content: 'x' }] },
   });
   assert(r.status === 502 && errType(r) === 'upstream_error', 'connection failure mapped to 502 upstream_error');
 
@@ -421,7 +442,7 @@ async function main() {
   const hangStarted = Date.now();
   r = await request(HANG_PORT, {
     path: '/v1/chat/completions', method: 'POST',
-    body: { model: 'auto-reasoning', messages: [{ role: 'user', content: 'x' }] },
+    body: { model: 'bridge-smart', messages: [{ role: 'user', content: 'x' }] },
   });
   const hangElapsed = Date.now() - hangStarted;
   assert(r.status === 502 && errType(r) === 'upstream_error', 'hung upstream mapped to 502 upstream_error');
@@ -440,11 +461,11 @@ async function main() {
   const [r1, r2] = await Promise.all([
     request(CONC_PORT, {
       path: '/v1/chat/completions', method: 'POST',
-      body: { model: 'auto-reasoning', messages: [{ role: 'user', content: 'first' }] },
+      body: { model: 'bridge-smart', messages: [{ role: 'user', content: 'first' }] },
     }),
     request(CONC_PORT, {
       path: '/v1/chat/completions', method: 'POST',
-      body: { model: 'auto-reasoning', messages: [{ role: 'user', content: 'second' }] },
+      body: { model: 'bridge-smart', messages: [{ role: 'user', content: 'second' }] },
     }),
   ]);
   const ok = r1.status === 200 ? r1 : r2;
@@ -456,14 +477,14 @@ async function main() {
   // Gemini slot is independent — still available while Claude is busy.
   const rGem = await request(CONC_PORT, {
     path: '/v1/chat/completions', method: 'POST',
-    body: { model: 'auto-fast', messages: [{ role: 'user', content: 'ok' }] },
+    body: { model: 'bridge-fast', messages: [{ role: 'user', content: 'ok' }] },
   });
   assert(rGem.status === 200, 'gemini slot independent of claude load');
 
   console.log('\n## After Claude slot frees, requests flow again');
   r = await request(CONC_PORT, {
     path: '/v1/chat/completions', method: 'POST',
-    body: { model: 'auto-reasoning', messages: [{ role: 'user', content: 'after' }] },
+    body: { model: 'bridge-smart', messages: [{ role: 'user', content: 'after' }] },
   });
   assert(r.status === 200, 'claude slot released after completion (inflight decremented)');
 

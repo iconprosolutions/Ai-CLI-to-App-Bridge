@@ -51,8 +51,31 @@ Send:
 Authorization: Bearer test-key
 ```
 
-Useful model aliases:
+Recommended model routes:
 
-- `auto-fast` for Antigravity/Gemini Flash
-- `gemini-cli-pro` for Antigravity/Gemini Pro
-- `auto-reasoning` for Claude
+- `bridge-fast` for quick app calls, summaries, and drafts.
+- `bridge-smart` for planning, coding, and careful reasoning through Claude Sonnet.
+- `bridge-long` for long documents and broad project scans through Gemini Pro.
+- `bridge-deep` for hard reasoning through Claude Opus when usage limits allow.
+
+Provider-specific routes are also available when you deliberately want one engine:
+
+- `gemini-flash`
+- `gemini-pro`
+- `claude-sonnet`
+- `claude-opus`
+
+OpenAI SDK-style clients should use:
+
+```text
+Base URL: http://127.0.0.1:9011/v1
+API Key: test-key
+Model: bridge-fast
+```
+
+Raw HTTP clients should call:
+
+```text
+POST http://127.0.0.1:9011/v1/chat/completions
+Authorization: Bearer test-key
+```

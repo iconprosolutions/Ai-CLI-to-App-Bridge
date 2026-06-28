@@ -9,13 +9,15 @@
 - Provider dashboard: local browser view for provider health, engine reachability, aliases, inflight counts, recent non-sensitive calls, and quick prompt tests.
 - Local launcher: `npm run bridge:up`, `npm run bridge:status`, and `npm run bridge:down` manage the three local HTTP bridge processes when they were started by the launcher.
 
-## Working Model Aliases
+## Working Model Routes
 
-- `auto-fast`: Gemini 3.5 Flash through Antigravity.
-- `auto-long-context`: Gemini through Antigravity.
-- `gemini-cli-pro`: Gemini 3.1 Pro through Antigravity.
-- `auto-reasoning`: Claude through Claude HTTP bridge.
-- `claude-subscription-sonnet`: Claude Sonnet through Claude HTTP bridge.
+- `bridge-fast`: Gemini 3.5 Flash through Antigravity for fast everyday calls.
+- `bridge-smart`: Claude Sonnet through Claude HTTP bridge for planning, coding, and reasoning.
+- `bridge-long`: Gemini 3.1 Pro through Antigravity for long-context work.
+- `bridge-deep`: Claude Opus through Claude HTTP bridge for harder reasoning when usage limits allow.
+- `gemini-flash`, `gemini-pro`, `claude-sonnet`, and `claude-opus`: direct provider routes.
+
+The older `auto-*`, `gemini-cli-*`, and `claude-subscription-*` names remain accepted as hidden compatibility routes.
 
 ## Boundaries
 
