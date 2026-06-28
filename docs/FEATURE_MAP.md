@@ -8,6 +8,7 @@
 - Provider bridge: private OpenAI-style `/v1` facade for Waqar's own apps.
 - Provider dashboard: local browser view for provider health, engine reachability, aliases, inflight counts, recent non-sensitive calls, and quick prompt tests.
 - Local launcher: `npm run bridge:up`, `npm run bridge:status`, and `npm run bridge:down` manage the three local HTTP bridge processes when they were started by the launcher.
+- Hermes custom provider: `ai-cli-bridge` points Hermes at the provider bridge for text calls.
 
 ## Working Model Routes
 
@@ -25,3 +26,5 @@ The older `auto-*`, `gemini-cli-*`, and `claude-subscription-*` names remain acc
 - No public SaaS resale of subscription-backed Claude/Gemini usage.
 - Hermes should prefer MCP delegate for agentic work.
 - Apps should prefer provider bridge for normal model-call integration.
+- Provider bridge supports OpenAI-style streaming and text-only compatibility with Hermes tool metadata.
+- Provider bridge does not yet translate actual tool calls from OpenAI/Hermes format into local tool execution.

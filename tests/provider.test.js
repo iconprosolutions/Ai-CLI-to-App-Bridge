@@ -220,6 +220,17 @@ async function main() {
   assert(lastGem.body.prompt.includes('You are a duck.') && lastGem.body.prompt.includes('quack indeed'),
     'prior turns preserved in prompt');
 
+  console.log('\n## Streaming chat completions — OpenAI SSE shape');
+  r = await request(OPEN_PORT, {
+    path: '/v1/chat/completions', method: 'POST',
+    body: { model: 'bridge-fast', stream: true, messages: [{ role: 'user', content: 'stream me' }] },
+  });
+  assert(r.status === 200, 'streaming request returns 200');
+  assert((r.headers['content-type'] || '').includes('text/event-stream'), 'streaming response is event-stream');
+  assert(r.body.includes('chat.completion.chunk'), 'streaming response includes completion chunks');
+  assert(r.body.includes('[DONE]'), 'streaming response ends with [DONE]');
+  assert(r.body.includes('[gemini] replied'), 'streaming response includes upstream text content');
+
   console.log('\n## Model alias → upstream model mapping');
   await request(OPEN_PORT, {
     path: '/v1/chat/completions', method: 'POST',
@@ -260,13 +271,24 @@ async function main() {
   assert(claude.received[claude.received.length - 1].body.model === 'claude-opus-4-5',
     'legacy claude-subscription-opus still routes to Claude Opus');
 
+  console.log('\n## Tool metadata → text-only compatibility mode');
+  r = await request(OPEN_PORT, {
+    path: '/v1/chat/completions', method: 'POST',
+    body: {
+      model: 'bridge-fast',
+      tools: [{ type: 'function', function: { name: 'read_file' } }],
+      tool_choice: 'auto',
+      messages: [{ role: 'user', content: 'answer without tools' }],
+    },
+  });
+  assert(r.status === 200, 'tool metadata accepted for Hermes text-only compatibility');
+  assert(gemini.received[gemini.received.length - 1].body.prompt.includes('text-only'),
+    'upstream prompt explains text-only compatibility mode');
+  assert(gemini.received[gemini.received.length - 1].body.prompt.includes('Do not emit tool calls'),
+    'upstream prompt instructs model not to emit tool calls');
+
   console.log('\n## Unsupported parameters → 400 unsupported_parameter');
   for (const [name, val] of [
-    ['stream', true],
-    ['tools', [{ type: 'function', function: { name: 'x' } }]],
-    ['functions', [{ name: 'x' }]],
-    ['function_call', 'auto'],
-    ['tool_choice', 'auto'],
     ['logprobs', true],
     ['response_format', { type: 'json_object' }],
   ]) {

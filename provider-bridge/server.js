@@ -128,10 +128,46 @@ function sendError(res, status, message, type, param) {
   return res.status(status).json(openaiErrorBody(message, type, param));
 }
 
-function messagesToPrompt(messages) {
-  return messages
+function sendStreamingCompletion(res, completion) {
+  const choice = completion.choices[0];
+  const chunkBase = {
+    id: completion.id,
+    object: 'chat.completion.chunk',
+    created: completion.created,
+    model: completion.model,
+  };
+
+  res.status(200);
+  res.set({
+    'Content-Type': 'text/event-stream; charset=utf-8',
+    'Cache-Control': 'no-cache, no-transform',
+    'Connection': 'keep-alive',
+  });
+  res.write(`data: ${JSON.stringify({
+    ...chunkBase,
+    choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }],
+  })}\n\n`);
+  res.write(`data: ${JSON.stringify({
+    ...chunkBase,
+    choices: [{ index: 0, delta: { content: choice.message.content }, finish_reason: null }],
+  })}\n\n`);
+  res.write(`data: ${JSON.stringify({
+    ...chunkBase,
+    choices: [{ index: 0, delta: {}, finish_reason: choice.finish_reason }],
+  })}\n\n`);
+  res.write('data: [DONE]\n\n');
+  res.end();
+}
+
+function messagesToPrompt(messages, opts = {}) {
+  const parts = [];
+  if (opts.textOnlyTools) {
+    parts.push('[SYSTEM]\nThe caller supplied tool/function metadata, but this bridge route is text-only. Do not emit tool calls. Answer directly from the conversation context.');
+  }
+  parts.push(...messages
     .map((m) => `[${String(m.role).toUpperCase()}]\n${m.content}`)
-    .join('\n\n');
+  );
+  return parts.join('\n\n');
 }
 
 function callUpstream(engine, payload) {
@@ -614,16 +650,12 @@ app.post('/v1/chat/completions', async (req, res) => {
     logReq(reqId, { alias: alias || '?', engine: engine || '-', status, duration: Date.now() - started });
 
   const unsupportedChecks = [
-    ['stream', body.stream],
-    ['tools', body.tools],
-    ['functions', body.functions],
-    ['function_call', body.function_call],
-    ['tool_choice', body.tool_choice],
     ['logprobs', body.logprobs],
     ['response_format', body.response_format],
   ];
   for (const [name, val] of unsupportedChecks) {
     if (val !== undefined && val !== null && val !== false) {
+      console.log(`[req ${reqId}] rejected unsupported parameter: ${name}`);
       logEnd(400, '-');
       return sendError(res, 400, `Parameter "${name}" is not supported by provider-bridge.`, 'unsupported_parameter', name);
     }
@@ -671,7 +703,16 @@ app.post('/v1/chat/completions', async (req, res) => {
 
   inflight[mapping.engine] += 1;
   try {
-    const prompt = messagesToPrompt(messages);
+    const hasToolMetadata = Boolean(
+      body.tools
+      || body.functions
+      || body.function_call
+      || body.tool_choice
+    );
+    if (hasToolMetadata) {
+      console.log(`[req ${reqId}] received tool/function metadata; running text-only compatibility mode`);
+    }
+    const prompt = messagesToPrompt(messages, { textOnlyTools: hasToolMetadata });
     const payload = { task: 'chat', prompt };
     if (mapping.model) payload.model = mapping.model;
 
@@ -722,6 +763,9 @@ app.post('/v1/chat/completions', async (req, res) => {
       usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
     };
     logEnd(200, mapping.engine);
+    if (body.stream === true) {
+      return sendStreamingCompletion(res, completion);
+    }
     return res.status(200).json(completion);
   } finally {
     inflight[mapping.engine] -= 1;

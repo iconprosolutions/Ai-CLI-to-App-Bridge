@@ -11,3 +11,5 @@
 - Added the provider dashboard for local health, aliases, inflight counts, and recent non-sensitive calls.
 - Added dashboard prompt testing and a local three-process bridge launcher.
 - Replaced internal-looking public model names with clearer app routes while keeping old names as hidden compatibility aliases.
+- Registered Hermes custom provider `ai-cli-bridge`, added provider streaming plus text-only tool metadata compatibility, and verified Hermes through `bridge-fast` and `bridge-smart`.
+- Preserved nonzero CLI stdout in bridge error responses so Claude session-limit messages are visible to provider callers.

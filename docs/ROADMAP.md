@@ -4,12 +4,14 @@
 
 - Use the one-command launcher and dashboard for manual testing.
 - Connect one real app to `http://127.0.0.1:9011/v1/chat/completions`.
+- Use Hermes' `ai-cli-bridge` custom provider for simple text calls with `bridge-fast` and `bridge-smart`.
 
 ## Next
 
 - Add an always-on Mac LaunchAgent once the local workflow feels stable.
 - Add a fuller runbook for app integration examples.
-- Decide whether streaming is needed after one real app uses provider mode successfully.
+- Improve the dashboard into an operating console: copy-ready app snippets, per-route examples, recent errors, and start/stop status.
+- Decide whether to build real Hermes/OpenAI tool-call translation or keep provider mode text-only and rely on MCP for tools.
 
 ## Later
 

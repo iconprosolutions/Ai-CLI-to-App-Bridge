@@ -159,8 +159,11 @@ function normalizeModel(model) {
   return MODEL_ALIASES[model] || model;
 }
 
-function summarizeGeminiError(stderr, selectedModel) {
-  const text = String(stderr || '');
+function summarizeGeminiError(stderr, stdout, selectedModel) {
+  const text = [stderr, stdout]
+    .map((part) => String(part || '').trim())
+    .filter(Boolean)
+    .join('\n');
 
   if (text.includes('Requested entity was not found')) {
     return `The Gemini model "${selectedModel}" is not available in this CLI session. Try Gemini 3 Flash Preview or Gemini 2.5 Flash.`;
@@ -331,7 +334,7 @@ function runGemini(prompt, model) {
     child.on('close', (code) => {
       if (truncated) return settle(false, stdout.trim());
       if (code === 0) settle(false, stdout.trim());
-      else settle(true, new Error(summarizeGeminiError(stderr, selectedModel)));
+      else settle(true, new Error(summarizeGeminiError(stderr, stdout, selectedModel)));
     });
 
     child.on('error', (err) => {

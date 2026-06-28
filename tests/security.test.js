@@ -75,6 +75,7 @@ function writeFakeCli(name, bodyLine) {
 
 const SLEEP_CLI = writeFakeCli('sleep-cli.sh', 'exec sleep 30');
 const BIG_CLI = writeFakeCli('big-cli.sh', 'yes 0123456789ABCDEF | head -c 500000');
+const STDOUT_ERROR_CLI = writeFakeCli('stdout-error-cli.sh', 'echo "session limit resets soon"; exit 1');
 
 // Load a bridge module into a unique PORT/contexts dir. We re-require a fresh
 // copy by clearing the cache and monkeypatching env. The module captures its
@@ -188,6 +189,14 @@ async function testBridge(b) {
   const len = typeof parsed.text === 'string' ? parsed.text.length : -1;
   assert(len > 0 && len <= CAP, `[${b.name}] CLI output never exceeds the cap (kept ${len}, cap ${CAP}, of 500000)`);
   assert(len >= CAP - 5, `[${b.name}] CLI output is filled to the cap, not cut short (kept ${len}, cap ${CAP})`);
+
+  // Some CLIs print account/limit errors to stdout while still exiting nonzero.
+  // Preserve that message so callers see the real cause instead of a generic
+  // "request failed" wrapper.
+  await bootBridge(b.server, base + 5, { BRIDGE_API_KEY: '', [b.pathEnv]: STDOUT_ERROR_CLI });
+  r = await request(base + 5, { path: '/api/chat', method: 'POST', body: { prompt: 'hello' } });
+  assert(r.status === 500 && (r.body || '').includes('session limit resets soon'),
+    `[${b.name}] nonzero CLI stdout is preserved in error response`);
 }
 
 async function main() {

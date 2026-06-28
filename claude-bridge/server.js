@@ -140,8 +140,11 @@ function normalizeModel(model) {
   return MODEL_ALIASES[model] || model;
 }
 
-function summarizeClaudeError(stderr, selectedModel) {
-  const text = String(stderr || '');
+function summarizeClaudeError(stderr, stdout, selectedModel) {
+  const text = [stderr, stdout]
+    .map((part) => String(part || '').trim())
+    .filter(Boolean)
+    .join('\n');
 
   if (text.includes('deprecated and will reach end-of-life')) {
     return `The Claude model "${selectedModel}" is deprecated in Claude Code. Try Claude Sonnet 4.6, Claude Sonnet 4.5, or Claude Haiku 4.5.`;
@@ -290,7 +293,7 @@ function runClaude(prompt, model) {
     child.on('close', (code) => {
       if (truncated) return settle(false, stdout.trim());
       if (code === 0) settle(false, stdout.trim());
-      else settle(true, new Error(summarizeClaudeError(stderr, selectedModel)));
+      else settle(true, new Error(summarizeClaudeError(stderr, stdout, selectedModel)));
     });
 
     child.on('error', (err) => {
