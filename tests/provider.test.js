@@ -131,13 +131,21 @@ async function main() {
   assert(Array.isArray(modelsBody.data), 'models payload data is array');
   const ids = modelsBody.data.map((m) => m.id);
   for (const expected of [
-    'bridge-fast', 'bridge-smart', 'bridge-long', 'bridge-deep',
-    'gemini-flash', 'gemini-pro',
-    'claude-sonnet', 'claude-opus',
+    'bridge-agy-gemini-3.5-flash-medium-pulse',
+    'bridge-agy-gemini-3.5-flash-high-forge',
+    'bridge-agy-gemini-3.1-pro-high-atlas',
+    'bridge-claude-haiku-4.5-spark',
+    'bridge-claude-sonnet-4.6-northstar',
+    'bridge-claude-opus-4.5-oracle',
   ]) {
     assert(ids.includes(expected), `alias exposed: ${expected}`);
   }
-  for (const hidden of ['auto-fast', 'auto-reasoning', 'gemini-cli-pro', 'claude-subscription-sonnet']) {
+  for (const hidden of [
+    'bridge-fast', 'bridge-smart', 'bridge-long', 'bridge-deep',
+    'gemini-flash', 'gemini-pro',
+    'claude-sonnet', 'claude-opus',
+    'auto-fast', 'auto-reasoning', 'gemini-cli-pro', 'claude-subscription-sonnet',
+  ]) {
     assert(!ids.includes(hidden), `legacy alias hidden from /v1/models: ${hidden}`);
   }
   for (const m of modelsBody.data) {
@@ -169,24 +177,28 @@ async function main() {
     'dashboard status includes both engine health records');
   assert(dashboard.engines.claude.ok === true && dashboard.engines.gemini.ok === true,
     'dashboard status marks fake upstreams online');
-  assert(Array.isArray(dashboard.aliases) && dashboard.aliases.some((a) => a.id === 'bridge-fast'),
+  assert(Array.isArray(dashboard.aliases) && dashboard.aliases.some((a) => a.id === 'bridge-agy-gemini-3.5-flash-medium-pulse'),
     'dashboard status includes aliases');
-  assert(dashboard.aliases.some((a) => a.label === 'Smart' && a.bestFor.includes('Planning')),
+  assert(dashboard.aliases.some((a) => a.label.includes('Northstar') && a.bestFor.includes('planning')),
     'dashboard status includes friendly model labels and usage guidance');
   assert(dashboard.connection && dashboard.connection.baseUrl.endsWith('/v1'),
     'dashboard status includes app connection base URL');
+  assert(dashboard.connection.defaultRoute === 'bridge-agy-gemini-3.5-flash-medium-pulse',
+    'dashboard status includes default route');
+  assert(dashboard.telemetry && typeof dashboard.telemetry.total === 'number' && Array.isArray(dashboard.telemetry.byRoute),
+    'dashboard status includes telemetry aggregates');
   assert(Array.isArray(dashboard.recentRequests), 'dashboard status includes recent request list');
 
   console.log('\n## POST /v1/chat/completions — Claude routing + shape');
   r = await request(OPEN_PORT, {
     path: '/v1/chat/completions', method: 'POST',
-    body: { model: 'bridge-smart', messages: [{ role: 'user', content: 'hi there' }] },
+    body: { model: 'bridge-claude-sonnet-4.6-northstar', messages: [{ role: 'user', content: 'hi there' }] },
   });
-  assert(r.status === 200, 'bridge-smart returns 200');
+  assert(r.status === 200, 'bridge-claude-sonnet-4.6-northstar returns 200');
   let completion = JSON.parse(r.body || '{}');
   assert(completion.object === 'chat.completion', 'object is chat.completion');
   assert(completion.id && String(completion.id).startsWith('chatcmpl-'), 'id has chatcmpl- prefix');
-  assert(completion.model === 'bridge-smart', 'echoes requested model alias');
+  assert(completion.model === 'bridge-claude-sonnet-4.6-northstar', 'echoes requested model alias');
   assert(completion.choices && completion.choices[0].message.role === 'assistant', 'choice[0] is assistant');
   assert(typeof completion.choices[0].message.content === 'string' && completion.choices[0].message.content.length > 0,
     'choice[0].message.content is a non-empty string');
@@ -198,13 +210,13 @@ async function main() {
   assert(typeof lastClaude.body.prompt === 'string' && lastClaude.body.prompt.includes('hi there'),
     'upstream prompt includes message content');
   assert(lastClaude.body.prompt.includes('[USER]'), 'prompt carries clear role labels');
-  assert(lastClaude.body.model === 'claude-sonnet-4-6', 'bridge-smart pins Claude Sonnet upstream');
+  assert(lastClaude.body.model === 'claude-sonnet-4-6', 'northstar pins Claude Sonnet upstream');
 
   console.log('\n## POST /v1/chat/completions — Gemini routing + multi-turn prompt');
   r = await request(OPEN_PORT, {
     path: '/v1/chat/completions', method: 'POST',
     body: {
-      model: 'bridge-fast',
+      model: 'bridge-agy-gemini-3.5-flash-medium-pulse',
       messages: [
         { role: 'system', content: 'You are a duck.' },
         { role: 'user', content: 'quack' },
@@ -213,7 +225,7 @@ async function main() {
       ],
     },
   });
-  assert(r.status === 200, 'bridge-fast returns 200');
+  assert(r.status === 200, 'bridge-agy-gemini-3.5-flash-medium-pulse returns 200');
   const lastGem = gemini.received[gemini.received.length - 1];
   assert(lastGem.body.prompt.includes('[SYSTEM]') && lastGem.body.prompt.includes('[USER]') && lastGem.body.prompt.includes('[ASSISTANT]'),
     'all three role labels present in prompt');
@@ -223,7 +235,7 @@ async function main() {
   console.log('\n## Streaming chat completions — OpenAI SSE shape');
   r = await request(OPEN_PORT, {
     path: '/v1/chat/completions', method: 'POST',
-    body: { model: 'bridge-fast', stream: true, messages: [{ role: 'user', content: 'stream me' }] },
+    body: { model: 'bridge-agy-gemini-3.5-flash-medium-pulse', stream: true, messages: [{ role: 'user', content: 'stream me' }] },
   });
   assert(r.status === 200, 'streaming request returns 200');
   assert((r.headers['content-type'] || '').includes('text/event-stream'), 'streaming response is event-stream');
@@ -234,36 +246,54 @@ async function main() {
   console.log('\n## Model alias → upstream model mapping');
   await request(OPEN_PORT, {
     path: '/v1/chat/completions', method: 'POST',
-    body: { model: 'claude-sonnet', messages: [{ role: 'user', content: 'x' }] },
+    body: { model: 'bridge-claude-haiku-4.5-spark', messages: [{ role: 'user', content: 'x' }] },
+  });
+  assert(claude.received[claude.received.length - 1].body.model === 'claude-haiku-4-5',
+    'bridge-claude-haiku-4.5-spark → claude-haiku-4-5 upstream');
+  await request(OPEN_PORT, {
+    path: '/v1/chat/completions', method: 'POST',
+    body: { model: 'bridge-claude-sonnet-4.6-northstar', messages: [{ role: 'user', content: 'x' }] },
   });
   assert(claude.received[claude.received.length - 1].body.model === 'claude-sonnet-4-6',
-    'claude-sonnet → claude-sonnet-4-6 upstream');
+    'bridge-claude-sonnet-4.6-northstar → claude-sonnet-4-6 upstream');
   await request(OPEN_PORT, {
     path: '/v1/chat/completions', method: 'POST',
-    body: { model: 'claude-opus', messages: [{ role: 'user', content: 'x' }] },
+    body: { model: 'bridge-claude-opus-4.5-oracle', messages: [{ role: 'user', content: 'x' }] },
   });
   assert(claude.received[claude.received.length - 1].body.model === 'claude-opus-4-5',
-    'claude-opus → claude-opus-4-5 upstream');
+    'bridge-claude-opus-4.5-oracle → claude-opus-4-5 upstream');
   await request(OPEN_PORT, {
     path: '/v1/chat/completions', method: 'POST',
-    body: { model: 'gemini-pro', messages: [{ role: 'user', content: 'x' }] },
+    body: { model: 'bridge-agy-gemini-3.5-flash-high-forge', messages: [{ role: 'user', content: 'x' }] },
   });
-  assert(gemini.received[gemini.received.length - 1].body.model === 'Gemini 3.1 Pro (Low)',
-    'gemini-pro → Gemini 3.1 Pro (Low) upstream');
+  assert(gemini.received[gemini.received.length - 1].body.model === 'Gemini 3.5 Flash (High)',
+    'bridge-agy-gemini-3.5-flash-high-forge → Gemini 3.5 Flash (High) upstream');
   await request(OPEN_PORT, {
     path: '/v1/chat/completions', method: 'POST',
-    body: { model: 'gemini-flash', messages: [{ role: 'user', content: 'x' }] },
+    body: { model: 'bridge-agy-gemini-3.1-pro-high-atlas', messages: [{ role: 'user', content: 'x' }] },
   });
-  assert(gemini.received[gemini.received.length - 1].body.model === 'Gemini 3.5 Flash (Low)',
-    'gemini-flash → Gemini 3.5 Flash (Low) upstream');
+  assert(gemini.received[gemini.received.length - 1].body.model === 'Gemini 3.1 Pro (High)',
+    'bridge-agy-gemini-3.1-pro-high-atlas → Gemini 3.1 Pro (High) upstream');
 
   console.log('\n## Legacy aliases still route for old configs');
   await request(OPEN_PORT, {
     path: '/v1/chat/completions', method: 'POST',
+    body: { model: 'bridge-fast', messages: [{ role: 'user', content: 'x' }] },
+  });
+  assert(gemini.received[gemini.received.length - 1].body.model === 'Gemini 3.5 Flash (Medium)',
+    'legacy bridge-fast still routes to Pulse');
+  await request(OPEN_PORT, {
+    path: '/v1/chat/completions', method: 'POST',
+    body: { model: 'bridge-smart', messages: [{ role: 'user', content: 'x' }] },
+  });
+  assert(claude.received[claude.received.length - 1].body.model === 'claude-sonnet-4-6',
+    'legacy bridge-smart still routes to Northstar');
+  await request(OPEN_PORT, {
+    path: '/v1/chat/completions', method: 'POST',
     body: { model: 'auto-fast', messages: [{ role: 'user', content: 'x' }] },
   });
-  assert(gemini.received[gemini.received.length - 1].body.model === 'Gemini 3.5 Flash (Low)',
-    'legacy auto-fast still routes to Gemini Flash');
+  assert(gemini.received[gemini.received.length - 1].body.model === 'Gemini 3.5 Flash (Medium)',
+    'legacy auto-fast still routes to Pulse');
   await request(OPEN_PORT, {
     path: '/v1/chat/completions', method: 'POST',
     body: { model: 'claude-subscription-opus', messages: [{ role: 'user', content: 'x' }] },

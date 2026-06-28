@@ -13,3 +13,4 @@
 - Replaced internal-looking public model names with clearer app routes while keeping old names as hidden compatibility aliases.
 - Registered Hermes custom provider `ai-cli-bridge`, added provider streaming plus text-only tool metadata compatibility, and verified Hermes through `bridge-fast` and `bridge-smart`.
 - Preserved nonzero CLI stdout in bridge error responses so Claude session-limit messages are visible to provider callers.
+- Renamed public provider models to explicit bridge/model/suffix IDs and upgraded the dashboard into a local operations console with app snippets and request telemetry.
