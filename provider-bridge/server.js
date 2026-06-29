@@ -117,6 +117,37 @@ const inflight = { claude: 0, gemini: 0 };
 const recentRequests = [];
 const MAX_RECENT_REQUESTS = 200;
 
+// Rolling per-engine health samples for uptime monitoring. Passive only:
+// fed by cheap /health pings (on each /dashboard/status poll) and by the
+// pass/fail of real traffic — never by probe completions. Metadata only.
+const HEALTH_HISTORY_MAX = 240;
+const healthHistory = { claude: [], gemini: [] };
+
+function recordHealthSample(engine, ok, source) {
+  const arr = healthHistory[engine];
+  if (!arr) return;
+  arr.push({ at: new Date().toISOString(), ok: Boolean(ok), source: source || 'health' });
+  if (arr.length > HEALTH_HISTORY_MAX) arr.splice(0, arr.length - HEALTH_HISTORY_MAX);
+}
+
+function computePerEngineHealth() {
+  return Object.keys(healthHistory).map((engine) => {
+    const arr = healthHistory[engine];
+    const total = arr.length;
+    const okCount = arr.reduce((n, s) => n + (s.ok ? 1 : 0), 0);
+    let lastErrorAt = null;
+    for (let i = arr.length - 1; i >= 0; i -= 1) {
+      if (!arr[i].ok) { lastErrorAt = arr[i].at; break; }
+    }
+    return {
+      engine,
+      uptimePct: total ? Math.round((okCount / total) * 1000) / 10 : null,
+      sampleCount: total,
+      lastErrorAt,
+    };
+  });
+}
+
 function newRequestId() {
   return crypto.randomBytes(6).toString('hex');
 }
@@ -150,6 +181,7 @@ function computeTelemetry(requests) {
   const perEngine = {};
   const perRoute = {};
   const perApp = {};
+  const tokensByEngine = {};
   const latestErrors = [];
 
   for (const r of requests) {
@@ -162,7 +194,13 @@ function computeTelemetry(requests) {
     estPrompt += r.estPromptTokens || 0;
     estCompletion += r.estCompletionTokens || 0;
 
-    if (r.engine) perEngine[r.engine] = (perEngine[r.engine] || 0) + 1;
+    if (r.engine) {
+      perEngine[r.engine] = (perEngine[r.engine] || 0) + 1;
+      const t = tokensByEngine[r.engine] || (tokensByEngine[r.engine] = { prompt: 0, completion: 0, total: 0 });
+      t.prompt += r.estPromptTokens || 0;
+      t.completion += r.estCompletionTokens || 0;
+      t.total += r.estTotalTokens || 0;
+    }
 
     if (r.routeId) {
       const e = perRoute[r.routeId] || (perRoute[r.routeId] = {
@@ -202,8 +240,11 @@ function computeTelemetry(requests) {
     recentCount: requests.length,
     successCount: success,
     errorCount: error,
+    successRate: requests.length ? Math.round((success / requests.length) * 1000) / 1000 : null,
     avgLatencyMs: latencyN ? Math.round(latencySum / latencyN) : 0,
+    maxConcurrent: MAX_CONCURRENT_PER_ENGINE,
     perEngine,
+    tokensByEngine,
     perRoute: Object.values(perRoute)
       .map((e) => ({ routeId: e.routeId, label: e.label, engine: e.engine, count: e.count, success: e.success, error: e.error, estTokens: e.estTokens }))
       .sort((x, y) => y.count - x.count),
@@ -1162,7 +1203,12 @@ app.get('/dashboard/status', async (req, res) => {
     checkEngineHealth('claude'),
     checkEngineHealth('gemini'),
   ]);
+  // Passive uptime sampling: record each poll's /health result.
+  recordHealthSample('claude', claudeHealth.ok, 'health');
+  recordHealthSample('gemini', geminiHealth.ok, 'health');
   const origin = `${req.protocol}://${req.get('host')}`;
+  const telemetry = computeTelemetry(recentRequests);
+  telemetry.perEngineHealth = computePerEngineHealth();
   res.json({
     status: 'ok',
     engine: 'provider-bridge',
@@ -1170,8 +1216,8 @@ app.get('/dashboard/status', async (req, res) => {
     uptime: process.uptime(),
     inflight: { ...inflight },
     engines: {
-      claude: { url: CLAUDE_BRIDGE_URL, ...claudeHealth },
-      gemini: { url: GEMINI_BRIDGE_URL, ...geminiHealth },
+      claude: { url: CLAUDE_BRIDGE_URL, ...claudeHealth, history: healthHistory.claude.slice(-120) },
+      gemini: { url: GEMINI_BRIDGE_URL, ...geminiHealth, history: healthHistory.gemini.slice(-120) },
     },
     connection: {
       baseUrl: `${origin}/v1`,
@@ -1186,7 +1232,7 @@ app.get('/dashboard/status', async (req, res) => {
       upstreamModel: route.model,
       bestFor: route.bestFor,
     })),
-    telemetry: computeTelemetry(recentRequests),
+    telemetry,
     recentRequests: recentRequests.map((r) => ({ ...r })),
   });
 });
@@ -1239,6 +1285,8 @@ app.post('/v1/chat/completions', async (req, res) => {
       estTotalTokens: estPromptTokens + estCompletionTokens,
     });
     recentRequests.splice(MAX_RECENT_REQUESTS);
+    // Passive per-engine uptime signal from real traffic (success vs failure).
+    if (route) recordHealthSample(route.engine, classForStatus(status) === 'success', 'traffic');
     console.log(`[req ${reqId}] ${status} model=${aliasUsed || '?'} app=${appId} ${Date.now() - started}ms`);
   };
 
