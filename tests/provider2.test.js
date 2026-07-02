@@ -265,6 +265,52 @@ async function main() {
   const { liveChildren } = require(path.join(REPO, 'packages', 'core'));
   assert(liveChildren() === 0, `no orphan CLI children after abort (got ${liveChildren()})`);
 
+  console.log('\n## tool_choice + local-tool lockdown');
+  // Lockdown: bridge requests must not let Claude Code touch local files/MCP.
+  argv = fs.readFileSync(LOG, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  const claudeCalls = argv.filter((a) => a.includes('-p') && a.includes('--output-format'));
+  const lockArgs = claudeCalls[claudeCalls.length - 1] || [];
+  assert(lockArgs.includes('--disallowedTools') && lockArgs.includes('--strict-mcp-config'),
+    'claude invocations carry local-tool lockdown flags');
+  // Prompt instruction shaping (unit level).
+  const { messagesToPrompt } = require(path.join(REPO, 'packages', 'provider', 'translate.js'));
+  const toolsFixture = [{ type: 'function', function: { name: 'read_file' } }];
+  assert(messagesToPrompt([{ role: 'user', content: 'x' }], { tools: toolsFixture, toolChoice: 'required' }).includes('MUST respond with a tool call'),
+    'tool_choice=required strengthens the instruction');
+  assert(messagesToPrompt([{ role: 'user', content: 'x' }], { tools: toolsFixture, toolChoice: 'required', forcedToolName: 'read_file' }).includes('MUST respond with a call to the tool "read_file"'),
+    'named tool_choice demands the specific tool');
+  // tool_choice=none: tools present but disabled — tool-shaped reply stays content.
+  r = await request(P2, {
+    path: '/v1/chat/completions', method: 'POST',
+    body: {
+      model: 'bridge-smart', tools: toolsFixture, tool_choice: 'none',
+      messages: [{ role: 'user', content: 'x' }],
+    },
+  });
+  completion = JSON.parse(r.body || '{}');
+  assert(typeof completion.choices[0].message.content === 'string' && completion.choices[0].finish_reason === 'stop',
+    'tool_choice=none disables tool parsing');
+  // tool_choice=required with a prose-first model: corrective retry lands the call.
+  const REQ_STATE = path.join(TMP, 'req-state');
+  const REQ_LOG = path.join(TMP, 'req-argv.log');
+  const CLAUDE_REQ = writeStub('claude-req.sh', 'claude-sim', {
+    FAKE_CLI_TEXT_FILE: TOOLTXT_FILE, FAKE_CLI_GARBAGE_FIRST: '1', FAKE_CLI_STATE_FILE: REQ_STATE, FAKE_CLI_LOG: REQ_LOG,
+  });
+  const P14 = 19530;
+  await bootProvider(P14, { CLAUDE_PATH: CLAUDE_REQ, GEMINI_PATH: AGY_STUB });
+  r = await request(P14, {
+    path: '/v1/chat/completions', method: 'POST',
+    body: {
+      model: 'bridge-smart', tools: toolsFixture, tool_choice: 'required',
+      messages: [{ role: 'user', content: 'read a' }],
+    },
+  });
+  completion = JSON.parse(r.body || '{}');
+  assert(completion.choices && completion.choices[0].finish_reason === 'tool_calls'
+    && completion.choices[0].message.tool_calls[0].function.name === 'read_file',
+    'tool_choice=required repaired via retry into a tool call');
+  assert(fs.readFileSync(REQ_LOG, 'utf8').trim().split('\n').length === 2, 'exactly one corrective retry for required tool_choice');
+
   console.log('\n## Phase 3 — tool-call hold-back in streaming');
   r = await request(P2, {
     path: '/v1/chat/completions', method: 'POST',

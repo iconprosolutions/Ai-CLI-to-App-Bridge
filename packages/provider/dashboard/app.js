@@ -334,12 +334,17 @@
     testerAborts.push(ctl);
     var headers = { 'Content-Type': 'application/json', 'X-App-Id': 'dashboard-tester' };
     if (key()) headers.Authorization = 'Bearer ' + key();
+    var authHint = function (status) {
+      return status === 401
+        ? '\n\n→ The provider requires a bearer key: open the Connect tab, paste the API key from `npm run bridge:status` (or .bridge-runtime/credentials.json) into the key field, and run again.'
+        : '';
+    };
     if (state.transport !== 'stream') {
       return fetch('/v1/chat/completions', { method: 'POST', headers: headers, body: JSON.stringify(body), signal: ctl.signal })
         .then(function (r) { return r.json().then(function (j) { return { r: r, j: j }; }); })
         .then(function (o) {
           var c = o.j.choices && o.j.choices[0];
-          out.textContent = c ? (c.message.tool_calls ? JSON.stringify(c.message.tool_calls, null, 2) : c.message.content) : JSON.stringify(o.j, null, 2);
+          out.textContent = (c ? (c.message.tool_calls ? JSON.stringify(c.message.tool_calls, null, 2) : c.message.content) : JSON.stringify(o.j, null, 2)) + authHint(o.r.status);
           var usage = o.j.usage ? ' · ' + o.j.usage.total_tokens + ' tok' : '';
           meta.textContent = o.r.status + usage + ' · ' + (Date.now() - t0) + 'ms' + (c && c.finish_reason ? ' · ' + c.finish_reason : '');
         })
@@ -347,7 +352,7 @@
     }
     return fetch('/v1/chat/completions', { method: 'POST', headers: headers, body: JSON.stringify(body), signal: ctl.signal })
       .then(function (res) {
-        if (!res.ok) return res.text().then(function (t) { out.textContent = t; meta.textContent = 'error ' + res.status; });
+        if (!res.ok) return res.text().then(function (t) { out.textContent = t + authHint(res.status); meta.textContent = 'error ' + res.status; });
         var reader = res.body.getReader();
         var dec = new TextDecoder();
         var buf = '';

@@ -375,12 +375,26 @@ app.post('/v1/chat/completions', async (req, res) => {
 
   try {
     const toolsList = body.tools || body.functions;
+    // tool_choice: 'none' disables tools entirely; 'required' or a named
+    // function demands a call (enforced with one corrective retry on the
+    // non-streaming path).
+    const tc = body.tool_choice;
+    let toolChoice = 'auto';
+    let forcedToolName = null;
+    if (tc === 'none') toolChoice = 'none';
+    else if (tc === 'required') toolChoice = 'required';
+    else if (tc && typeof tc === 'object' && tc.type === 'function' && tc.function && tc.function.name) {
+      toolChoice = 'required';
+      forcedToolName = tc.function.name;
+    }
     // Only ever interpret model output as tool calls when the caller actually
     // sent tools — otherwise a reply that *discusses* a tool_calls payload
     // would be hijacked into a real tool call.
-    const toolsProvided = Array.isArray(toolsList) && toolsList.length > 0;
+    const toolsProvided = Array.isArray(toolsList) && toolsList.length > 0 && toolChoice !== 'none';
     const prompt = messagesToPrompt(messages, {
       tools: toolsProvided ? toolsList : null,
+      toolChoice,
+      forcedToolName,
       responseFormat: body.response_format,
     });
     estPromptTokens = estimateTokens(prompt);
@@ -569,7 +583,37 @@ app.post('/v1/chat/completions', async (req, res) => {
     applyUsage(result);
     breakerFeedback();
     let text = result.text;
-    const detectedTools = toolsProvided ? parseToolCallsFromText(text) : null;
+    let detectedTools = toolsProvided ? parseToolCallsFromText(text) : null;
+    // tool_choice=required / named-function enforcement: one corrective retry.
+    const satisfiesChoice = () => {
+      if (toolChoice !== 'required') return true;
+      if (!detectedTools) return false;
+      return !forcedToolName || detectedTools.some((t) => t.function.name === forcedToolName);
+    };
+    if (toolsProvided && !satisfiesChoice()) {
+      const demand = forcedToolName
+        ? `a call to the tool "${forcedToolName}"`
+        : 'a tool call';
+      const retryPrompt = `${prompt}\n\n[ASSISTANT]\n${text}\n\n[SYSTEM]\nThe reply above is not acceptable: this request requires ${demand}. Respond with ONLY the \`\`\`json\`\`\` tool_calls block — no plain text.`;
+      let retry;
+      try {
+        retry = await adapter.invoke({ prompt: retryPrompt, model: route.model, signal: ac.signal });
+      } catch (err) {
+        const mapped = httpFor(err);
+        breakerFeedback(err);
+        capFinish(mapped.status, null, err);
+        record(mapped.status);
+        return sendError(res, mapped.status, err.message, mapped.type, mapped.param, mapped.retryAfterSec);
+      }
+      applyUsage(retry);
+      text = retry.text;
+      detectedTools = parseToolCallsFromText(text);
+      if (!satisfiesChoice()) {
+        capFinish(502, retry, null);
+        record(502);
+        return sendError(res, 502, `tool_choice could not be satisfied: the model did not produce ${demand}.`, 'upstream_error', 'tool_choice');
+      }
+    }
     if (wantsJson && !detectedTools) {
       try {
         text = await enforceJson(text);

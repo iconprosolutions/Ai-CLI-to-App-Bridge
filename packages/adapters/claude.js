@@ -32,11 +32,22 @@ function classifyError(stderr, stdout) {
   return null;
 }
 
+// Claude Code is an agentic CLI: in -p mode it can still execute read-only
+// tools (Read/Glob/Grep) against the LOCAL filesystem and load the user's MCP
+// servers. A bridge request must behave like a remote model, not a local
+// agent, so we deny the built-ins and skip MCP unless explicitly re-enabled
+// (CLAUDE_LOCAL_TOOLS=1). Note: tool *definitions* stay in Claude Code's
+// context (~15k prompt tokens of harness overhead) — no CLI flag removes
+// them; this lockdown prevents execution, which is the safety boundary.
+const LOCKDOWN_TOOLS = 'Task,Bash,Glob,Grep,Read,Edit,Write,NotebookEdit,WebFetch,WebSearch,TodoWrite,SlashCommand,Skill';
+
 function createClaudeAdapter(opts = {}) {
   const bin = opts.bin || process.env.CLAUDE_PATH || 'claude';
   const timeoutMs = opts.timeoutMs || Number(process.env.CLI_TIMEOUT_MS) || 5 * 60 * 1000;
   const maxBytes = opts.maxBytes || Number(process.env.MAX_CLI_OUTPUT_BYTES) || 10 * 1024 * 1024;
   const defaultModel = opts.defaultModel || process.env.CLAUDE_MODEL || null;
+  const allowLocalTools = opts.allowLocalTools || process.env.CLAUDE_LOCAL_TOOLS === '1';
+  const lockdownArgs = allowLocalTools ? [] : ['--disallowedTools', LOCKDOWN_TOOLS, '--strict-mcp-config'];
 
   // Once the installed CLI rejects stream-json flags, stop trying (log once).
   let streamJsonBroken = false;
@@ -49,7 +60,7 @@ function createClaudeAdapter(opts = {}) {
 
   async function invokeStreamJson({ prompt, model, signal, onDelta }) {
     // --verbose is mandatory with -p + stream-json (verified live 2026-07-02).
-    const args = ['-p', '--output-format', 'stream-json', '--include-partial-messages', '--verbose'];
+    const args = ['-p', '--output-format', 'stream-json', '--include-partial-messages', '--verbose', ...lockdownArgs];
     if (model) args.push('--model', model);
 
     let buffer = '';
@@ -109,7 +120,7 @@ function createClaudeAdapter(opts = {}) {
   }
 
   async function invokeText({ prompt, model, signal, onDelta }) {
-    const args = ['-p'];
+    const args = ['-p', ...lockdownArgs];
     if (model) args.push('--model', model);
     const run = await runCli(bin, args, { stdin: prompt, signal, timeoutMs, maxBytes, onDelta, classifyError });
     return { text: run.text.trim(), usage: null, stopReason: 'end_turn' };

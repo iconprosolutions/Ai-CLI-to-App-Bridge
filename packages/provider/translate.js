@@ -50,7 +50,16 @@ function parseToolCallsFromText(text) {
 function messagesToPrompt(messages, opts = {}) {
   const parts = [];
   if (opts.tools && Array.isArray(opts.tools) && opts.tools.length > 0) {
-    parts.push(`[SYSTEM]\nYou have access to the following tools:\n${JSON.stringify(opts.tools, null, 2)}\n\nIf you decide to call a tool, respond ONLY with a JSON object inside a \`\`\`json\`\`\` code block matching this exact schema:\n{\n  "tool_calls": [\n    {\n      "id": "call_abc123",\n      "type": "function",\n      "function": {\n        "name": "tool_name",\n        "arguments": "{\\"arg\\": \\"val\\"}"\n      }\n    }\n  ]\n}\nIf no tool call is needed, reply directly with plain text.`);
+    // tool_choice steers how strongly the model is pushed toward a call:
+    // auto = may call; required = must call; a named function = must call it.
+    let choiceLine = 'If no tool call is needed, reply directly with plain text.';
+    if (opts.toolChoice === 'required') {
+      choiceLine = 'You MUST respond with a tool call — plain-text replies are not acceptable for this request.';
+    }
+    if (opts.forcedToolName) {
+      choiceLine = `You MUST respond with a call to the tool "${opts.forcedToolName}" — no other tool and no plain-text reply is acceptable for this request.`;
+    }
+    parts.push(`[SYSTEM]\nYou have access to the following tools:\n${JSON.stringify(opts.tools, null, 2)}\n\nIf you decide to call a tool, respond ONLY with a JSON object inside a \`\`\`json\`\`\` code block matching this exact schema:\n{\n  "tool_calls": [\n    {\n      "id": "call_abc123",\n      "type": "function",\n      "function": {\n        "name": "tool_name",\n        "arguments": "{\\"arg\\": \\"val\\"}"\n      }\n    }\n  ]\n}\n${choiceLine}`);
   } else if (opts.textOnlyTools) {
     parts.push('[SYSTEM]\nThe caller supplied tool/function metadata, but this bridge route is text-only. Do not emit tool calls. Answer directly from the conversation context.');
   }
