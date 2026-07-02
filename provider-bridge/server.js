@@ -1173,6 +1173,10 @@ app.post('/v1/chat/completions', async (req, res) => {
   inflight[route.engine] += 1;
   try {
     const toolsList = body.tools || body.functions;
+    // Only ever interpret model output as tool calls when the caller actually
+    // sent tools — otherwise a reply that *discusses* a tool_calls payload
+    // would be hijacked into a real tool call.
+    const toolsProvided = Array.isArray(toolsList) && toolsList.length > 0;
     const prompt = messagesToPrompt(messages, {
       tools: Array.isArray(toolsList) ? toolsList : null,
       responseFormat: body.response_format,
@@ -1241,9 +1245,16 @@ app.post('/v1/chat/completions', async (req, res) => {
       estCompletionTokens = estimateTokens(text);
       record(200);
 
-      const detectedTools = parseToolCallsFromText(text);
+      const detectedTools = toolsProvided ? parseToolCallsFromText(text) : null;
       if (detectedTools) {
-        res.write(`data: ${JSON.stringify({ ...chunkBase, choices: [{ index: 0, delta: { tool_calls: detectedTools }, finish_reason: 'tool_calls' }] })}\n\n`);
+        res.write(`data: ${JSON.stringify({
+          ...chunkBase,
+          choices: [{
+            index: 0,
+            delta: { tool_calls: detectedTools.map((tc, i) => ({ index: i, ...tc })) },
+            finish_reason: 'tool_calls',
+          }],
+        })}\n\n`);
       } else {
         res.write(`data: ${JSON.stringify({ ...chunkBase, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}\n\n`);
       }
@@ -1285,7 +1296,7 @@ app.post('/v1/chat/completions', async (req, res) => {
     if (typeof text !== 'string') text = JSON.stringify(text);
     estCompletionTokens = estimateTokens(text);
 
-    const detectedTools = parseToolCallsFromText(text);
+    const detectedTools = toolsProvided ? parseToolCallsFromText(text) : null;
     const messageObj = detectedTools
       ? { role: 'assistant', content: null, tool_calls: detectedTools }
       : { role: 'assistant', content: text };

@@ -586,6 +586,53 @@ async function main() {
   r = await request(OPEN_PORT, { path: '/v1/nope' });
   assert(r.status === 404 && errType(r) === 'invalid_request_error', 'unknown v1 route returns JSON 404');
 
+  console.log('\n## Tool-call parsing gated on request tools');
+  const TOOLTXT = JSON.stringify({ tool_calls: [{ id: 'call_1', type: 'function', function: { name: 'read_file', arguments: '{"path":"a"}' } }] });
+  const TOOL_PORT = 19395;
+  const toolClaude = await startFakeBridge('claude-tools', { text: '```json\n' + TOOLTXT + '\n```' });
+  await bootProvider(TOOL_PORT, {
+    PROVIDER_API_KEY: '',
+    CLAUDE_BRIDGE_URL: `http://127.0.0.1:${toolClaude.port}`,
+    GEMINI_BRIDGE_URL: `http://127.0.0.1:${gemini.port}`,
+  });
+  // Without tools: the JSON is ordinary content, NOT hijacked into tool_calls.
+  r = await request(TOOL_PORT, {
+    path: '/v1/chat/completions', method: 'POST',
+    body: { model: 'bridge-smart', messages: [{ role: 'user', content: 'show me an example payload' }] },
+  });
+  let toolResp = JSON.parse(r.body || '{}');
+  assert(typeof toolResp.choices[0].message.content === 'string' && toolResp.choices[0].message.content.includes('tool_calls'),
+    'tool-shaped reply without request tools stays plain content');
+  assert(toolResp.choices[0].finish_reason === 'stop', 'finish_reason stays stop without request tools');
+  // With tools: parsed into tool_calls.
+  r = await request(TOOL_PORT, {
+    path: '/v1/chat/completions', method: 'POST',
+    body: {
+      model: 'bridge-smart',
+      tools: [{ type: 'function', function: { name: 'read_file' } }],
+      messages: [{ role: 'user', content: 'read a' }],
+    },
+  });
+  toolResp = JSON.parse(r.body || '{}');
+  assert(toolResp.choices[0].finish_reason === 'tool_calls' && toolResp.choices[0].message.content === null,
+    'tool-shaped reply with request tools becomes tool_calls');
+  assert(toolResp.choices[0].message.tool_calls[0].function.name === 'read_file', 'tool call name preserved');
+  // Streaming with tools: the tool_calls delta carries per-entry index.
+  r = await request(TOOL_PORT, {
+    path: '/v1/chat/completions', method: 'POST',
+    body: {
+      model: 'bridge-smart', stream: true,
+      tools: [{ type: 'function', function: { name: 'read_file' } }],
+      messages: [{ role: 'user', content: 'read a' }],
+    },
+  });
+  const toolChunks = (r.body || '').split('\n\n').filter((l) => l.startsWith('data: ') && !l.includes('[DONE]'))
+    .map((l) => { try { return JSON.parse(l.slice(6)); } catch (_) { return null; } }).filter(Boolean);
+  const tcDelta = toolChunks.find((c) => c.choices && c.choices[0].delta && c.choices[0].delta.tool_calls);
+  assert(tcDelta && tcDelta.choices[0].delta.tool_calls[0].index === 0,
+    'streaming tool_calls delta carries index 0');
+  assert(tcDelta && tcDelta.choices[0].finish_reason === 'tool_calls', 'streaming finish_reason tool_calls');
+
   console.log('\n## Client abort mid-stream → 499, engine health not poisoned');
   const ABORT_PORT = 19390;
   const stallClaude = await startFakeBridge('claude-stall', { streamStall: true });
