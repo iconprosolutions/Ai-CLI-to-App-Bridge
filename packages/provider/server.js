@@ -11,10 +11,9 @@ const {
 } = require('@bridge/core');
 const { createClaudeAdapter, createAgyAdapter } = require('@bridge/adapters');
 const { createRouteRegistry } = require('./routes');
+const { createAccountPool } = require('./accounts');
 const { createTelemetry } = require('./telemetry');
 const { createUsageLedger } = require('./usage');
-const { createBreaker } = require('./breaker');
-const { createSemaphore } = require('./semaphore');
 const { createEventBus } = require('./events');
 const { createCapture } = require('./capture');
 const { createAdminRouter } = require('./admin');
@@ -58,27 +57,33 @@ const SSE_HEARTBEAT_MS = intEnv('SSE_HEARTBEAT_MS', 15000);
 
 const events = createEventBus();
 const capture = createCapture({ max: 50 });
-const activeRequests = new Map(); // reqId → {id, routeId, engine, appId, startedAt, streaming, ac, killedByAdmin}
+const activeRequests = new Map(); // reqId → {id, routeId, engine, appId, account, startedAt, streaming, ac, killedByAdmin}
 const enginesDisabled = {};
-const breakers = {};
-const semaphores = {};
-for (const e of ENGINE_NAMES) {
-  enginesDisabled[e] = false;
-  breakers[e] = createBreaker({
-    engine: e,
+for (const e of ENGINE_NAMES) enginesDisabled[e] = false;
+
+// Multi-account pool: each account carries its own breaker + CLI lane. With
+// no accounts.json every engine gets one implicit "default" account whose
+// spawns leave the environment untouched — exactly the old single-account
+// behavior.
+const pool = createAccountPool({
+  file: process.env.BRIDGE_ACCOUNTS_FILE || path.resolve(__dirname, '../../.bridge-runtime/accounts.json'),
+  baseDir: path.resolve(__dirname, '../../.bridge-runtime'),
+  engines: ENGINE_NAMES,
+  breakerOpts: {
     quotaCooldownMs: intEnv('BREAKER_QUOTA_COOLDOWN_MS', 15 * 60 * 1000),
     timeoutCooldownMs: intEnv('BREAKER_TIMEOUT_COOLDOWN_MS', 2 * 60 * 1000),
-    onChange: (s) => {
-      console.log(`[breaker] ${e} → ${s.state}${s.reason ? ` (${s.reason})` : ''}`);
-      events.emit('breaker.change', s);
-    },
-  });
-  semaphores[e] = createSemaphore({
+  },
+  semaphoreOpts: {
     max: MAX_CONCURRENT_PER_ENGINE,
     queueDepth: intEnv('PROVIDER_QUEUE_DEPTH', 4),
     queueTimeoutMs: intEnv('PROVIDER_QUEUE_TIMEOUT_MS', 30000),
-  });
-}
+  },
+  onChange: (ev) => {
+    if (ev.kind === 'breaker') console.log(`[breaker] ${ev.engine}:${ev.account} → ${ev.breaker.state}${ev.breaker.reason ? ` (${ev.breaker.reason})` : ''}`);
+    if (ev.kind === 'needs-login') console.warn(`[accounts] ${ev.engine}:${ev.account} needs login`);
+    events.emit('account.change', ev);
+  },
+});
 
 // Server-side interval health sampling — uptime no longer depends on how
 // many dashboard tabs are polling (audit M13).
@@ -142,9 +147,10 @@ app.get('/dashboard/status', async (req, res) => {
     engine: 'provider-bridge',
     authEnabled: Boolean(API_KEY),
     uptime: process.uptime(),
-    inflight: Object.fromEntries(ENGINE_NAMES.map((e) => [e, semaphores[e].active])),
-    queue: Object.fromEntries(ENGINE_NAMES.map((e) => [e, semaphores[e].queued])),
-    breakers: Object.fromEntries(ENGINE_NAMES.map((e) => [e, breakers[e].status()])),
+    inflight: Object.fromEntries(ENGINE_NAMES.map((e) => [e, pool.inflight(e)])),
+    queue: Object.fromEntries(ENGINE_NAMES.map((e) => [e, pool.queued(e)])),
+    breakers: Object.fromEntries(ENGINE_NAMES.map((e) => [e, pool.engineBreakerStatus(e)])),
+    accounts: pool.snapshot(),
     capture: { enabled: capture.enabled, count: capture.size },
     activeRequests: [...activeRequests.values()].map((a) => ({
       id: a.id, routeId: a.routeId, engine: a.engine, appId: a.appId, startedAt: a.startedAt, streaming: a.streaming,
@@ -174,8 +180,8 @@ app.get('/health', (req, res) => {
     status: 'ok',
     engine: 'provider-bridge',
     uptime: process.uptime(),
-    inflightClaude: semaphores.claude.active,
-    inflightGemini: semaphores.gemini.active,
+    inflightClaude: pool.inflight('claude'),
+    inflightGemini: pool.inflight('gemini'),
   });
 });
 
@@ -184,7 +190,7 @@ app.get('/dashboard/events', events.handler);
 
 // Control plane (always key-gated; see admin.js).
 app.use('/admin', createAdminRouter({
-  apiKey: API_KEY, registry, breakers, adapters, activeRequests, capture, events, enginesDisabled,
+  apiKey: API_KEY, registry, pool, adapters, activeRequests, capture, events, enginesDisabled,
 }));
 
 // Durable usage rollups (JSONL ledger; survives restarts).
@@ -218,6 +224,7 @@ app.post('/v1/chat/completions', async (req, res) => {
   let estPromptTokens = 0;
   let estCompletionTokens = 0;
   let usageSource = 'estimated';
+  let accountName = null; // set after selection; follows failover
 
   const record = (status) => {
     telemetry.record({
@@ -227,6 +234,7 @@ app.post('/v1/chat/completions', async (req, res) => {
       routeId: route ? route.id : null,
       label: route ? route.label : (aliasUsed || '?'),
       engine: route ? route.engine : null,
+      account: accountName,
       status,
       durationMs: Date.now() - started,
       estPromptTokens,
@@ -240,6 +248,7 @@ app.post('/v1/chat/completions', async (req, res) => {
         routeId: route.id,
         engine: route.engine,
         model: route.model,
+        account: accountName,
         promptTokens: estPromptTokens,
         completionTokens: estCompletionTokens,
         usageSource,
@@ -319,20 +328,16 @@ app.post('/v1/chat/completions', async (req, res) => {
     }
   }
 
-  // Circuit breaker: a known-exhausted engine fails fast with Retry-After
-  // instead of spawning a doomed CLI run. Half-open admits one trial.
-  const gate = breakers[route.engine].allow();
-  if (!gate.allowed) {
-    record(429);
-    return sendError(
-      res,
-      429,
-      `Engine "${route.engine}" circuit is open (${gate.reason || 'capacity'}). Failing fast; retry in ~${gate.retryInSec}s.`,
-      'rate_limit_error',
-      null,
-      gate.retryInSec,
-    );
+  // Account selection honors the route pin; pinned requests fail loud rather
+  // than silently switching accounts. Per-account breakers make a known-
+  // exhausted account fail fast (or rotate past it) instead of spawning a
+  // doomed CLI run.
+  let sel = pool.select(route.engine, { pin: route.account || null });
+  if (!sel.ok) {
+    record(sel.status);
+    return sendError(res, sel.status, sel.message, sel.status === 429 ? 'rate_limit_error' : 'engine_auth_error', null, sel.retryInSec);
   }
+  accountName = sel.account.name;
 
   const adapter = adapters[route.engine];
   const ac = new AbortController();
@@ -351,6 +356,7 @@ app.post('/v1/chat/completions', async (req, res) => {
     routeId: route.id,
     engine: route.engine,
     appId,
+    account: sel.account.name,
     startedAt: new Date().toISOString(),
     streaming: body.stream === true,
     ac,
@@ -361,7 +367,7 @@ app.post('/v1/chat/completions', async (req, res) => {
 
   let release;
   try {
-    release = await semaphores[route.engine].acquire(ac.signal);
+    release = await sel.account.semaphore.acquire(ac.signal);
   } catch (err) {
     activeRequests.delete(reqId);
     if (err.busy) {
@@ -417,10 +423,33 @@ app.post('/v1/chat/completions', async (req, res) => {
       if (result) cap.rawOutput = result.text || '';
       if (err) cap.error = { kind: err.kind || 'error', message: err.message };
     };
-    const breakerFeedback = (err) => {
-      if (!err) return breakers[route.engine].recordSuccess();
-      if (err.kind === 'aborted') return undefined; // says nothing about the engine
-      return breakers[route.engine].recordFailure(err.kind); // quota/timeout count; others reset streaks
+    const breakerFeedback = (err) => pool.feedback(route.engine, sel.account, err || null);
+
+    // One-shot transparent failover: a quota/auth/spawn failure on a pooled
+    // (un-pinned) account moves the SAME request to the next healthy account
+    // — but never after content bytes have reached the client.
+    const FAILOVER_KINDS = new Set(['quota', 'auth', 'spawn_failed']);
+    const invokeWithFailover = async ({ prompt: p, onDelta, canFailover, onFailover }) => {
+      try {
+        return await adapter.invoke({ prompt: p, model: route.model, signal: ac.signal, onDelta, env: pool.envFor(route.engine, sel.account) });
+      } catch (err) {
+        const kind = err instanceof BridgeError ? err.kind : null;
+        if (!route.account && FAILOVER_KINDS.has(kind) && canFailover() && !clientAborted) {
+          pool.feedback(route.engine, sel.account, err);
+          const next = pool.select(route.engine, { exclude: sel.account.name });
+          if (next.ok) {
+            release();
+            release = await next.account.semaphore.acquire(ac.signal);
+            sel = next;
+            accountName = sel.account.name;
+            active.account = sel.account.name;
+            if (onFailover) onFailover();
+            console.log(`[req ${reqId}] failover ${route.engine} → account ${sel.account.name} (${kind})`);
+            return adapter.invoke({ prompt: p, model: route.model, signal: ac.signal, onDelta, env: pool.envFor(route.engine, sel.account) });
+          }
+        }
+        throw err;
+      }
     };
 
     const rf = body.response_format;
@@ -440,7 +469,8 @@ app.post('/v1/chat/completions', async (req, res) => {
         return JSON.stringify(attempt(text));
       } catch (err1) {
         const retryPrompt = `${prompt}\n\n[ASSISTANT]\n${text}\n\n[SYSTEM]\nThe reply above is not acceptable: ${err1.message}. Respond again with ONLY the corrected JSON — no code fences, no commentary.`;
-        const retry = await adapter.invoke({ prompt: retryPrompt, model: route.model, signal: ac.signal });
+        // Corrective retries stay on the account that produced the reply.
+        const retry = await adapter.invoke({ prompt: retryPrompt, model: route.model, signal: ac.signal, env: pool.envFor(route.engine, sel.account) });
         applyUsage(retry); // usage reflects the attempt whose output we return
         return JSON.stringify(attempt(retry.text)); // still bad → bad_output up the chain
       }
@@ -481,7 +511,9 @@ app.post('/v1/chat/completions', async (req, res) => {
         return res.end();
       };
 
+      let streamedBytes = false; // content bytes sent → failover no longer possible
       const pacer = createSmoothPacer((deltaText) => {
+        streamedBytes = true;
         const ok = res.write(`data: ${JSON.stringify({ ...chunkBase, choices: [{ index: 0, delta: { content: deltaText }, finish_reason: null }] })}\n\n`);
         // Backpressure: pause pacing until the socket drains.
         if (!ok && !res.writableEnded) return new Promise((r) => res.once('drain', r));
@@ -511,8 +543,11 @@ app.post('/v1/chat/completions', async (req, res) => {
 
       let result;
       try {
-        result = await adapter.invoke({
-          prompt, model: route.model, signal: ac.signal, onDelta: feed,
+        result = await invokeWithFailover({
+          prompt,
+          onDelta: feed,
+          canFailover: () => !streamedBytes,
+          onFailover: () => { held = ''; holding = toolsProvided; }, // drop the failed attempt's held head
         });
       } catch (err) {
         const mapped = httpFor(err);
@@ -563,7 +598,7 @@ app.post('/v1/chat/completions', async (req, res) => {
 
     let result;
     try {
-      result = await adapter.invoke({ prompt, model: route.model, signal: ac.signal, onDelta: markFirstByte });
+      result = await invokeWithFailover({ prompt, onDelta: markFirstByte, canFailover: () => true });
     } catch (err) {
       const mapped = httpFor(err);
       breakerFeedback(err);
@@ -597,7 +632,7 @@ app.post('/v1/chat/completions', async (req, res) => {
       const retryPrompt = `${prompt}\n\n[ASSISTANT]\n${text}\n\n[SYSTEM]\nThe reply above is not acceptable: this request requires ${demand}. Respond with ONLY the \`\`\`json\`\`\` tool_calls block — no plain text.`;
       let retry;
       try {
-        retry = await adapter.invoke({ prompt: retryPrompt, model: route.model, signal: ac.signal });
+        retry = await adapter.invoke({ prompt: retryPrompt, model: route.model, signal: ac.signal, env: pool.envFor(route.engine, sel.account) });
       } catch (err) {
         const mapped = httpFor(err);
         breakerFeedback(err);

@@ -7,7 +7,7 @@ const express = require('express');
 // bearer key — even when /v1 auth is open — because these mutate state and
 // can spend quota (probe). With no key configured at all, admin is disabled.
 function createAdminRouter({
-  apiKey, registry, breakers, adapters, activeRequests, capture, events, enginesDisabled,
+  apiKey, registry, pool, adapters, activeRequests, capture, events, enginesDisabled,
 }) {
   const router = express.Router();
 
@@ -46,8 +46,27 @@ function createAdminRouter({
   router.post('/breakers/:engine/reset', (req, res) => {
     const engine = engineOr404(req, res);
     if (!engine) return undefined;
-    breakers[engine].reset();
-    return res.json({ engine, breaker: breakers[engine].status() });
+    pool.resetBreakers(engine);
+    return res.json({ engine, breaker: pool.engineBreakerStatus(engine) });
+  });
+
+  // ── Accounts ───────────────────────────────────────────────────────────
+  // Probe spends one tiny prompt on the account; success clears needs-login
+  // and closes its breaker — the recovery path after an operator re-login.
+  router.post('/accounts/:engine/:name/probe', async (req, res) => {
+    const engine = engineOr404(req, res);
+    if (!engine) return undefined;
+    const acct = pool.accounts(engine).find((a) => a.name === req.params.name);
+    if (!acct) return res.status(404).json({ error: `Unknown account "${engine}:${req.params.name}"` });
+    try {
+      const out = await adapters[engine].invoke({ prompt: 'Reply with exactly: OK', env: pool.envFor(engine, acct) });
+      pool.clearNeedsLogin(engine, acct.name);
+      pool.feedback(engine, acct, null);
+      return res.json({ engine, account: acct.name, ok: true, sample: String(out.text).slice(0, 40) });
+    } catch (err) {
+      pool.feedback(engine, acct, err);
+      return res.status(502).json({ engine, account: acct.name, ok: false, error: err.message, kind: err.kind || null });
+    }
   });
 
   // ── Engines ────────────────────────────────────────────────────────────

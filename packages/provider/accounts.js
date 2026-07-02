@@ -131,7 +131,7 @@ function createAccountPool({
       if (gate.retryInSec && (soonest === null || gate.retryInSec < soonest)) soonest = gate.retryInSec;
     }
     if (soonest !== null) {
-      return { ok: false, status: 429, message: `All ${engine} accounts are cooling down. Retry in ~${soonest}s.`, retryInSec: soonest };
+      return { ok: false, status: 429, message: `All ${engine} accounts are cooling down — circuit is open. Retry in ~${soonest}s.`, retryInSec: soonest };
     }
     return { ok: false, status: 503, message: `No usable ${engine} account (all disabled or logged out).` };
   }
