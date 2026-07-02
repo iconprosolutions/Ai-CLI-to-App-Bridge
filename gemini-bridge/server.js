@@ -33,6 +33,10 @@ const GEMINI_PATH = process.env.GEMINI_PATH || process.env.AGY_PATH || 'agy';
 const DEFAULT_MODEL = process.env.GEMINI_MODEL || 'Gemini 3.5 Flash (Low)';
 const CLI_TIMEOUT_MS = Number(process.env.CLI_TIMEOUT_MS) || 5 * 60 * 1000; // 5 min
 const MAX_CLI_OUTPUT_BYTES = Number(process.env.MAX_CLI_OUTPUT_BYTES) || 10 * 1024 * 1024; // 10 MB
+// agy takes the prompt as a --print flag value (argv), which the OS caps at
+// ARG_MAX (~1MB total on macOS). Reject earlier with a clear error; Phase 2
+// moves agy to stdin/temp-file delivery in the adapter.
+const MAX_PROMPT_BYTES = Number(process.env.MAX_PROMPT_BYTES) || 200 * 1024;
 
 // ─────────────────────────────────────────────
 // Security
@@ -270,6 +274,13 @@ function appendToContext(type, slug, section) {
 function runGemini(prompt, model, onChunk, opts = {}) {
   return new Promise((resolve, reject) => {
     const selectedModel = normalizeModel(model);
+
+    const promptBytes = Buffer.byteLength(prompt || '', 'utf8');
+    if (promptBytes > MAX_PROMPT_BYTES) {
+      const err = new Error(`Prompt too large for the Antigravity CLI (${promptBytes} bytes; limit ${MAX_PROMPT_BYTES}). Trim the conversation history.`);
+      err.statusCode = 413;
+      return reject(err);
+    }
 
     // agy --print: non-interactive mode; --model selects the Antigravity model.
     const args = ['--print', prompt, '--model', selectedModel, '--print-timeout', `${Math.ceil(CLI_TIMEOUT_MS / 1000)}s`];
@@ -647,7 +658,7 @@ app.post('/api/chat', async (req, res) => {
       res.write(JSON.stringify({ event: 'error', error: err.message }) + '\n');
       return res.end();
     }
-    return res.status(500).json({ success: false, error: err.message });
+    return res.status(err.statusCode || 500).json({ success: false, error: err.message });
   }
 });
 
@@ -709,7 +720,7 @@ app.post('/api/process', async (req, res) => {
     });
   } catch (err) {
     console.error(`  Error: ${err.message}`);
-    res.status(500).json({ success: false, error: err.message });
+    res.status(err.statusCode || 500).json({ success: false, error: err.message });
   }
 });
 

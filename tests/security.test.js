@@ -234,6 +234,15 @@ async function main() {
   assert(sr.status === 200 && sp.success === true && (sp.text || '').length >= 2 * 1024 * 1024,
     `[claude] 2MB prompt survives (argv would E2BIG) — got status ${sr.status}, len ${(sp.text || '').length}`);
 
+  console.log('\n## gemini-bridge — oversized prompt rejected clearly (argv limit)');
+  const geminiBridge = BRIDGES[1];
+  await bootBridge(geminiBridge.server, 19151, { BRIDGE_API_KEY: '', GEMINI_PATH: STDIN_ECHO_CLI });
+  sr = await request(19151, { path: '/api/chat', method: 'POST', body: { prompt: 'y'.repeat(300 * 1024) } });
+  assert(sr.status === 413 && (sr.body || '').includes('too large'),
+    `[gemini] 300KB prompt rejected 413 with clear message (got ${sr.status})`);
+  sr = await request(19151, { path: '/api/chat', method: 'POST', body: { prompt: 'small is fine' } });
+  assert(sr.status === 200, '[gemini] small prompt still works');
+
   console.log(`\n# Result: ${passed} passed, ${failed} failed`);
   process.exit(failed === 0 ? 0 : 1);
 }
