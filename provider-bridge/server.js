@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const crypto = require('crypto');
 const http = require('http');
+const { createSmoothPacer } = require('./pacer');
 
 const app = express();
 
@@ -293,38 +294,6 @@ function sendStreamingCompletion(res, completion) {
   })}\n\n`);
   res.write('data: [DONE]\n\n');
   res.end();
-}
-
-function createSmoothPacer(onToken, delayMs = 12) {
-  const queue = [];
-  let processing = false;
-
-  const processQueue = async () => {
-    if (processing) return;
-    processing = true;
-    while (queue.length > 0) {
-      const token = queue.shift();
-      onToken(token);
-      if (delayMs > 0 && queue.length > 0) {
-        await new Promise((r) => setTimeout(r, delayMs));
-      }
-    }
-    processing = false;
-  };
-
-  return {
-    push(text) {
-      if (!text) return;
-      const tokens = text.match(/\s+|-|[^\s|-]+/g) || [text];
-      queue.push(...tokens);
-      processQueue();
-    },
-    async drain() {
-      while (processing || queue.length > 0) {
-        await new Promise((r) => setTimeout(r, 10));
-      }
-    },
-  };
 }
 
 function formatContent(content) {
@@ -1231,7 +1200,7 @@ app.post('/v1/chat/completions', async (req, res) => {
 
       const pacer = createSmoothPacer((deltaText) => {
         res.write(`data: ${JSON.stringify({ ...chunkBase, choices: [{ index: 0, delta: { content: deltaText }, finish_reason: null }] })}\n\n`);
-      }, 10);
+      }, { delayMs: 10 });
 
       try {
         upstream = await callUpstreamStream(route.engine, payload, (deltaText) => {
