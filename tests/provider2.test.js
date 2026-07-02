@@ -90,6 +90,11 @@ async function main() {
     validateRoutes({ defaultRoute: 'a', routes: [{ id: 'a', label: 'x', engine: 'claude', model: 'm', aliases: ['a2'] }, { id: 'b', label: 'x', engine: 'claude', model: 'm', aliases: ['a2'] }] });
   } catch (e) { threw = /collides|duplicate/.test(e.message); }
   assert(threw, 'duplicate alias rejected');
+  const pinnedRoute = { defaultRoute: 'a', routes: [{ id: 'a', label: 'x', engine: 'claude', model: 'm', account: 'work' }] };
+  assert(validateRoutes(pinnedRoute).routes[0].account === 'work', 'route account pin accepted');
+  threw = false;
+  try { validateRoutes({ defaultRoute: 'a', routes: [{ id: 'a', label: 'x', engine: 'claude', model: 'm', account: 'bad name!' }] }); } catch (e) { threw = /account/.test(e.message); }
+  assert(threw, 'bad account pin rejected');
   const routesFile = path.join(TMP, 'routes.json');
   fs.writeFileSync(routesFile, JSON.stringify({ defaultRoute: 'r1', routes: [{ id: 'r1', label: 'R1', engine: 'claude', model: 'm1', aliases: ['fast'] }] }));
   const reg = createRouteRegistry(routesFile, { watch: false, logger: { log: () => {}, error: () => {} } });

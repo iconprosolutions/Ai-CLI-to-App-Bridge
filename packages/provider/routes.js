@@ -18,6 +18,9 @@ function validateRoutes(data) {
     }
     if (!VALID_ENGINES.has(r.engine)) throw new Error(`routes.json: unknown engine "${r.engine}" on ${r.id}`);
     if (r.aliases !== undefined && !Array.isArray(r.aliases)) throw new Error(`routes.json: aliases must be an array on ${r.id}`);
+    if (r.account !== undefined && (typeof r.account !== 'string' || !/^[A-Za-z0-9._-]+$/.test(r.account))) {
+      throw new Error(`routes.json: "account" must be a simple account name on ${r.id}`);
+    }
     if (seen.has(r.id)) throw new Error(`routes.json: duplicate id "${r.id}"`);
     seen.add(r.id);
     for (const a of r.aliases || []) {
