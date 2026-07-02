@@ -25,7 +25,10 @@ function createSmoothPacer(onToken, opts = {}) {
     if (processing) return;
     processing = true;
     while (queue.length > 0 && !stopped) {
-      onToken(queue.shift());
+      // onToken may return a promise (e.g. awaiting socket drain for
+      // backpressure) — honor it before pacing on.
+      const ret = onToken(queue.shift());
+      if (ret && typeof ret.then === 'function') await ret;
       const d = currentDelay();
       if (d > 0 && queue.length > 0) {
         budgetLeft -= d;

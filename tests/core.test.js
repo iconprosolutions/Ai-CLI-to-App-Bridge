@@ -66,6 +66,31 @@ async function testJsonExtract() {
   assert(kind === 'bad_output', 'unparseable input throws BridgeError(bad_output)');
 }
 
+async function testJsonSchema() {
+  console.log('\n## json-schema — minimal validator');
+  const { validateJsonSchema, assertJsonSchema } = core;
+  const schema = {
+    type: 'object',
+    required: ['name', 'count'],
+    additionalProperties: false,
+    properties: {
+      name: { type: 'string' },
+      count: { type: 'integer' },
+      mood: { type: 'string', enum: ['happy', 'sad'] },
+      tags: { type: 'array', items: { type: 'string' } },
+    },
+  };
+  assert(validateJsonSchema({ name: 'a', count: 2, mood: 'happy', tags: ['x'] }, schema).length === 0, 'valid object passes');
+  assert(validateJsonSchema({ name: 'a' }, schema).some((e) => e.includes('count')), 'missing required reported');
+  assert(validateJsonSchema({ name: 'a', count: 'two' }, schema).some((e) => e.includes('expected integer')), 'wrong type reported');
+  assert(validateJsonSchema({ name: 'a', count: 1, mood: 'angry' }, schema).some((e) => e.includes('enum')), 'enum violation reported');
+  assert(validateJsonSchema({ name: 'a', count: 1, extra: true }, schema).some((e) => e.includes('unexpected property')), 'additionalProperties=false enforced');
+  assert(validateJsonSchema({ name: 'a', count: 1, tags: ['x', 5] }, schema).some((e) => e.includes('[1]')), 'bad array item reported with index');
+  let kind = null;
+  try { assertJsonSchema({ name: 'a' }, schema); } catch (e) { kind = e.kind; }
+  assert(kind === 'bad_output', 'assertJsonSchema throws BridgeError(bad_output)');
+}
+
 async function testCliRunner() {
   console.log('\n## cli-runner — the process sandbox');
   const { runCli, liveChildren, BridgeError } = core;
@@ -200,6 +225,7 @@ async function main() {
   await testErrors();
   await testAnsi();
   await testJsonExtract();
+  await testJsonSchema();
   await testCliRunner();
   await testAuthSessionsConfig();
   await testContextStore();

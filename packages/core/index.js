@@ -6,6 +6,7 @@ module.exports = {
   ...require('./pacer'),
   ...require('./ansi'),
   ...require('./json-extract'),
+  ...require('./json-schema'),
   ...require('./auth'),
   ...require('./sessions'),
   ...require('./config'),
