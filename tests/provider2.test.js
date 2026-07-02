@@ -100,6 +100,67 @@ async function main() {
   fs.writeFileSync(routesFile, 'not json');
   assert(reg.reload() === false && reg.resolve('r1').model === 'm2', 'invalid edit keeps last good config');
 
+  // ── Account pool unit checks ──────────────────────────────────────────
+  console.log('\n## accounts.js — registry, rotation, breakers, pinning');
+  const { createAccountPool, validateAccounts } = require(path.join(REPO, 'packages', 'provider', 'accounts.js'));
+  const { BridgeError } = require(path.join(REPO, 'packages', 'core'));
+  const acctDir = fs.mkdtempSync(path.join(os.tmpdir(), 'acct-'));
+  const acctFile = path.join(acctDir, 'accounts.json');
+
+  {
+    const pool = createAccountPool({ file: acctFile, baseDir: acctDir, engines: ['claude', 'gemini'], watch: false });
+    const sel = pool.select('claude');
+    assert(sel.ok && sel.account.name === 'default' && sel.account.implicit, 'implicit default account when no accounts.json');
+    assert(pool.envFor('claude', sel.account) === null, 'implicit default leaves env untouched');
+  }
+
+  fs.writeFileSync(acctFile, JSON.stringify({
+    claude: [{ name: 'a', dir: 'accounts/claude/a' }, { name: 'b', dir: 'accounts/claude/b' }],
+    gemini: [{ name: 'g', dir: 'accounts/gemini/g' }],
+  }));
+  const pool = createAccountPool({
+    file: acctFile, baseDir: acctDir, engines: ['claude', 'gemini'], watch: false,
+    breakerOpts: { quotaThreshold: 2, quotaCooldownMs: 60000 },
+    logger: { log: () => {}, error: () => {} },
+  });
+
+  const s1 = pool.select('claude'); const s2 = pool.select('claude'); const s3 = pool.select('claude');
+  assert(s1.account.name === 'a' && s2.account.name === 'b' && s3.account.name === 'a', 'round-robin rotation');
+  assert(pool.envFor('claude', s1.account).CLAUDE_CONFIG_DIR === path.join(acctDir, 'accounts/claude/a'), 'claude env → CLAUDE_CONFIG_DIR');
+  const gsel = pool.select('gemini');
+  assert(pool.envFor('gemini', gsel.account).HOME === path.join(acctDir, 'accounts/gemini/g'), 'gemini env → HOME');
+
+  const quotaErr = new BridgeError('quota', 'limit');
+  pool.feedback('claude', s1.account, quotaErr); pool.feedback('claude', s1.account, quotaErr);
+  let onlyB = true;
+  for (let i = 0; i < 4; i += 1) {
+    const s = pool.select('claude');
+    if (!s.ok || s.account.name !== 'b') onlyB = false;
+  }
+  assert(onlyB, 'open breaker excluded from rotation');
+  pool.feedback('claude', s2.account, quotaErr); pool.feedback('claude', s2.account, quotaErr);
+  const exhausted = pool.select('claude');
+  assert(!exhausted.ok && exhausted.status === 429 && exhausted.retryInSec > 0, 'all accounts open → 429 + retry hint');
+
+  pool.resetBreakers('claude');
+  pool.feedback('claude', s1.account, new BridgeError('auth', 'Not logged in'));
+  assert(pool.select('claude').account.name === 'b', 'needs-login account excluded');
+  assert(pool.snapshot().claude.find((x) => x.name === 'a').needsLogin === true, 'snapshot reports needsLogin');
+
+  const pinned = pool.select('claude', { pin: 'a' });
+  assert(!pinned.ok && pinned.status === 503, 'pinned needs-login account fails loud, no rotation');
+  assert(pool.select('claude', { pin: 'nope' }).status === 400, 'unknown pin → 400');
+
+  pool.clearNeedsLogin('claude', 'a');
+  assert(pool.select('claude', { exclude: 'a' }).account.name === 'b', 'exclude skips the named account');
+
+  let acctThrew = false;
+  try { validateAccounts({ claude: [{ name: 'x', dir: 'd' }, { name: 'x', dir: 'd2' }] }); } catch (e) { acctThrew = /duplicate/.test(e.message); }
+  assert(acctThrew, 'duplicate names rejected');
+  acctThrew = false;
+  try { validateAccounts({ claude: [{ name: 'bad name!', dir: 'd' }] }); } catch (e) { acctThrew = /name/.test(e.message); }
+  assert(acctThrew, 'bad name characters rejected');
+
   // ── Default boot: happy paths ─────────────────────────────────────────
   const LOG = path.join(TMP, 'argv.log');
   const CLAUDE_STUB = writeStub('claude-stub.sh', 'claude-sim', { FAKE_CLI_LOG: LOG });
