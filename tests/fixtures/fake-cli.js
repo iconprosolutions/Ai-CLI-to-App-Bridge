@@ -32,6 +32,15 @@ function logInvocation() {
   if (process.env.FAKE_CLI_LOG) {
     require('fs').appendFileSync(process.env.FAKE_CLI_LOG, `${JSON.stringify(simArgs)}\n`);
   }
+  // Separate file: FAKE_CLI_LOG lines are parsed as plain argv arrays by
+  // existing tests; env assertions need the account-redirect variables too.
+  if (process.env.FAKE_CLI_ENV_LOG) {
+    require('fs').appendFileSync(process.env.FAKE_CLI_ENV_LOG, `${JSON.stringify({
+      argv: simArgs,
+      CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR || null,
+      HOME: process.env.HOME || null,
+    })}\n`);
+  }
 }
 
 function readStdin() {
