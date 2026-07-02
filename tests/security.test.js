@@ -78,6 +78,9 @@ const BIG_CLI = writeFakeCli('big-cli.sh', 'yes 0123456789ABCDEF | head -c 50000
 const STDOUT_ERROR_CLI = writeFakeCli('stdout-error-cli.sh', 'echo "session limit resets soon"; exit 1');
 // Echoes stdin back — proves the prompt arrives via stdin, not argv.
 const STDIN_ECHO_CLI = writeFakeCli('stdin-echo-cli.sh', 'cat -');
+// Emits 😀 (F0 9F 98 80) split across two writes — exercises multibyte
+// decoding across chunk boundaries.
+const UTF8_SPLIT_CLI = writeFakeCli('utf8-split-cli.sh', "printf '\\360\\237\\230'; sleep 0.2; printf '\\200\\n'");
 
 // Load a bridge module into a unique PORT/contexts dir. We re-require a fresh
 // copy by clearing the cache and monkeypatching env. The module captures its
@@ -242,6 +245,19 @@ async function main() {
     `[gemini] 300KB prompt rejected 413 with clear message (got ${sr.status})`);
   sr = await request(19151, { path: '/api/chat', method: 'POST', body: { prompt: 'small is fine' } });
   assert(sr.status === 200, '[gemini] small prompt still works');
+
+  console.log('\n## Streaming UTF-8 split across chunks stays intact');
+  for (let i = 0; i < BRIDGES.length; i += 1) {
+    const b = BRIDGES[i];
+    const port = 19160 + i;
+    await bootBridge(b.server, port, { BRIDGE_API_KEY: '', [b.pathEnv]: UTF8_SPLIT_CLI });
+    const sres = await request(port, { path: '/api/chat', method: 'POST', body: { prompt: 'x', stream: true } });
+    const deltas = (sres.body || '').split('\n').filter(Boolean)
+      .map((l) => { try { return JSON.parse(l); } catch (_) { return null; } })
+      .filter((e) => e && e.event === 'delta').map((e) => e.text).join('');
+    assert(deltas.includes('😀') && !deltas.includes('�'),
+      `[${b.name}] split multibyte char decodes cleanly in stream deltas (got ${JSON.stringify(deltas)})`);
+  }
 
   console.log(`\n# Result: ${passed} passed, ${failed} failed`);
   process.exit(failed === 0 ? 0 : 1);

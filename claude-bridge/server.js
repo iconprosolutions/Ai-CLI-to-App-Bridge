@@ -4,6 +4,7 @@ const { spawn, execFileSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { StringDecoder } = require('string_decoder');
 
 const app = express();
 
@@ -278,6 +279,10 @@ function runClaude(prompt, model, onChunk, opts = {}) {
 
     let stdout = '';
     let stderr = '';
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    const outDecoder = new StringDecoder('utf8');
+    const errDecoder = new StringDecoder('utf8');
     let settled = false;
     let truncated = false;
 
@@ -306,23 +311,31 @@ function runClaude(prompt, model, onChunk, opts = {}) {
     // we terminate the child; the partial output is returned as a (truncated)
     // success rather than an error.
     child.stdout.on('data', (data) => {
-      const str = data.toString();
-      const room = MAX_CLI_OUTPUT_BYTES - stdout.length;
-      if (room > 0) stdout += str.slice(0, room);
-      if (typeof onChunk === 'function') {
-        onChunk(str);
+      const room = MAX_CLI_OUTPUT_BYTES - stdoutBytes;
+      if (room <= 0) return;
+      const slice = data.length > room ? data.subarray(0, room) : data;
+      stdoutBytes += slice.length;
+      const str = outDecoder.write(slice); // holds incomplete multibyte tails
+      if (str) {
+        stdout += str;
+        if (typeof onChunk === 'function') onChunk(str);
       }
-      if (stdout.length >= MAX_CLI_OUTPUT_BYTES && !truncated) {
+      if (stdoutBytes >= MAX_CLI_OUTPUT_BYTES && !truncated) {
         truncated = true;
         child.kill('SIGTERM');
       }
     });
     child.stderr.on('data', (data) => {
-      const room = MAX_CLI_OUTPUT_BYTES - stderr.length;
-      if (room > 0) stderr += data.toString().slice(0, room);
+      const room = MAX_CLI_OUTPUT_BYTES - stderrBytes;
+      if (room <= 0) return;
+      const slice = data.length > room ? data.subarray(0, room) : data;
+      stderrBytes += slice.length;
+      stderr += errDecoder.write(slice);
     });
 
     child.on('close', (code) => {
+      stdout += outDecoder.end();
+      stderr += errDecoder.end();
       if (truncated) return settle(false, stdout.trim());
       if (code === 0) settle(false, stdout.trim());
       else settle(true, new Error(summarizeClaudeError(stderr, stdout, selectedModel)));
