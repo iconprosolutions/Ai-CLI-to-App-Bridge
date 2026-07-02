@@ -122,4 +122,4 @@ Important boundary: provider mode is text-only compatibility for Hermes today. I
 
 If `bridge-claude-sonnet-4.6-northstar` or another Claude route says Claude has hit a session limit, the bridge is still working; Claude Code is refusing the underlying subscription request. Use `bridge-agy-gemini-3.5-flash-medium-pulse` or `bridge-agy-gemini-3.1-pro-high-atlas` until Claude resets, then retry the Claude route.
 
-The dashboard's telemetry is local request metadata only: counts, status, route, engine, and latency. It intentionally does not store prompts or response text.
+The dashboard's telemetry is local request metadata only: counts, status, route, engine, latency, and estimated token usage. Token counts are a local heuristic (~4 chars/token on prompt + completion length), not a real tokenizer or billing data. Calls are attributed to an app via the optional `X-App-Id` request header (defaults to `default`). The dashboard never stores prompts or response text, and all telemetry is in-memory and resets when the provider process restarts.

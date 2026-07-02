@@ -267,7 +267,7 @@ function appendToContext(type, slug, section) {
 // Gemini CLI execution
 // ─────────────────────────────────────────────
 
-function runGemini(prompt, model) {
+function runGemini(prompt, model, onChunk, opts = {}) {
   return new Promise((resolve, reject) => {
     const selectedModel = normalizeModel(model);
 
@@ -279,6 +279,10 @@ function runGemini(prompt, model) {
       env: { ...process.env, HOME: process.env.HOME },
       stdio: ['ignore', 'pipe', 'pipe'], // ignore stdin so CLI doesn't wait for it
     });
+
+    if (opts && typeof opts.onSpawn === 'function') {
+      opts.onSpawn(child);
+    }
 
     let stdout = '';
     let stderr = '';
@@ -312,8 +316,13 @@ function runGemini(prompt, model) {
     // we terminate the child; the partial output is returned as a (truncated)
     // success rather than an error.
     child.stdout.on('data', (data) => {
+      const str = data.toString();
       const room = MAX_CLI_OUTPUT_BYTES - stdout.length;
-      if (room > 0) stdout += data.toString().slice(0, room);
+      if (room > 0) stdout += str.slice(0, room);
+      if (typeof onChunk === 'function') {
+        const cleaned = stripAnsi(str);
+        if (cleaned) onChunk(cleaned);
+      }
       if (stdout.length >= MAX_CLI_OUTPUT_BYTES && !truncated) {
         truncated = true;
         child.kill('SIGTERM');
@@ -586,6 +595,7 @@ app.post('/api/chat', async (req, res) => {
     model,
     prompt,
     content,
+    stream = false,
   } = req.body;
 
   const input = prompt || content || '';
@@ -603,12 +613,41 @@ app.post('/api/chat', async (req, res) => {
 
     const fullPrompt = buildPrompt(task === 'chat' ? 'raw' : task, clientSlug, { prompt: input, content: input });
     const resolvedModel = normalizeModel(model || session.model);
-    const raw = await runGemini(fullPrompt, resolvedModel);
-    touchSession(clientSlug);
 
-    res.json({ success: true, text: stripAnsi(raw), model: resolvedModel });
+    let activeChild = null;
+    res.on('close', () => {
+      if (activeChild && !res.writableEnded) {
+        try { activeChild.kill('SIGTERM'); } catch (_) {}
+      }
+    });
+
+    if (stream) {
+      res.status(200);
+      res.set({
+        'Content-Type': 'application/x-ndjson',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+      });
+      const raw = await runGemini(fullPrompt, resolvedModel, (chunk) => {
+        res.write(JSON.stringify({ event: 'delta', text: chunk }) + '\n');
+      }, { onSpawn: (c) => { activeChild = c; } });
+      activeChild = null;
+      touchSession(clientSlug);
+      res.write(JSON.stringify({ event: 'done', text: stripAnsi(raw), model: resolvedModel }) + '\n');
+      return res.end();
+    } else {
+      const raw = await runGemini(fullPrompt, resolvedModel, null, { onSpawn: (c) => { activeChild = c; } });
+      activeChild = null;
+      touchSession(clientSlug);
+      return res.json({ success: true, text: stripAnsi(raw), model: resolvedModel });
+    }
   } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+    activeChild = null;
+    if (stream && res.headersSent) {
+      res.write(JSON.stringify({ event: 'error', error: err.message }) + '\n');
+      return res.end();
+    }
+    return res.status(500).json({ success: false, error: err.message });
   }
 });
 

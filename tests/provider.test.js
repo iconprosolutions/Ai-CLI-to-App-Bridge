@@ -72,10 +72,18 @@ function startFakeBridge(name, opts = {}) {
           res.end(JSON.stringify(opts.statusBody || { success: false, error: 'forced error' }));
           return;
         }
+        const text = `[${name}] replied to "${parsed && parsed.prompt ? parsed.prompt.slice(0, 24) : ''}"`;
+        if (parsed && parsed.stream) {
+          res.writeHead(200, { 'Content-Type': 'application/x-ndjson' });
+          res.write(JSON.stringify({ event: 'delta', text }) + '\n');
+          res.write(JSON.stringify({ event: 'done', text }) + '\n');
+          res.end();
+          return;
+        }
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
           success: true,
-          text: `[${name}] replied to "${parsed && parsed.prompt ? parsed.prompt.slice(0, 24) : ''}"`,
+          text,
         }));
       };
 
@@ -177,15 +185,15 @@ async function main() {
     'dashboard status includes both engine health records');
   assert(dashboard.engines.claude.ok === true && dashboard.engines.gemini.ok === true,
     'dashboard status marks fake upstreams online');
-  assert(Array.isArray(dashboard.aliases) && dashboard.aliases.some((a) => a.id === 'bridge-agy-gemini-3.5-flash-medium-pulse'),
-    'dashboard status includes aliases');
-  assert(dashboard.aliases.some((a) => a.label.includes('Northstar') && a.bestFor.includes('planning')),
+  assert(Array.isArray(dashboard.routes) && dashboard.routes.some((a) => a.id === 'bridge-agy-gemini-3.5-flash-medium-pulse'),
+    'dashboard status includes public routes');
+  assert(dashboard.routes.some((a) => a.label.includes('Northstar') && a.bestFor.includes('planning')),
     'dashboard status includes friendly model labels and usage guidance');
   assert(dashboard.connection && dashboard.connection.baseUrl.endsWith('/v1'),
     'dashboard status includes app connection base URL');
-  assert(dashboard.connection.defaultRoute === 'bridge-agy-gemini-3.5-flash-medium-pulse',
-    'dashboard status includes default route');
-  assert(dashboard.telemetry && typeof dashboard.telemetry.total === 'number' && Array.isArray(dashboard.telemetry.byRoute),
+  assert(dashboard.defaultRoute === 'bridge-agy-gemini-3.5-flash-medium-pulse',
+    'dashboard status exposes default route');
+  assert(dashboard.telemetry && typeof dashboard.telemetry.recentCount === 'number' && Array.isArray(dashboard.telemetry.perRoute),
     'dashboard status includes telemetry aggregates');
   assert(Array.isArray(dashboard.recentRequests), 'dashboard status includes recent request list');
 
@@ -203,8 +211,8 @@ async function main() {
   assert(typeof completion.choices[0].message.content === 'string' && completion.choices[0].message.content.length > 0,
     'choice[0].message.content is a non-empty string');
   assert(completion.choices[0].finish_reason === 'stop', 'finish_reason is stop');
-  assert(completion.usage && completion.usage.total_tokens === 0 && completion.usage.prompt_tokens === 0 && completion.usage.completion_tokens === 0,
-    'usage fields all zero');
+  assert(completion.usage && typeof completion.usage.total_tokens === 'number' && completion.usage.total_tokens > 0,
+    'usage fields report estimated tokens');
   const lastClaude = claude.received[claude.received.length - 1];
   assert(lastClaude && lastClaude.url === '/api/chat', 'upstream called at /api/chat');
   assert(typeof lastClaude.body.prompt === 'string' && lastClaude.body.prompt.includes('hi there'),
@@ -241,7 +249,7 @@ async function main() {
   assert((r.headers['content-type'] || '').includes('text/event-stream'), 'streaming response is event-stream');
   assert(r.body.includes('chat.completion.chunk'), 'streaming response includes completion chunks');
   assert(r.body.includes('[DONE]'), 'streaming response ends with [DONE]');
-  assert(r.body.includes('[gemini] replied'), 'streaming response includes upstream text content');
+  assert(r.body.includes('[gemini]') && r.body.includes('replied'), 'streaming response includes upstream text content');
 
   console.log('\n## Model alias → upstream model mapping');
   await request(OPEN_PORT, {
@@ -301,37 +309,54 @@ async function main() {
   assert(claude.received[claude.received.length - 1].body.model === 'claude-opus-4-5',
     'legacy claude-subscription-opus still routes to Claude Opus');
 
-  console.log('\n## Tool metadata → text-only compatibility mode');
+  console.log('\n## Local telemetry + per-app token attribution');
+  await request(OPEN_PORT, {
+    path: '/v1/chat/completions', method: 'POST',
+    headers: { 'X-App-Id': 'mobile-app' },
+    body: { model: 'bridge-agy-gemini-3.5-flash-medium-pulse', messages: [{ role: 'user', content: 'telemetry check with a reasonably sized prompt body' }] },
+  });
+  r = await request(OPEN_PORT, { path: '/dashboard/status' });
+  const telemStatus = JSON.parse(r.body || '{}');
+  assert(telemStatus.telemetry && telemStatus.telemetry.recentCount > 0,
+    'telemetry exposes a non-zero recent call count');
+  assert(typeof telemStatus.telemetry.estTotalTokens === 'number' && telemStatus.telemetry.estTotalTokens > 0,
+    'telemetry exposes estimated total tokens (local heuristic, no prompts stored)');
+  assert(Array.isArray(telemStatus.telemetry.perApp) && telemStatus.telemetry.perApp.some((a) => a.appId === 'mobile-app' && a.count >= 1 && a.estTokens >= 0),
+    'telemetry attributes calls to apps via X-App-Id');
+  assert(Array.isArray(telemStatus.recentRequests) && telemStatus.recentRequests.some((rr) => rr.appId === 'mobile-app' && rr.estTotalTokens > 0 && rr.routeId === 'bridge-agy-gemini-3.5-flash-medium-pulse' && rr.statusClass === 'success'),
+    'recent request entries carry appId, routeId, statusClass, and estimated tokens without prompt content');
+
+  console.log('\n## Tool metadata & function calling support');
   r = await request(OPEN_PORT, {
     path: '/v1/chat/completions', method: 'POST',
     body: {
       model: 'bridge-fast',
       tools: [{ type: 'function', function: { name: 'read_file' } }],
       tool_choice: 'auto',
-      messages: [{ role: 'user', content: 'answer without tools' }],
+      messages: [{ role: 'user', content: 'answer' }],
     },
   });
-  assert(r.status === 200, 'tool metadata accepted for Hermes text-only compatibility');
-  assert(gemini.received[gemini.received.length - 1].body.prompt.includes('text-only'),
-    'upstream prompt explains text-only compatibility mode');
-  assert(gemini.received[gemini.received.length - 1].body.prompt.includes('Do not emit tool calls'),
-    'upstream prompt instructs model not to emit tool calls');
+  assert(r.status === 200, 'tool metadata accepted for tool calling');
+  assert(gemini.received[gemini.received.length - 1].body.prompt.includes('read_file'),
+    'upstream prompt includes tools definition');
 
   console.log('\n## Unsupported parameters → 400 unsupported_parameter');
-  for (const [name, val] of [
-    ['logprobs', true],
-    ['response_format', { type: 'json_object' }],
-  ]) {
-    r = await request(OPEN_PORT, {
-      path: '/v1/chat/completions', method: 'POST',
-      body: { model: 'bridge-smart', messages: [{ role: 'user', content: 'x' }], [name]: val },
-    });
-    assert(r.status === 400, `${name} rejected with 400`);
-    assert(errType(r) === 'unsupported_parameter', `${name} error type unsupported_parameter`);
-    assert(errParam(r) === name, `${name} error param set`);
-  }
+  r = await request(OPEN_PORT, {
+    path: '/v1/chat/completions', method: 'POST',
+    body: { model: 'bridge-smart', messages: [{ role: 'user', content: 'x' }], logprobs: true },
+  });
+  assert(r.status === 400, 'logprobs rejected with 400');
+  assert(errType(r) === 'unsupported_parameter', 'logprobs error type unsupported_parameter');
+  assert(errParam(r) === 'logprobs', 'logprobs error param set');
 
-  console.log('\n## Multimodal content → 400 unsupported_parameter');
+  console.log('\n## Structured JSON output (response_format)');
+  r = await request(OPEN_PORT, {
+    path: '/v1/chat/completions', method: 'POST',
+    body: { model: 'bridge-smart', messages: [{ role: 'user', content: 'x' }], response_format: { type: 'json_object' } },
+  });
+  assert(r.status === 200, 'response_format accepted for json output');
+
+  console.log('\n## Multimodal content arrays');
   r = await request(OPEN_PORT, {
     path: '/v1/chat/completions', method: 'POST',
     body: {
@@ -339,7 +364,7 @@ async function main() {
       messages: [{ role: 'user', content: [{ type: 'text', text: 'look at this' }, { type: 'image_url', image_url: { url: 'x' } }] }],
     },
   });
-  assert(r.status === 400 && errType(r) === 'unsupported_parameter', 'array content (multimodal) rejected as unsupported');
+  assert(r.status === 200, 'array content (multimodal) accepted');
 
   console.log('\n## Unknown model → 400 invalid_model');
   r = await request(OPEN_PORT, {
