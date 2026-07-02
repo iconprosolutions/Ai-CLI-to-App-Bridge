@@ -72,10 +72,13 @@ function startFakeBridge(name, opts = {}) {
           res.end(JSON.stringify(opts.statusBody || { success: false, error: 'forced error' }));
           return;
         }
-        const text = `[${name}] replied to "${parsed && parsed.prompt ? parsed.prompt.slice(0, 24) : ''}"`;
+        const text = opts.text !== undefined
+          ? opts.text
+          : `[${name}] replied to "${parsed && parsed.prompt ? parsed.prompt.slice(0, 24) : ''}"`;
         if (parsed && parsed.stream) {
           res.writeHead(200, { 'Content-Type': 'application/x-ndjson' });
           res.write(JSON.stringify({ event: 'delta', text }) + '\n');
+          if (opts.streamStall) return; // first delta, then hang — used by abort tests
           res.write(JSON.stringify({ event: 'done', text }) + '\n');
           res.end();
           return;
@@ -582,6 +585,35 @@ async function main() {
   console.log('\n## Unknown route → JSON 404 (no HTML leak)');
   r = await request(OPEN_PORT, { path: '/v1/nope' });
   assert(r.status === 404 && errType(r) === 'invalid_request_error', 'unknown v1 route returns JSON 404');
+
+  console.log('\n## Client abort mid-stream → 499, engine health not poisoned');
+  const ABORT_PORT = 19390;
+  const stallClaude = await startFakeBridge('claude-stall', { streamStall: true });
+  await bootProvider(ABORT_PORT, {
+    PROVIDER_API_KEY: '',
+    CLAUDE_BRIDGE_URL: `http://127.0.0.1:${stallClaude.port}`,
+    GEMINI_BRIDGE_URL: `http://127.0.0.1:${gemini.port}`,
+  });
+  await new Promise((resolve) => {
+    const abortReq = http.request(
+      { port: ABORT_PORT, path: '/v1/chat/completions', method: 'POST', headers: { 'Content-Type': 'application/json' } },
+      (res) => {
+        res.once('data', () => {
+          abortReq.destroy(); // client walks away after the first byte
+          setTimeout(resolve, 400); // give the provider time to record
+        });
+      },
+    );
+    abortReq.on('error', () => {});
+    abortReq.end(JSON.stringify({ model: 'bridge-smart', stream: true, messages: [{ role: 'user', content: 'x' }] }));
+  });
+  r = await request(ABORT_PORT, { path: '/dashboard/status' });
+  const abortStatus = JSON.parse(r.body || '{}');
+  const abortEntry = (abortStatus.recentRequests || []).find((rr) => rr.engine === 'claude');
+  assert(abortEntry && abortEntry.status === 499 && abortEntry.statusClass === 'aborted',
+    `client abort recorded as 499/aborted (got ${abortEntry && abortEntry.status}/${abortEntry && abortEntry.statusClass})`);
+  assert(!(abortStatus.engines.claude.history || []).some((h) => h.source === 'traffic' && h.ok === false),
+    'client abort leaves no failed traffic health sample');
 
   console.log(`\n# Result: ${passed} passed, ${failed} failed`);
   process.exit(failed === 0 ? 0 : 1);

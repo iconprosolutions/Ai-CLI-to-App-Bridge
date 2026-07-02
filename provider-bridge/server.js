@@ -167,6 +167,7 @@ function appIdFrom(req) {
 function classForStatus(status) {
   if (status === 200) return 'success';
   if (status === 429) return 'rejected';
+  if (status === 499) return 'aborted'; // client walked away; not an engine fault
   if (status >= 400 && status < 500) return 'client_error';
   if (status >= 500) return 'server_error';
   return 'error';
@@ -1109,7 +1110,9 @@ app.post('/v1/chat/completions', async (req, res) => {
     });
     recentRequests.splice(MAX_RECENT_REQUESTS);
     // Passive per-engine uptime signal from real traffic (success vs failure).
-    if (route) recordHealthSample(route.engine, classForStatus(status) === 'success', 'traffic');
+    // Client aborts are excluded — they say nothing about engine health.
+    const cls = classForStatus(status);
+    if (route && cls !== 'aborted') recordHealthSample(route.engine, cls === 'success', 'traffic');
     console.log(`[req ${reqId}] ${status} model=${aliasUsed || '?'} app=${appId} ${Date.now() - started}ms`);
   };
 
@@ -1179,9 +1182,15 @@ app.post('/v1/chat/completions', async (req, res) => {
     if (route.model) payload.model = route.model;
 
     let activeUpstreamReq = null;
+    let activePacer = null;
+    let clientAborted = false;
     res.on('close', () => {
-      if (activeUpstreamReq && !res.writableEnded) {
-        try { activeUpstreamReq.destroy(); } catch (_) {}
+      if (!res.writableEnded) {
+        clientAborted = true;
+        if (activePacer) activePacer.stop();
+        if (activeUpstreamReq) {
+          try { activeUpstreamReq.destroy(); } catch (_) {}
+        }
       }
     });
 
@@ -1201,6 +1210,7 @@ app.post('/v1/chat/completions', async (req, res) => {
       const pacer = createSmoothPacer((deltaText) => {
         res.write(`data: ${JSON.stringify({ ...chunkBase, choices: [{ index: 0, delta: { content: deltaText }, finish_reason: null }] })}\n\n`);
       }, { delayMs: 10 });
+      activePacer = pacer;
 
       try {
         upstream = await callUpstreamStream(route.engine, payload, (deltaText) => {
@@ -1210,7 +1220,7 @@ app.post('/v1/chat/completions', async (req, res) => {
         activeUpstreamReq = null;
       } catch (err) {
         activeUpstreamReq = null;
-        record(502);
+        record(clientAborted ? 499 : 502);
         res.write(`data: ${JSON.stringify({ ...chunkBase, choices: [{ index: 0, delta: { content: `\n[Error: ${err.message}]` }, finish_reason: 'stop' }] })}\n\n`);
         res.write('data: [DONE]\n\n');
         return res.end();
@@ -1246,7 +1256,7 @@ app.post('/v1/chat/completions', async (req, res) => {
       activeUpstreamReq = null;
     } catch (err) {
       activeUpstreamReq = null;
-      record(502);
+      record(clientAborted ? 499 : 502);
       return sendError(res, 502, `Failed to reach upstream "${route.engine}": ${err.message}`, 'upstream_error');
     }
 
