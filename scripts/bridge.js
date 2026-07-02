@@ -96,31 +96,45 @@ const services = {
     },
   },
   provider: {
-    label: 'Provider bridge',
-    cwd: path.join(ROOT, 'provider-bridge'),
+    label: 'Provider (consolidated, in-process engines)',
+    cwd: path.join(ROOT, 'packages', 'provider'),
     script: 'server.js',
     port: ports.provider,
+    // Both engines run in-process; missing CLIs degrade (engine reports
+    // down) rather than blocking startup.
+    clis: [
+      { bin: claudePath, hint: 'CLAUDE_PATH' },
+      { bin: geminiPath, hint: 'GEMINI_PATH (or AGY_PATH)' },
+    ],
     env: {
-      NODE_PATH,
       PROVIDER_PORT: String(ports.provider),
       PROVIDER_API_KEY: providerKey,
       BRIDGE_API_KEY: sharedKey,
-      GEMINI_BRIDGE_URL: process.env.GEMINI_BRIDGE_URL || `http://127.0.0.1:${ports.gemini}`,
-      CLAUDE_BRIDGE_URL: process.env.CLAUDE_BRIDGE_URL || `http://127.0.0.1:${ports.claude}`,
+      CLAUDE_PATH: claudePath,
+      GEMINI_PATH: geminiPath,
+      CLAUDE_MODEL: process.env.CLAUDE_MODEL || 'claude-sonnet-4-6',
+      GEMINI_MODEL: process.env.GEMINI_MODEL || 'Gemini 3.5 Flash (Low)',
     },
   },
 };
+
+// Default service set: the consolidated provider only. The legacy engine
+// bridges stay startable by explicit name (`bridge up claude`) for the old
+// /api surface and Docker parity.
+const DEFAULT_SERVICES = ['provider'];
 
 const DASHBOARD_URL = `http://127.0.0.1:${ports.provider}/dashboard`;
 
 // The optional positional service-name arg (e.g. `bridge:logs gemini`).
 function parseOnly() {
   const arg = process.argv[3];
+  if (arg === 'all') return 'all';
   return arg && services[arg] ? arg : null;
 }
 
 function serviceNames(only) {
-  return only ? [only] : Object.keys(services);
+  if (only === 'all') return Object.keys(services);
+  return only ? [only] : DEFAULT_SERVICES;
 }
 
 function pidFile(name) {
@@ -275,6 +289,12 @@ async function up(only) {
       console.error(`${name}: CLI "${svc.cli}" not found on PATH. Set ${svc.cliEnvHint} to its absolute path, or add it to PATH. Skipping ${name}.`);
       continue;
     }
+    // Consolidated provider: warn (don't skip) per missing engine CLI.
+    for (const c of svc.clis || []) {
+      if (!resolveBin(c.bin)) {
+        console.warn(`${name}: CLI "${c.bin}" not found (${c.hint}) — that engine will report down.`);
+      }
+    }
 
     const out = fs.openSync(logFile(name), 'a');
     let exitedEarly = false;
@@ -346,16 +366,11 @@ async function probe() {
   for (const r of routes) {
     console.log(`  ${String(r.id).padEnd(44)} ${String(r.engine).padEnd(8)} → ${r.upstreamModel}`);
   }
-  const [cl, ge] = await Promise.all([
-    httpGetJson(ports.claude, '/models'),
-    httpGetJson(ports.gemini, '/models'),
-  ]);
-  const list = (r) => (r.ok && Array.isArray(r.body)
-    ? (r.body.map((m) => m.name || m.id).join(', ') || '(none reported)')
-    : `unreachable (${r.status || r.error})`);
-  console.log('\nEngine model catalogues (engine-reported, availability is per-account for Gemini):');
-  console.log(`  claude: ${list(cl)}`);
-  console.log(`  gemini: ${list(ge)}`);
+  const engines = (dash.body && dash.body.engines) || {};
+  console.log('\nEngines (in-process):');
+  for (const [name, e] of Object.entries(engines)) {
+    console.log(`  ${name.padEnd(8)} ${e.ok ? 'ok' : 'DOWN'}  ${e.detail || ''}`);
+  }
 }
 
 // Write a paste-ready connection bundle (base URL, key, routes, snippets)
@@ -422,7 +437,7 @@ async function main() {
   if (command === 'probe') return probe();
   if (command === 'connect') return connect();
   if (command === 'logs') return logs(only, FOLLOW);
-  console.error('Usage: bridge.js <up|down|status|restart|probe|connect|logs> [service] [--open|--follow|--insecure]');
+  console.error('Usage: bridge.js <up|down|status|restart|probe|connect|logs> [service|all] [--open|--follow|--insecure]');
   process.exitCode = 2;
   return undefined;
 }
