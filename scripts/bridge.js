@@ -35,10 +35,14 @@ function resolveKey() {
   ensureRuntimeDir();
   try {
     const saved = JSON.parse(fs.readFileSync(CRED_FILE, 'utf8'));
-    if (saved && saved.apiKey) return { key: saved.apiKey, source: 'persisted' };
+    if (saved && saved.apiKey) {
+      // Tighten pre-existing files that were created world-readable.
+      try { fs.chmodSync(CRED_FILE, 0o600); } catch (_) { /* best effort */ }
+      return { key: saved.apiKey, source: 'persisted' };
+    }
   } catch (_) { /* not generated yet */ }
   const key = crypto.randomBytes(24).toString('hex');
-  fs.writeFileSync(CRED_FILE, `${JSON.stringify({ apiKey: key, createdAt: new Date().toISOString() }, null, 2)}\n`);
+  fs.writeFileSync(CRED_FILE, `${JSON.stringify({ apiKey: key, createdAt: new Date().toISOString() }, null, 2)}\n`, { mode: 0o600 });
   return { key, source: 'generated' };
 }
 
@@ -381,7 +385,8 @@ async function connect() {
     },
   };
   const file = path.join(RUNTIME_DIR, 'connection.json');
-  fs.writeFileSync(file, `${JSON.stringify(conn, null, 2)}\n`);
+  fs.writeFileSync(file, `${JSON.stringify(conn, null, 2)}\n`, { mode: 0o600 });
+  try { fs.chmodSync(file, 0o600); } catch (_) { /* tighten pre-existing */ }
   console.log(`Wrote ${path.relative(ROOT, file)}`);
   console.log(`Base URL: ${baseUrl}`);
   console.log(`API key:  ${providerKey}`);
