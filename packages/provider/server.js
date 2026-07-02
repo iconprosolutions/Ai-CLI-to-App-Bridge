@@ -13,6 +13,11 @@ const { createClaudeAdapter, createAgyAdapter } = require('@bridge/adapters');
 const { createRouteRegistry } = require('./routes');
 const { createTelemetry } = require('./telemetry');
 const { createUsageLedger } = require('./usage');
+const { createBreaker } = require('./breaker');
+const { createSemaphore } = require('./semaphore');
+const { createEventBus } = require('./events');
+const { createCapture } = require('./capture');
+const { createAdminRouter } = require('./admin');
 const { dashboardHtml } = require('./dashboard');
 const {
   estimateTokens, parseToolCallsFromText, messagesToPrompt, openaiErrorBody,
@@ -44,15 +49,49 @@ const adapters = {
 };
 const ENGINE_NAMES = Object.keys(adapters);
 
-const registry = createRouteRegistry(path.join(__dirname, 'routes.json'));
+const registry = createRouteRegistry(process.env.BRIDGE_ROUTES_FILE || path.join(__dirname, 'routes.json'));
 const telemetry = createTelemetry({ engines: ENGINE_NAMES });
 const ledger = createUsageLedger({
   dir: process.env.BRIDGE_USAGE_DIR || path.resolve(__dirname, '../../.bridge-runtime/usage'),
   pricingFile: path.join(__dirname, 'pricing.json'),
 });
 const SSE_HEARTBEAT_MS = intEnv('SSE_HEARTBEAT_MS', 15000);
-const inflight = {};
-for (const e of ENGINE_NAMES) inflight[e] = 0;
+
+const events = createEventBus();
+const capture = createCapture({ max: 50 });
+const activeRequests = new Map(); // reqId → {id, routeId, engine, appId, startedAt, streaming, ac, killedByAdmin}
+const enginesDisabled = {};
+const breakers = {};
+const semaphores = {};
+for (const e of ENGINE_NAMES) {
+  enginesDisabled[e] = false;
+  breakers[e] = createBreaker({
+    engine: e,
+    quotaCooldownMs: intEnv('BREAKER_QUOTA_COOLDOWN_MS', 15 * 60 * 1000),
+    timeoutCooldownMs: intEnv('BREAKER_TIMEOUT_COOLDOWN_MS', 2 * 60 * 1000),
+    onChange: (s) => {
+      console.log(`[breaker] ${e} → ${s.state}${s.reason ? ` (${s.reason})` : ''}`);
+      events.emit('breaker.change', s);
+    },
+  });
+  semaphores[e] = createSemaphore({
+    max: MAX_CONCURRENT_PER_ENGINE,
+    queueDepth: intEnv('PROVIDER_QUEUE_DEPTH', 4),
+    queueTimeoutMs: intEnv('PROVIDER_QUEUE_TIMEOUT_MS', 30000),
+  });
+}
+
+// Server-side interval health sampling — uptime no longer depends on how
+// many dashboard tabs are polling (audit M13).
+const HEALTH_SAMPLE_MS = intEnv('HEALTH_SAMPLE_MS', 30000);
+const healthSampler = setInterval(async () => {
+  for (const e of ENGINE_NAMES) {
+    const h = await adapters[e].healthCheck();
+    telemetry.recordHealthSample(e, h.ok, 'health');
+    events.emit('engine.health', { engine: e, ...h, disabled: enginesDisabled[e] });
+  }
+}, HEALTH_SAMPLE_MS);
+healthSampler.unref();
 
 function newRequestId() {
   return crypto.randomBytes(6).toString('hex');
@@ -90,8 +129,12 @@ app.get('/dashboard/status', async (req, res) => {
   const checks = await Promise.all(ENGINE_NAMES.map((e) => adapters[e].healthCheck()));
   const engines = {};
   ENGINE_NAMES.forEach((e, i) => {
-    telemetry.recordHealthSample(e, checks[i].ok, 'health');
-    engines[e] = { url: 'in-process', ...checks[i], history: telemetry.healthHistory[e].slice(-120) };
+    engines[e] = {
+      url: 'in-process',
+      ...checks[i],
+      disabled: enginesDisabled[e],
+      history: telemetry.healthHistory[e].slice(-120),
+    };
   });
   const origin = `${req.protocol}://${req.get('host')}`;
   res.json({
@@ -99,7 +142,13 @@ app.get('/dashboard/status', async (req, res) => {
     engine: 'provider-bridge',
     authEnabled: Boolean(API_KEY),
     uptime: process.uptime(),
-    inflight: { ...inflight },
+    inflight: Object.fromEntries(ENGINE_NAMES.map((e) => [e, semaphores[e].active])),
+    queue: Object.fromEntries(ENGINE_NAMES.map((e) => [e, semaphores[e].queued])),
+    breakers: Object.fromEntries(ENGINE_NAMES.map((e) => [e, breakers[e].status()])),
+    capture: { enabled: capture.enabled, count: capture.size },
+    activeRequests: [...activeRequests.values()].map((a) => ({
+      id: a.id, routeId: a.routeId, engine: a.engine, appId: a.appId, startedAt: a.startedAt, streaming: a.streaming,
+    })),
     engines,
     connection: {
       baseUrl: `${origin}/v1`,
@@ -125,10 +174,18 @@ app.get('/health', (req, res) => {
     status: 'ok',
     engine: 'provider-bridge',
     uptime: process.uptime(),
-    inflightClaude: inflight.claude,
-    inflightGemini: inflight.gemini,
+    inflightClaude: semaphores.claude.active,
+    inflightGemini: semaphores.gemini.active,
   });
 });
+
+// Live event stream for the dashboard (SSE).
+app.get('/dashboard/events', events.handler);
+
+// Control plane (always key-gated; see admin.js).
+app.use('/admin', createAdminRouter({
+  apiKey: API_KEY, registry, breakers, adapters, activeRequests, capture, events, enginesDisabled,
+}));
 
 // Durable usage rollups (JSONL ledger; survives restarts).
 app.get('/dashboard/usage', async (req, res) => {
@@ -190,6 +247,15 @@ app.post('/v1/chat/completions', async (req, res) => {
         status,
       });
     }
+    events.emit('request.end', {
+      id: reqId,
+      appId,
+      routeId: route ? route.id : null,
+      engine: route ? route.engine : null,
+      status,
+      durationMs: Date.now() - started,
+      tokens: estPromptTokens + estCompletionTokens,
+    });
     console.log(`[req ${reqId}] ${status} model=${aliasUsed || '?'} app=${appId} ${Date.now() - started}ms`);
   };
 
@@ -214,6 +280,10 @@ app.post('/v1/chat/completions', async (req, res) => {
   if (route.enabled === false) {
     record(400);
     return sendError(res, 400, `Model route "${route.id}" is currently disabled.`, 'invalid_model', 'model');
+  }
+  if (enginesDisabled[route.engine]) {
+    record(400);
+    return sendError(res, 400, `Engine "${route.engine}" is disabled by the operator.`, 'invalid_request_error', null);
   }
 
   const messages = body.messages;
@@ -249,19 +319,60 @@ app.post('/v1/chat/completions', async (req, res) => {
     }
   }
 
-  if (inflight[route.engine] >= MAX_CONCURRENT_PER_ENGINE) {
+  // Circuit breaker: a known-exhausted engine fails fast with Retry-After
+  // instead of spawning a doomed CLI run. Half-open admits one trial.
+  const gate = breakers[route.engine].allow();
+  if (!gate.allowed) {
     record(429);
     return sendError(
       res,
       429,
-      `Engine "${route.engine}" is busy (max concurrent ${MAX_CONCURRENT_PER_ENGINE}). Please retry shortly.`,
-      'engine_busy',
+      `Engine "${route.engine}" circuit is open (${gate.reason || 'capacity'}). Failing fast; retry in ~${gate.retryInSec}s.`,
+      'rate_limit_error',
       null,
-      5,
+      gate.retryInSec,
     );
   }
 
-  inflight[route.engine] += 1;
+  const adapter = adapters[route.engine];
+  const ac = new AbortController();
+  let activePacer = null;
+  let clientAborted = false;
+  res.on('close', () => {
+    if (!res.writableEnded) {
+      clientAborted = true;
+      if (activePacer) activePacer.stop();
+      ac.abort();
+    }
+  });
+
+  const active = {
+    id: reqId,
+    routeId: route.id,
+    engine: route.engine,
+    appId,
+    startedAt: new Date().toISOString(),
+    streaming: body.stream === true,
+    ac,
+    killedByAdmin: false,
+  };
+  activeRequests.set(reqId, active);
+  events.emit('request.start', { id: reqId, routeId: route.id, engine: route.engine, appId, streaming: active.streaming });
+
+  let release;
+  try {
+    release = await semaphores[route.engine].acquire(ac.signal);
+  } catch (err) {
+    activeRequests.delete(reqId);
+    if (err.busy) {
+      record(429);
+      return sendError(res, 429, `Engine "${route.engine}" is busy (slot queue full or wait timed out). Please retry shortly.`, 'engine_busy', null, 5);
+    }
+    record(499); // aborted while queued
+    return res.end();
+  }
+  const queuedMs = Date.now() - started;
+
   try {
     const toolsList = body.tools || body.functions;
     // Only ever interpret model output as tool calls when the caller actually
@@ -274,17 +385,29 @@ app.post('/v1/chat/completions', async (req, res) => {
     });
     estPromptTokens = estimateTokens(prompt);
 
-    const adapter = adapters[route.engine];
-    const ac = new AbortController();
-    let activePacer = null;
-    let clientAborted = false;
-    res.on('close', () => {
-      if (!res.writableEnded) {
-        clientAborted = true;
-        if (activePacer) activePacer.stop();
-        ac.abort();
-      }
+    // Opt-in debug capture (memory-only ring buffer; null when capture off).
+    const cap = capture.start({
+      reqId, appId, routeId: route.id, engine: route.engine, model: route.model, streaming: active.streaming,
     });
+    if (cap) {
+      cap.sentPrompt = prompt;
+      cap.stages.queuedMs = queuedMs;
+    }
+    const markFirstByte = () => {
+      if (cap && cap.stages.firstByteMs === undefined) cap.stages.firstByteMs = Date.now() - started;
+    };
+    const capFinish = (status, result, err) => {
+      if (!cap) return;
+      cap.status = status;
+      cap.stages.totalMs = Date.now() - started;
+      if (result) cap.rawOutput = result.text || '';
+      if (err) cap.error = { kind: err.kind || 'error', message: err.message };
+    };
+    const breakerFeedback = (err) => {
+      if (!err) return breakers[route.engine].recordSuccess();
+      if (err.kind === 'aborted') return undefined; // says nothing about the engine
+      return breakers[route.engine].recordFailure(err.kind); // quota/timeout count; others reset streaks
+    };
 
     const rf = body.response_format;
     const rfType = rf && typeof rf === 'object' ? (rf.type || (rf.json_schema ? 'json_schema' : null)) : null;
@@ -360,6 +483,7 @@ app.post('/v1/chat/completions', async (req, res) => {
       let holding = toolsProvided;
       let held = '';
       const feed = (d) => {
+        markFirstByte();
         if (!holding) { pacer.push(d); return; }
         held += d;
         const head = held.trimStart();
@@ -378,7 +502,10 @@ app.post('/v1/chat/completions', async (req, res) => {
         });
       } catch (err) {
         const mapped = httpFor(err);
-        record(clientAborted || (err instanceof BridgeError && err.kind === 'aborted') ? 499 : mapped.status);
+        const status = clientAborted || (err instanceof BridgeError && err.kind === 'aborted') ? 499 : mapped.status;
+        breakerFeedback(err);
+        capFinish(status, null, err);
+        record(status);
         res.write(`data: ${JSON.stringify({ ...chunkBase, choices: [{ index: 0, delta: { content: `\n[Error: ${err.message}]` }, finish_reason: 'stop' }] })}\n\n`);
         return endStream();
       }
@@ -390,6 +517,8 @@ app.post('/v1/chat/completions', async (req, res) => {
       }
       await pacer.drain();
       applyUsage(result);
+      breakerFeedback();
+      capFinish(200, result);
       record(200);
 
       if (detectedTools) {
@@ -420,18 +549,25 @@ app.post('/v1/chat/completions', async (req, res) => {
 
     let result;
     try {
-      result = await adapter.invoke({ prompt, model: route.model, signal: ac.signal });
+      result = await adapter.invoke({ prompt, model: route.model, signal: ac.signal, onDelta: markFirstByte });
     } catch (err) {
       const mapped = httpFor(err);
+      breakerFeedback(err);
       if (clientAborted || (err instanceof BridgeError && err.kind === 'aborted')) {
+        capFinish(499, null, err);
         record(499);
+        if (active.killedByAdmin && !clientAborted) {
+          return sendError(res, 500, 'Request was cancelled by an operator via the dashboard.', 'request_cancelled', null);
+        }
         return res.end();
       }
+      capFinish(mapped.status, null, err);
       record(mapped.status);
       return sendError(res, mapped.status, err.message, mapped.type, mapped.param, mapped.retryAfterSec);
     }
 
     applyUsage(result);
+    breakerFeedback();
     let text = result.text;
     const detectedTools = toolsProvided ? parseToolCallsFromText(text) : null;
     if (wantsJson && !detectedTools) {
@@ -439,10 +575,12 @@ app.post('/v1/chat/completions', async (req, res) => {
         text = await enforceJson(text);
       } catch (err) {
         const mapped = httpFor(err);
+        capFinish(mapped.status, result, err);
         record(mapped.status);
         return sendError(res, mapped.status, `response_format could not be satisfied: ${err.message}`, mapped.type, mapped.param, mapped.retryAfterSec);
       }
     }
+    capFinish(200, result);
     const messageObj = detectedTools
       ? { role: 'assistant', content: null, tool_calls: detectedTools }
       : { role: 'assistant', content: text };
@@ -469,7 +607,8 @@ app.post('/v1/chat/completions', async (req, res) => {
     record(200);
     return res.status(200).json(completion);
   } finally {
-    inflight[route.engine] -= 1;
+    release();
+    activeRequests.delete(reqId);
   }
 });
 

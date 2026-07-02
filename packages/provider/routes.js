@@ -1,6 +1,7 @@
 'use strict';
 
 const fs = require('fs');
+const crypto = require('crypto');
 
 const VALID_ENGINES = new Set(['claude', 'gemini']);
 
@@ -70,6 +71,21 @@ function createRouteRegistry(file, { logger = console, watch = true } = {}) {
     } catch (_) { /* watching is best-effort (e.g. some containers) */ }
   }
 
+  // Admin mutation path: clone → mutate → validate → atomic write → apply.
+  // Throws on invalid results; the file and live config stay untouched.
+  const update = (mutate) => {
+    const next = JSON.parse(JSON.stringify(data));
+    mutate(next);
+    validateRoutes(next);
+    const tmp = `${file}.${crypto.randomBytes(4).toString('hex')}.tmp`;
+    fs.writeFileSync(tmp, `${JSON.stringify(next, null, 2)}\n`);
+    fs.renameSync(tmp, file);
+    data = next;
+    byKey = index(next);
+    logger.log(`[routes] updated: ${next.routes.length} routes`);
+    return next;
+  };
+
   return {
     resolve(idOrAlias) {
       if (!idOrAlias || typeof idOrAlias !== 'string') return null;
@@ -82,6 +98,8 @@ function createRouteRegistry(file, { logger = console, watch = true } = {}) {
       return data.defaultRoute;
     },
     reload,
+    update,
+    file,
   };
 }
 

@@ -61,8 +61,11 @@ async function bootProvider(port, env) {
   process.env.PROVIDER_PORT = String(port);
   delete process.env.PROVIDER_API_KEY;
   delete process.env.BRIDGE_API_KEY;
-  // Never let test traffic pollute the real usage ledger.
+  // Never let test traffic pollute the real usage ledger or routes.json.
   process.env.BRIDGE_USAGE_DIR = path.join(TMP, `usage-${port}`);
+  const routesCopy = path.join(TMP, `routes-${port}.json`);
+  fs.copyFileSync(path.join(REPO, 'packages', 'provider', 'routes.json'), routesCopy);
+  process.env.BRIDGE_ROUTES_FILE = routesCopy;
   Object.assign(process.env, env);
   require(SERVER);
   process.env = oldEnv;
@@ -223,10 +226,10 @@ async function main() {
   assert(dash.engines.claude.ok === false && dash.engines.gemini.ok === true, 'health reflects dead claude, live gemini');
   assert(dash.routes.length === 6 && dash.defaultRoute === 'bridge-agy-gemini-3.5-flash-medium-pulse', 'dashboard payload keeps legacy shape');
 
-  console.log('\n## Concurrency 429 + slot release');
+  console.log('\n## Concurrency 429 + slot release (queue depth 0 = legacy instant reject)');
   const CLAUDE_SLOW = writeStub('claude-slow.sh', 'claude-sim', { FAKE_CLI_DELAY: '400' });
   const P5 = 19440;
-  await bootProvider(P5, { CLAUDE_PATH: CLAUDE_SLOW, GEMINI_PATH: AGY_STUB, PROVIDER_MAX_CONCURRENT_PER_ENGINE: '1' });
+  await bootProvider(P5, { CLAUDE_PATH: CLAUDE_SLOW, GEMINI_PATH: AGY_STUB, PROVIDER_MAX_CONCURRENT_PER_ENGINE: '1', PROVIDER_QUEUE_DEPTH: '0' });
   const [r1, r2] = await Promise.all([
     request(P5, { path: '/v1/chat/completions', method: 'POST', body: { model: 'bridge-smart', messages: [{ role: 'user', content: 'first' }] } }),
     request(P5, { path: '/v1/chat/completions', method: 'POST', body: { model: 'bridge-smart', messages: [{ role: 'user', content: 'second' }] } }),
@@ -400,6 +403,145 @@ async function main() {
   assert(r.status === 200, 'keyed mode accepts correct token');
   r = await request(P6, { path: '/health' });
   assert(r.status === 200, '/health stays public');
+
+  console.log('\n## Phase 4 — breaker unit behavior');
+  const { createBreaker } = require(path.join(REPO, 'packages', 'provider', 'breaker.js'));
+  const b = createBreaker({ engine: 'claude', quotaCooldownMs: 200 });
+  b.recordFailure('quota');
+  assert(b.allow().allowed === true, 'one quota failure keeps circuit closed');
+  b.recordFailure('quota');
+  const denied = b.allow();
+  assert(denied.allowed === false && denied.retryInSec >= 1, 'second consecutive quota opens the circuit');
+  await new Promise((rr) => setTimeout(rr, 250));
+  const trial = b.allow();
+  assert(trial.allowed === true && trial.trial === true, 'cooldown elapsed → half-open admits one trial');
+  assert(b.allow().allowed === false, 'second concurrent trial denied while half-open');
+  b.recordSuccess();
+  assert(b.allow().allowed === true && b.status().state === 'closed', 'trial success closes the circuit');
+
+  console.log('\n## Phase 4 — wait queue smooths bursts');
+  const P11 = 19500;
+  const CLAUDE_SLOW3 = writeStub('claude-slow3.sh', 'claude-sim', { FAKE_CLI_DELAY: '300' });
+  await bootProvider(P11, { CLAUDE_PATH: CLAUDE_SLOW3, GEMINI_PATH: AGY_STUB, PROVIDER_MAX_CONCURRENT_PER_ENGINE: '1', PROVIDER_QUEUE_DEPTH: '4' });
+  const tq = Date.now();
+  const [q1, q2] = await Promise.all([
+    request(P11, { path: '/v1/chat/completions', method: 'POST', body: { model: 'bridge-smart', messages: [{ role: 'user', content: 'q1' }] } }),
+    request(P11, { path: '/v1/chat/completions', method: 'POST', body: { model: 'bridge-smart', messages: [{ role: 'user', content: 'q2' }] } }),
+  ]);
+  assert(q1.status === 200 && q2.status === 200, 'burst of 2 both succeed via the wait queue');
+  assert(Date.now() - tq >= 550, `second request waited for the slot (${Date.now() - tq}ms total)`);
+
+  console.log('\n## Phase 4 — breaker integration: fail fast, no CLI spawn, admin reset');
+  const P12 = 19510;
+  const LOG12 = path.join(TMP, 'argv12.log');
+  const CLAUDE_QUOTA2 = writeStub('claude-quota2.sh', 'claude-sim', { FAKE_CLI_STDERR: 'Claude usage limit reached.', FAKE_CLI_LOG: LOG12 });
+  await bootProvider(P12, { CLAUDE_PATH: CLAUDE_QUOTA2, GEMINI_PATH: AGY_STUB, PROVIDER_API_KEY: 'adm-key' });
+  const call12 = () => request(P12, {
+    path: '/v1/chat/completions', method: 'POST', headers: { Authorization: 'Bearer adm-key' },
+    body: { model: 'bridge-smart', messages: [{ role: 'user', content: 'x' }] },
+  });
+  await call12(); // quota 1
+  await call12(); // quota 2 → circuit opens
+  const spawnsBefore = fs.readFileSync(LOG12, 'utf8').trim().split('\n').length;
+  r = await call12(); // fail-fast, no spawn
+  const spawnsAfter = fs.readFileSync(LOG12, 'utf8').trim().split('\n').length;
+  assert(r.status === 429 && errType(r) === 'rate_limit_error' && (r.body || '').includes('circuit is open'),
+    'open circuit fails fast with 429 rate_limit_error');
+  assert(spawnsAfter === spawnsBefore, 'fail-fast spends no CLI spawn');
+  r = await request(P12, { path: '/dashboard/status' });
+  assert(JSON.parse(r.body).breakers.claude.state === 'open', 'breaker state visible on dashboard status');
+  r = await request(P12, { path: '/admin/breakers/claude/reset', method: 'POST', headers: { Authorization: 'Bearer adm-key' }, body: {} });
+  assert(r.status === 200 && JSON.parse(r.body).breaker.state === 'closed', 'admin reset closes the breaker');
+  r = await request(P12, { path: '/admin/breakers/claude/reset', method: 'POST', body: {} });
+  assert(r.status === 401, 'admin requires the bearer key');
+
+  console.log('\n## Phase 4 — engine disable/enable + admin route mutations');
+  r = await request(P12, { path: '/admin/engines/claude/disable', method: 'POST', headers: { Authorization: 'Bearer adm-key' }, body: {} });
+  assert(r.status === 200, 'engine disable accepted');
+  r = await call12();
+  assert(r.status === 400 && (r.body || '').includes('disabled by the operator'), 'disabled engine rejects requests');
+  r = await request(P12, { path: '/admin/engines/claude/enable', method: 'POST', headers: { Authorization: 'Bearer adm-key' }, body: {} });
+  assert(r.status === 200, 'engine enable accepted');
+  r = await request(P12, {
+    path: '/admin/routes', method: 'POST', headers: { Authorization: 'Bearer adm-key' },
+    body: { id: 'bridge-test-titan', label: 'Test Titan', engine: 'claude', model: 'claude-opus-4-8', bestFor: 'testing', aliases: ['titan'] },
+  });
+  assert(r.status === 200, 'admin adds a route');
+  r = await request(P12, { path: '/v1/models', headers: { Authorization: 'Bearer adm-key' } });
+  assert(JSON.parse(r.body).data.some((m) => m.id === 'bridge-test-titan'), 'added route appears in /v1/models');
+  r = await request(P12, {
+    path: '/admin/routes', method: 'POST', headers: { Authorization: 'Bearer adm-key' },
+    body: { id: 'bridge-test-titan', label: 'dup', engine: 'claude', model: 'x' },
+  });
+  assert(r.status === 400, 'duplicate route id rejected 400');
+  r = await request(P12, { path: '/admin/routes/bridge-test-titan', method: 'DELETE', headers: { Authorization: 'Bearer adm-key' } });
+  assert(r.status === 200, 'admin deletes a route');
+  r = await request(P12, { path: '/v1/models', headers: { Authorization: 'Bearer adm-key' } });
+  assert(!JSON.parse(r.body).data.some((m) => m.id === 'bridge-test-titan'), 'deleted route gone from /v1/models');
+
+  console.log('\n## Phase 4 — capture buffer (opt-in, memory only)');
+  r = await request(P12, { path: '/admin/capture', headers: { Authorization: 'Bearer adm-key' } });
+  assert(JSON.parse(r.body).enabled === false && JSON.parse(r.body).count === 0, 'capture off by default, empty');
+  await request(P12, { path: '/admin/capture', method: 'POST', headers: { Authorization: 'Bearer adm-key' }, body: { enabled: true } });
+  await call12();
+  r = await request(P12, { path: '/admin/capture', headers: { Authorization: 'Bearer adm-key' } });
+  const capList = JSON.parse(r.body);
+  assert(capList.enabled === true && capList.count >= 1 && capList.requests[0].routeId === 'bridge-claude-sonnet-4.6-northstar',
+    'capture records requests while enabled');
+  r = await request(P12, { path: `/admin/capture/${capList.requests[0].id}`, headers: { Authorization: 'Bearer adm-key' } });
+  const capEntry = JSON.parse(r.body);
+  assert(typeof capEntry.sentPrompt === 'string' && capEntry.sentPrompt.includes('[USER]'), 'capture detail includes the sent prompt');
+  assert(capEntry.error && capEntry.error.kind === 'quota', 'capture detail includes the classified error');
+  await request(P12, { path: '/admin/capture', method: 'POST', headers: { Authorization: 'Bearer adm-key' }, body: { enabled: false } });
+  r = await request(P12, { path: '/admin/capture', headers: { Authorization: 'Bearer adm-key' } });
+  assert(JSON.parse(r.body).count === 0, 'disabling capture clears the buffer');
+
+  console.log('\n## Phase 4 — kill a live request via admin');
+  const P13 = 19520;
+  const CLAUDE_SLOW4 = writeStub('claude-slow4.sh', 'claude-sim', { FAKE_CLI_DELAY: '3000' });
+  await bootProvider(P13, { CLAUDE_PATH: CLAUDE_SLOW4, GEMINI_PATH: AGY_STUB, PROVIDER_API_KEY: 'adm-key' });
+  const killVictim = request(P13, {
+    path: '/v1/chat/completions', method: 'POST', headers: { Authorization: 'Bearer adm-key' },
+    body: { model: 'bridge-smart', messages: [{ role: 'user', content: 'kill me' }] },
+  });
+  await new Promise((rr) => setTimeout(rr, 400));
+  r = await request(P13, { path: '/dashboard/status' });
+  const act = JSON.parse(r.body).activeRequests;
+  assert(Array.isArray(act) && act.length === 1 && act[0].engine === 'claude', 'active request visible on dashboard status');
+  r = await request(P13, { path: `/admin/requests/${act[0].id}/kill`, method: 'POST', headers: { Authorization: 'Bearer adm-key' }, body: {} });
+  assert(r.status === 200 && JSON.parse(r.body).killed === true, 'admin kill accepted');
+  const victimRes = await killVictim;
+  assert(victimRes.status === 500 && errType(victimRes) === 'request_cancelled', `killed request gets request_cancelled (got ${victimRes.status})`);
+  await new Promise((rr) => setTimeout(rr, 300));
+  assert(liveChildren() === 0, 'killed request leaves no orphan CLI child');
+
+  console.log('\n## Phase 4 — SSE event bus');
+  const eventsSeen = [];
+  await new Promise((resolve) => {
+    const evReq = http.request({ port: P13, path: '/dashboard/events', method: 'GET' }, (res2) => {
+      let buf = '';
+      res2.on('data', (c) => {
+        buf += c.toString();
+        for (const block of buf.split('\n\n')) {
+          const m = block.match(/^event: (\S+)/m);
+          if (m && !eventsSeen.includes(m[1])) eventsSeen.push(m[1]);
+        }
+        if (eventsSeen.includes('request.end')) {
+          evReq.destroy();
+          resolve();
+        }
+      });
+      request(P13, {
+        path: '/v1/chat/completions', method: 'POST', headers: { Authorization: 'Bearer adm-key' },
+        body: { model: 'bridge-fast', messages: [{ role: 'user', content: 'event me' }] },
+      });
+      setTimeout(() => { evReq.destroy(); resolve(); }, 5000);
+    });
+    evReq.on('error', () => resolve());
+    evReq.end();
+  });
+  assert(eventsSeen.includes('request.start') && eventsSeen.includes('request.end'),
+    `event bus emits request lifecycle (saw: ${eventsSeen.join(',')})`);
 
   console.log(`\n# Result: ${passed} passed, ${failed} failed`);
   process.exit(failed === 0 ? 0 : 1);
