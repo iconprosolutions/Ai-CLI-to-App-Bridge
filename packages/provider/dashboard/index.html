@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI CLI Bridge · Control Center</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<header class="shell">
+  <div class="inner">
+    <div class="shell-top">
+      <span class="logo-dot"></span><span class="wordmark">AI CLI Bridge <small>· Control Center</small></span>
+      <span class="spacer"></span>
+      <span id="verdicts"></span>
+      <span class="verdict"><span class="vk">Inflight</span><span class="vv num" id="v-inflight" style="color:var(--on-dark)">—</span></span>
+      <button class="livebtn" id="livebtn" title="Live updates over SSE"><span class="pl" id="livedot"></span><span id="livelabel">Live</span></button>
+    </div>
+    <nav class="tabs" id="tabs">
+      <button class="tab active" data-view="overview">Overview</button>
+      <button class="tab" data-view="routes">Routes<span class="cnt" id="cnt-routes"></span></button>
+      <button class="tab" data-view="usage">Usage</button>
+      <button class="tab" data-view="tester">Tester</button>
+      <button class="tab" data-view="requests">Requests<span class="cnt" id="cnt-capture"></span></button>
+      <button class="tab" data-view="connect">Connect</button>
+    </nav>
+  </div>
+</header>
+
+<!-- ═══ OVERVIEW ═══ -->
+<main class="wrap view active" id="view-overview">
+  <div id="ov-banner"></div>
+  <div class="sec-head"><h2>Engines</h2><span class="note">breaker · quota · slots · 24h uptime</span></div>
+  <div class="engines" id="ov-engines"></div>
+  <div class="sec-head"><h2>Today</h2><span class="note">telemetry window + usage ledger</span></div>
+  <div class="tiles" id="ov-tiles"></div>
+  <div class="sec-head"><h2>Live feed</h2><span class="note">newest first · SSE push</span></div>
+  <div class="table scrollx"><div style="min-width:720px">
+    <div class="thead" style="grid-template-columns:64px 1.6fr 90px 90px 80px 80px 70px">
+      <span>Time</span><span>Route</span><span>App</span><span>Status</span><span>Latency</span><span>Tokens</span><span></span>
+    </div>
+    <div id="ov-feed"></div>
+  </div></div>
+</main>
+
+<!-- ═══ ROUTES ═══ -->
+<main class="wrap view" id="view-routes">
+  <div class="sec-head"><h2>Routes</h2><span class="note">edits write routes.json · hot-reload, no restart</span></div>
+  <div class="table scrollx"><div style="min-width:860px">
+    <div class="thead" style="grid-template-columns:1.7fr 80px 1.2fr 1.3fr 70px 90px 150px">
+      <span>Route</span><span>Engine</span><span>Upstream model</span><span>Aliases</span><span>On</span><span>Calls</span><span>Actions</span>
+    </div>
+    <div id="rt-table"></div>
+  </div></div>
+  <div class="grid2" style="margin-top:26px">
+    <div class="panel">
+      <h3>Add route</h3>
+      <div class="field"><label for="rt-engine">Engine</label><select id="rt-engine"><option value="claude">claude</option><option value="gemini">gemini</option></select></div>
+      <div class="field"><label for="rt-model">Upstream model</label><input id="rt-model" placeholder="claude-opus-4-8 or Gemini 3.1 Pro (High)"></div>
+      <div class="field"><label for="rt-id">Route id</label><input id="rt-id" placeholder="bridge-claude-opus-4.8-titan"></div>
+      <div class="field"><label for="rt-label">Label</label><input id="rt-label" placeholder="Bridge Claude Opus 4.8 · Titan"></div>
+      <div class="field"><label for="rt-aliases">Aliases (comma-separated)</label><input id="rt-aliases" placeholder="claude-opus-48, bridge-frontier"></div>
+      <button class="abtn primary" id="rt-add">Add route</button>
+      <span class="mono" id="rt-msg" style="font-size:11px;color:var(--faint);margin-left:10px"></span>
+    </div>
+    <div class="panel">
+      <h3>Discovered models</h3>
+      <div id="rt-discovered" class="ekv" style="margin-top:0"><span class="k">—</span><span class="sub2">Run a probe to list each engine's live catalogue.</span></div>
+      <div class="privacy" style="margin-top:14px">Listing is free — claude uses a static catalogue, gemini asks <code>agy models</code>. No completions are run.</div>
+      <div style="margin-top:10px;display:flex;gap:8px">
+        <button class="abtn" data-probe="claude">Probe claude</button>
+        <button class="abtn" data-probe="gemini">Probe gemini</button>
+      </div>
+    </div>
+  </div>
+</main>
+
+<!-- ═══ USAGE ═══ -->
+<main class="wrap view" id="view-usage">
+  <div class="sec-head">
+    <h2>Usage</h2>
+    <div class="seg" id="us-range">
+      <button data-range="today">Today</button>
+      <button data-range="7d" class="active">7 days</button>
+      <button data-range="30d">30 days</button>
+      <button data-range="all">All</button>
+    </div>
+    <span class="note">ledger: .bridge-runtime/usage/*.jsonl · survives restarts</span>
+  </div>
+  <div class="tiles" id="us-tiles"></div>
+  <div class="grid2" style="margin-top:26px">
+    <div>
+      <div class="sec-head" style="margin-top:0"><h2 style="font-size:17px">By app</h2><span class="note">X-App-Id header</span></div>
+      <div class="table scrollx"><div style="min-width:560px">
+        <div class="thead" style="grid-template-columns:1.2fr 70px 90px 90px 95px 70px 70px">
+          <span>App</span><span>Calls</span><span>Prompt</span><span>Compl.</span><span>API-equiv</span><span>Err</span><span>Lat.</span>
+        </div>
+        <div id="us-apps"></div>
+      </div></div>
+      <div class="privacy" id="us-note"></div>
+    </div>
+    <div>
+      <div class="sec-head" style="margin-top:0"><h2 style="font-size:17px">Tokens per day</h2><span class="note">by engine</span></div>
+      <div class="panel" style="padding-bottom:14px">
+        <div class="bars" id="us-bars"></div>
+        <div class="bar-x" id="us-bar-x"></div>
+        <div class="legend"><span><i style="background:var(--ink)"></i>claude</span><span><i style="background:var(--peri)"></i>gemini</span></div>
+      </div>
+      <div class="sec-head"><h2 style="font-size:17px">By route</h2></div>
+      <div class="table">
+        <div class="thead" style="grid-template-columns:1.6fr 80px 90px 90px"><span>Route</span><span>Calls</span><span>Tokens</span><span>API-equiv</span></div>
+        <div id="us-routes"></div>
+      </div>
+    </div>
+  </div>
+</main>
+
+<!-- ═══ TESTER ═══ -->
+<main class="wrap view" id="view-tester">
+  <div class="sec-head"><h2>Tester</h2><span class="note">POST /v1/chat/completions · SSE &amp; blocking</span></div>
+  <div class="grid2">
+    <div>
+      <div class="field"><label for="t-route">Route A</label><select id="t-route"></select></div>
+      <div class="field"><label for="t-compare-route">Compare — Route B <button class="tog" id="t-compare" style="vertical-align:-4px;margin-left:6px" aria-label="compare toggle"></button></label>
+        <select id="t-compare-route" disabled></select></div>
+      <div class="field"><label for="t-prompt">Prompt</label><textarea id="t-prompt">Reply with exactly: bridge-ok</textarea></div>
+      <details class="adv"><summary>System prompt</summary><div class="adv-body"><textarea id="t-system" placeholder="Optional system message"></textarea></div></details>
+      <details class="adv"><summary>Tools (JSON array)</summary><div class="adv-body"><textarea id="t-tools" placeholder='[{"type":"function","function":{"name":"read_file","parameters":{"type":"object"}}}]'></textarea></div></details>
+      <div class="field"><label>Response format</label>
+        <div class="seg" id="t-rf"><button data-rf="text" class="active">Text</button><button data-rf="json_object">json_object</button><button data-rf="json_schema">json_schema</button></div>
+      </div>
+      <details class="adv" id="t-schema-wrap" style="display:none"><summary>JSON schema</summary><div class="adv-body"><textarea id="t-schema" placeholder='{"type":"object","required":["answer"],"properties":{"answer":{"type":"string"}}}'></textarea></div></details>
+      <div class="field"><label>Transport</label>
+        <div class="seg" id="t-transport"><button data-tr="stream" class="active">SSE stream</button><button data-tr="block">Blocking</button></div>
+      </div>
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <button class="abtn primary" id="t-run" style="padding:10px 24px;font-size:12px">Run</button>
+        <button class="abtn" id="t-stop" disabled>Stop</button>
+        <button class="abtn" id="t-curl">Copy as cURL</button>
+        <span class="mono" id="t-status" style="font-size:10.5px;color:var(--faint)">Ready</span>
+      </div>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:12px">
+      <div class="console"><div class="cbar"><span class="ctag" id="t-tag-a">A</span><span class="cmeta" id="t-meta-a">awaiting run</span></div><div class="cbody" id="t-out-a">No response yet.</div></div>
+      <div class="console" id="t-console-b" style="display:none"><div class="cbar"><span class="ctag" id="t-tag-b">B</span><span class="cmeta" id="t-meta-b">—</span></div><div class="cbody" id="t-out-b"></div></div>
+      <div class="panel" style="padding:12px 16px">
+        <div class="eyebrow" style="margin-bottom:8px">History (this session)</div>
+        <div class="sub2 mono" id="t-history" style="font-size:11px;line-height:1.9">No runs yet.</div>
+      </div>
+    </div>
+  </div>
+</main>
+
+<!-- ═══ REQUESTS ═══ -->
+<main class="wrap view" id="view-requests">
+  <div class="sec-head">
+    <h2>Requests</h2>
+    <span style="display:inline-flex;align-items:center;gap:8px"><button class="tog" id="cap-tog" aria-label="capture toggle"></button><span class="eyebrow" style="color:var(--ink)" id="cap-label">Capture bodies: off</span></span>
+    <span class="note">last 50 · in-memory only · cleared on restart · never written to disk</span>
+  </div>
+  <div id="cap-off" class="panel" style="text-align:center;padding:48px 20px">
+    <div class="eyebrow" style="margin-bottom:10px">Capture is off</div>
+    <div style="max-width:52ch;margin:0 auto;color:var(--body);font-size:14px">Only metadata (route, status, latency, token counts) is recorded. Turn on capture to keep the last 50 full request/response bodies in memory for debugging. Nothing is ever written to disk.</div>
+  </div>
+  <div id="cap-on" style="display:none">
+    <div class="grid2-13">
+      <div class="reqlist" id="cap-list"></div>
+      <div class="panel" id="cap-detail"><div class="empty">Select a request.</div></div>
+    </div>
+  </div>
+</main>
+
+<!-- ═══ CONNECT ═══ -->
+<main class="wrap view" id="view-connect">
+  <div class="sec-head"><h2>Connect an app</h2><span class="note">route id = model name</span></div>
+  <div class="grid2">
+    <div>
+      <div class="kv"><span class="k">Base URL</span><code id="c-base">—</code><button class="abtn" data-copy="c-base">Copy</button></div>
+      <div class="kv"><span class="k">Auth</span><code id="c-auth">—</code><button class="abtn" data-copy="c-auth">Copy</button></div>
+      <div class="kv"><span class="k">Default</span><code id="c-default">—</code><button class="abtn" data-copy="c-default">Copy</button></div>
+      <div class="kv"><span class="k">App id</span><code>X-App-Id: &lt;your-app&gt;</code></div>
+      <div class="field" style="margin-top:18px"><label for="c-key">API key (stored locally — used by the Tester and admin actions)</label><input id="c-key" type="password" placeholder="Bearer token from bridge:up / credentials.json"></div>
+      <p class="mono" style="font-size:11px;color:var(--body);line-height:1.7">Point any OpenAI-compatible client at the base URL. Send X-App-Id so the Usage tab can attribute tokens per app.</p>
+    </div>
+    <div>
+      <div class="seg" style="margin-bottom:12px" id="c-tabs"><button class="active" data-snip="hermes">Hermes</button><button data-snip="curl">curl</button><button data-snip="js">OpenAI JS</button><button data-snip="python">Python</button></div>
+      <div class="console" style="min-height:0"><div class="cbar"><span class="ctag" id="snip-name">—</span><button class="abtn" data-copy="snip-body" style="color:var(--on-dark);background:var(--dark-soft);border-color:var(--dark-fill)">Copy</button></div><pre class="code" id="snip-body"></pre></div>
+    </div>
+  </div>
+</main>
+
+<footer>
+  <div class="foot"><span>AI CLI Bridge · Control Center</span><span id="foot-note">local only</span></div>
+  <div class="stencil">ai-cli-bridge</div>
+</footer>
+
+<script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,670 @@
+/* AI CLI Bridge — Control Center. No build step, no dependencies.
+   Data: /dashboard/status (state), /dashboard/events (SSE push),
+   /dashboard/usage (ledger rollups), /admin/* (key-gated actions),
+   /v1/chat/completions (tester). */
+(function () {
+  'use strict';
+
+  var $ = function (id) { return document.getElementById(id); };
+  var state = {
+    status: null,
+    usage: null,
+    usageRange: '7d',
+    view: 'overview',
+    live: true,
+    compare: false,
+    transport: 'stream',
+    rf: 'text',
+    snip: 'hermes',
+    capSelected: null,
+    history: [],
+  };
+
+  var key = function () { return localStorage.getItem('providerApiKey') || ''; };
+
+  function esc(v) {
+    return String(v == null ? '' : v).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+  function fmt(n) { return (Number(n) || 0).toLocaleString('en-US'); }
+  function ftok(n) {
+    n = Number(n) || 0;
+    if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
+    if (n >= 1e3) return (n / 1e3).toFixed(1) + 'k';
+    return String(n);
+  }
+  function tval(d) { return new Date(d).toLocaleTimeString(); }
+  function pct(a, b) { return b ? Math.round((a / b) * 100) : 0; }
+
+  // ── Transport ─────────────────────────────────────────────────────────
+  function fetchStatus() {
+    return fetch('/dashboard/status').then(function (r) { return r.json(); }).then(function (d) {
+      state.status = d;
+      renderAll();
+    }).catch(function () { setLive(false); });
+  }
+  function fetchUsage() {
+    return fetch('/dashboard/usage?range=' + state.usageRange).then(function (r) { return r.json(); }).then(function (d) {
+      state.usage = d;
+      renderUsage();
+      if (state.view === 'overview') renderTiles();
+    }).catch(function () {});
+  }
+
+  var refreshTimer = null;
+  function throttledRefresh() {
+    if (refreshTimer) return;
+    refreshTimer = setTimeout(function () {
+      refreshTimer = null;
+      fetchStatus();
+      if (state.view === 'usage' || state.view === 'overview') fetchUsage();
+    }, 500);
+  }
+
+  var es = null;
+  var pollTimer = null;
+  function setLive(ok) {
+    state.live = ok;
+    $('livedot').className = 'pl' + (ok ? '' : ' dead');
+    $('livelabel').textContent = ok ? 'Live' : 'Polling';
+  }
+  function connectEvents() {
+    try {
+      es = new EventSource('/dashboard/events');
+      ['request.start', 'request.end', 'breaker.change', 'engine.health', 'capture.change'].forEach(function (t) {
+        es.addEventListener(t, throttledRefresh);
+      });
+      es.onopen = function () { setLive(true); if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } };
+      es.onerror = function () {
+        setLive(false);
+        if (!pollTimer) pollTimer = setInterval(fetchStatus, 10000);
+      };
+    } catch (_) {
+      setLive(false);
+      pollTimer = setInterval(fetchStatus, 10000);
+    }
+  }
+
+  function admin(method, path, body) {
+    return fetch(path, {
+      method: method,
+      headers: { 'Authorization': 'Bearer ' + key(), 'Content-Type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    }).then(function (r) {
+      if (r.status === 401 || r.status === 503) {
+        alert('Admin action rejected (' + r.status + '). Set your API key in the Connect tab.');
+        throw new Error('unauthorized');
+      }
+      return r.json().then(function (j) {
+        if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status));
+        return j;
+      });
+    });
+  }
+
+  // ── Header ────────────────────────────────────────────────────────────
+  function engineVerdict(e, s) {
+    if (!s) return { cls: 'off', label: 'UNKNOWN' };
+    if (s.breakers && s.breakers[e] && s.breakers[e].state === 'open') return { cls: 'down', label: 'BLOCKED' };
+    if (s.engines[e] && s.engines[e].disabled) return { cls: 'off', label: 'OFF' };
+    if (!s.engines[e] || !s.engines[e].ok) return { cls: 'down', label: 'DOWN' };
+    if ((s.inflight[e] || 0) > 0) return { cls: 'warn', label: 'BUSY' };
+    return { cls: 'ok', label: 'READY' };
+  }
+
+  function renderHeader() {
+    var s = state.status;
+    if (!s) return;
+    $('verdicts').innerHTML = Object.keys(s.engines).map(function (e) {
+      var v = engineVerdict(e, s);
+      return '<span class="verdict"><span class="dot ' + v.cls + '"></span><span class="vk">' + esc(e) + '</span><span class="vv ' + v.cls + '">' + v.label + '</span></span>';
+    }).join('');
+    var inf = Object.keys(s.inflight).map(function (e) { return s.inflight[e]; }).join(' / ');
+    $('v-inflight').textContent = inf;
+    $('cnt-routes').textContent = (s.routes || []).length;
+    $('cnt-capture').textContent = s.capture && s.capture.enabled ? (s.capture.count + ' held') : '';
+    $('foot-note').textContent = (s.authEnabled ? 'auth enabled' : 'open') + ' · local';
+  }
+
+  // ── Overview ──────────────────────────────────────────────────────────
+  function renderBanner() {
+    var s = state.status;
+    var open = Object.keys(s.breakers || {}).filter(function (e) { return s.breakers[e].state !== 'closed'; });
+    $('ov-banner').innerHTML = open.length ? open.map(function (e) {
+      var b = s.breakers[e];
+      return '<div class="banner"><span class="bi"></span><span class="bt"><strong>' + esc(e) + ' circuit ' + esc(b.state) + '</strong> — '
+        + esc(b.reason || 'capacity') + ' exhaustion. Requests fail fast with 429. Retry in ~' + b.retryInSec + 's.</span>'
+        + '<span class="bactions"><button class="abtn primary" data-act="breaker-reset" data-engine="' + esc(e) + '">Reset breaker</button></span></div>';
+    }).join('') : '';
+  }
+
+  function uptimeStrip(history) {
+    var arr = (history || []).slice(-30);
+    var out = '';
+    for (var i = 0; i < 30 - arr.length; i++) out += '<i class="ub i"></i>';
+    arr.forEach(function (h) { out += '<i class="ub' + (h.ok ? '' : ' b') + '"></i>'; });
+    return out;
+  }
+
+  function renderEngines() {
+    var s = state.status;
+    var lastErrByEngine = {};
+    (s.telemetry.latestErrors || []).forEach(function (r) {
+      if (r.engine && !lastErrByEngine[r.engine]) lastErrByEngine[r.engine] = r;
+    });
+    $('ov-engines').innerHTML = Object.keys(s.engines).map(function (e) {
+      var eng = s.engines[e];
+      var v = engineVerdict(e, s);
+      var b = s.breakers[e];
+      var active = (s.activeRequests || []).filter(function (a) { return a.engine === e; });
+      var lastErr = lastErrByEngine[e];
+      var pips = '';
+      var max = s.telemetry.maxConcurrent || 1;
+      for (var i = 0; i < max; i++) pips += '<span class="pip' + (i < (s.inflight[e] || 0) ? ' on' : '') + '"></span>';
+      var badgeCls = v.cls === 'ok' ? 'ok' : v.cls === 'warn' ? 'warn' : 'down';
+      var badgeTxt = b.state === 'open' ? 'Circuit open' : v.label === 'OFF' ? 'Disabled' : v.label === 'DOWN' ? 'Down' : v.label === 'BUSY' ? 'Busy' : 'Operational';
+      return '<div class="ecard">'
+        + '<div class="erow"><span class="ename">' + esc(e) + '</span><span class="emodel">' + esc(eng.detail || '') + '</span><span class="spacer"></span>'
+        + '<span class="sbadge ' + badgeCls + '"><i></i>' + esc(badgeTxt) + '</span></div>'
+        + '<div class="ekv">'
+        + '<span class="k">Breaker</span><span>' + esc(b.state) + (b.reason ? ' · ' + esc(b.reason) : '') + (b.state === 'open' ? ' · retry ~' + b.retryInSec + 's' : '') + '</span>'
+        + '<span class="k">Slots</span><span class="pips">' + pips + '<span class="sub2" style="margin-left:6px">' + (s.inflight[e] || 0) + '/' + max + (s.queue[e] ? ' · ' + s.queue[e] + ' queued' : '') + '</span></span>'
+        + '<span class="k">Last error</span><span class="sub2">' + (lastErr ? esc(lastErr.status + ' · ' + (lastErr.label || '') + ' · ' + tval(lastErr.at)) : 'none in window') + '</span>'
+        + '</div>'
+        + '<div class="ustrip">' + uptimeStrip(eng.history) + '</div>'
+        + '<div class="eactions">'
+        + '<button class="abtn primary" data-act="breaker-reset" data-engine="' + esc(e) + '"' + (b.state === 'closed' ? ' disabled' : '') + '>Reset breaker</button>'
+        + '<button class="abtn" data-act="probe" data-engine="' + esc(e) + '">Probe</button>'
+        + (active.length ? '<button class="abtn danger" data-act="kill" data-id="' + esc(active[0].id) + '">Kill run · ' + esc(active[0].id.slice(0, 6)) + '</button>' : '<button class="abtn" disabled>Kill run</button>')
+        + (eng.disabled
+          ? '<button class="abtn" data-act="engine-enable" data-engine="' + esc(e) + '">Enable engine</button>'
+          : '<button class="abtn" data-act="engine-disable" data-engine="' + esc(e) + '">Disable engine</button>')
+        + '</div></div>';
+    }).join('');
+  }
+
+  function renderTiles() {
+    var t = state.status.telemetry;
+    var u = state.usage;
+    var rate = t.recentCount ? pct(t.successCount, t.recentCount) + '%' : '—';
+    var usd = u && u.totals ? '$' + (u.totals.apiEquivalentUsd || 0).toFixed(2) : '—';
+    var toks = u && u.totals ? ftok(u.totals.promptTokens + u.totals.completionTokens) : ftok(t.estTotalTokens);
+    $('ov-tiles').innerHTML =
+      '<div class="tile mint"><div class="tl">Requests (window)</div><div class="big num">' + fmt(t.recentCount) + '</div><div class="sub">' + rate + ' success · ' + fmt(t.errorCount) + ' errors</div></div>'
+      + '<div class="tile peach"><div class="tl">Avg latency</div><div class="big num">' + fmt(t.avgLatencyMs) + '<small>ms</small></div><div class="sub">across ' + fmt(t.recentCount) + ' calls</div></div>'
+      + '<div class="tile peri"><div class="tl">Tokens (' + esc(state.usageRange) + ')</div><div class="big num">' + toks + '</div><div class="sub">' + (u && u.totals ? ftok(u.totals.promptTokens) + ' prompt · ' + ftok(u.totals.completionTokens) + ' completion' : 'telemetry window') + '</div></div>'
+      + '<div class="tile plain"><div class="tl">API-equivalent value</div><div class="big num">' + usd + '</div><div class="sub">what this usage would cost on the API</div></div>';
+  }
+
+  function renderFeed() {
+    var s = state.status;
+    var activeRows = (s.activeRequests || []).map(function (a) {
+      return '<div class="trow" style="grid-template-columns:64px 1.6fr 90px 90px 80px 80px 70px">'
+        + '<span class="sub2 num">' + esc(tval(a.startedAt)) + '</span>'
+        + '<span>' + esc(a.routeId) + '<div class="sub2">' + (a.streaming ? 'streaming' : 'blocking') + '</div></span>'
+        + '<span class="nbadge">' + esc(a.appId) + '</span>'
+        + '<span><span class="dsb run">running</span></span>'
+        + '<span class="sub2 num">…</span><span class="sub2 num">—</span>'
+        + '<span><button class="abtn danger" style="padding:4px 8px" data-act="kill" data-id="' + esc(a.id) + '">Kill</button></span></div>';
+    }).join('');
+    var doneRows = (s.recentRequests || []).slice(0, 30).map(function (r) {
+      var sc = r.status >= 500 ? 's5' : r.status >= 400 ? 's4' : 's2';
+      return '<div class="trow" style="grid-template-columns:64px 1.6fr 90px 90px 80px 80px 70px">'
+        + '<span class="sub2 num">' + esc(tval(r.at)) + '</span>'
+        + '<span>' + esc(r.label || r.aliasUsed) + (r.usageSource === 'real' ? '<div class="sub2">real usage</div>' : '') + '</span>'
+        + '<span class="nbadge">' + esc(r.appId || 'default') + '</span>'
+        + '<span><span class="dsb ' + sc + '">' + esc(r.status) + '</span></span>'
+        + '<span class="sub2 num">' + esc(fmt(r.durationMs)) + 'ms</span>'
+        + '<span class="sub2 num">' + ftok(r.estTotalTokens) + '</span><span></span></div>';
+    }).join('');
+    $('ov-feed').innerHTML = (activeRows + doneRows) || '<div class="empty">No calls yet</div>';
+  }
+
+  // ── Routes ────────────────────────────────────────────────────────────
+  function routeCalls(routeId) {
+    var pr = (state.status.telemetry.perRoute || []).find(function (r) { return r.routeId === routeId; });
+    return pr ? pr.count : 0;
+  }
+  function renderRoutes() {
+    var s = state.status;
+    $('rt-table').innerHTML = (s.routes || []).map(function (r) {
+      var isDefault = r.id === s.defaultRoute;
+      return '<div class="trow" style="grid-template-columns:1.7fr 80px 1.2fr 1.3fr 70px 90px 150px">'
+        + '<span>' + esc(r.label) + (isDefault ? ' <span class="chip" style="background:var(--tint-mint)">default</span>' : '') + '<div class="sub2">' + esc(r.id) + '</div></span>'
+        + '<span><span class="nbadge">' + esc(r.engine) + '</span></span>'
+        + '<span class="sub2">' + esc(r.upstreamModel) + '</span>'
+        + '<span></span>'
+        + '<span><button class="tog' + (r.enabled !== false ? ' on' : '') + '" data-act="route-toggle" data-id="' + esc(r.id) + '" data-enabled="' + (r.enabled !== false) + '" aria-label="toggle"></button></span>'
+        + '<span class="sub2 num">' + fmt(routeCalls(r.id)) + '</span>'
+        + '<span><button class="abtn danger" data-act="route-delete" data-id="' + esc(r.id) + '"' + (isDefault ? ' disabled title="default route"' : '') + '>Delete</button></span>'
+        + '</div>';
+    }).join('');
+  }
+
+  // ── Usage ─────────────────────────────────────────────────────────────
+  function renderUsage() {
+    var u = state.usage;
+    if (!u || !u.totals) return;
+    var t = u.totals;
+    var topApp = (u.perApp && u.perApp[0]) || null;
+    $('us-tiles').innerHTML =
+      '<div class="tile peri"><div class="tl">Total tokens</div><div class="big num">' + ftok(t.promptTokens + t.completionTokens) + '</div><div class="sub">' + ftok(t.promptTokens) + ' prompt · ' + ftok(t.completionTokens) + ' completion</div></div>'
+      + '<div class="tile mint"><div class="tl">API-equivalent value</div><div class="big num">$' + (t.apiEquivalentUsd || 0).toFixed(2) + '</div><div class="sub">vs $0 marginal on subscription</div></div>'
+      + '<div class="tile peach"><div class="tl">Top app</div><div class="big">' + esc(topApp ? topApp.appId : '—') + '</div><div class="sub">' + (topApp ? fmt(topApp.requests) + ' calls' : 'no traffic in range') + '</div></div>'
+      + '<div class="tile plain"><div class="tl">Requests / errors</div><div class="big num">' + fmt(t.requests) + '</div><div class="sub">' + fmt(t.errors) + ' errors in range</div></div>';
+    $('us-apps').innerHTML = (u.perApp || []).map(function (a) {
+      var acc = a.usageAccuracy === 'real' ? '<span class="estb real">real</span>' : a.usageAccuracy === 'mixed' ? '<span class="estb real">mixed</span>' : '<span class="estb est">~est</span>';
+      return '<div class="trow" style="grid-template-columns:1.2fr 70px 90px 90px 95px 70px 70px">'
+        + '<span>' + esc(a.appId) + acc + '</span>'
+        + '<span class="sub2 num">' + fmt(a.requests) + '</span>'
+        + '<span class="sub2 num">' + ftok(a.promptTokens) + '</span>'
+        + '<span class="sub2 num">' + ftok(a.completionTokens) + '</span>'
+        + '<span class="sub2 num">$' + (a.apiEquivalentUsd || 0).toFixed(2) + '</span>'
+        + '<span class="sub2 num">' + fmt(a.errors) + '</span>'
+        + '<span class="sub2 num">' + fmt(a.avgLatencyMs) + 'ms</span></div>';
+    }).join('') || '<div class="empty">No usage in range</div>';
+    $('us-note').textContent = u.note || '';
+    var days = (u.perDay || []).slice(-14);
+    var maxTok = days.reduce(function (m, d) {
+      var sum = 0; Object.keys(d.byEngine).forEach(function (e) { sum += d.byEngine[e]; });
+      return Math.max(m, sum);
+    }, 1);
+    $('us-bars').innerHTML = days.map(function (d) {
+      var c = d.byEngine.claude || 0;
+      var g = d.byEngine.gemini || 0;
+      return '<div class="bar" title="' + esc(d.date) + ': claude ' + ftok(c) + ', gemini ' + ftok(g) + '">'
+        + '<i class="bc" style="height:' + Math.max(1, Math.round((c / maxTok) * 90)) + 'px"></i>'
+        + '<i class="bg" style="height:' + Math.max(1, Math.round((g / maxTok) * 90)) + 'px"></i></div>';
+    }).join('') || '<div class="empty" style="width:100%">No data</div>';
+    $('us-bar-x').innerHTML = days.map(function (d) { return '<span>' + esc(d.date.slice(5)) + '</span>'; }).join('');
+    $('us-routes').innerHTML = (u.perRoute || []).map(function (r) {
+      return '<div class="trow" style="grid-template-columns:1.6fr 80px 90px 90px"><span class="sub2">' + esc(r.routeId) + '</span><span class="sub2 num">' + fmt(r.requests) + '</span><span class="sub2 num">' + ftok(r.tokens) + '</span><span class="sub2 num">$' + (r.apiEquivalentUsd || 0).toFixed(2) + '</span></div>';
+    }).join('') || '<div class="empty">No routed calls in range</div>';
+  }
+
+  // ── Tester ────────────────────────────────────────────────────────────
+  function renderTesterRoutes() {
+    var s = state.status;
+    var opts = (s.routes || []).filter(function (r) { return r.enabled !== false; }).map(function (r) {
+      var v = engineVerdict(r.engine, s);
+      var mark = v.cls === 'ok' ? '✅' : v.cls === 'warn' ? '🟡' : '⛔';
+      return '<option value="' + esc(r.id) + '">' + esc(r.label) + ' · ' + mark + '</option>';
+    }).join('');
+    ['t-route', 't-compare-route'].forEach(function (id) {
+      var sel = $(id);
+      var prev = sel.value;
+      sel.innerHTML = opts;
+      if (prev && [].some.call(sel.options, function (o) { return o.value === prev; })) sel.value = prev;
+    });
+  }
+
+  function testerBody(routeId) {
+    var messages = [];
+    var sys = $('t-system').value.trim();
+    if (sys) messages.push({ role: 'system', content: sys });
+    messages.push({ role: 'user', content: $('t-prompt').value });
+    var body = { model: routeId, messages: messages };
+    var toolsRaw = $('t-tools').value.trim();
+    if (toolsRaw) {
+      try { body.tools = JSON.parse(toolsRaw); } catch (_) { throw new Error('Tools field is not valid JSON'); }
+    }
+    if (state.rf === 'json_object') body.response_format = { type: 'json_object' };
+    if (state.rf === 'json_schema') {
+      var schemaRaw = $('t-schema').value.trim();
+      var schema;
+      try { schema = schemaRaw ? JSON.parse(schemaRaw) : { type: 'object' }; } catch (_) { throw new Error('Schema field is not valid JSON'); }
+      body.response_format = { type: 'json_schema', json_schema: { name: 'tester', schema: schema } };
+    }
+    if (state.transport === 'stream') body.stream = true;
+    return body;
+  }
+
+  var testerAborts = [];
+  function runOne(routeId, outId, metaId, tagId) {
+    var out = $(outId);
+    var meta = $(metaId);
+    $(tagId).textContent = (outId === 't-out-a' ? 'A · ' : 'B · ') + routeId.split('-').pop();
+    out.textContent = '';
+    meta.textContent = state.transport === 'stream' ? 'SSE · streaming…' : 'POST · running…';
+    var t0 = Date.now();
+    var body;
+    try { body = testerBody(routeId); } catch (err) { out.textContent = err.message; meta.textContent = 'input error'; return Promise.resolve(); }
+    var ctl = new AbortController();
+    testerAborts.push(ctl);
+    var headers = { 'Content-Type': 'application/json', 'X-App-Id': 'dashboard-tester' };
+    if (key()) headers.Authorization = 'Bearer ' + key();
+    if (state.transport !== 'stream') {
+      return fetch('/v1/chat/completions', { method: 'POST', headers: headers, body: JSON.stringify(body), signal: ctl.signal })
+        .then(function (r) { return r.json().then(function (j) { return { r: r, j: j }; }); })
+        .then(function (o) {
+          var c = o.j.choices && o.j.choices[0];
+          out.textContent = c ? (c.message.tool_calls ? JSON.stringify(c.message.tool_calls, null, 2) : c.message.content) : JSON.stringify(o.j, null, 2);
+          var usage = o.j.usage ? ' · ' + o.j.usage.total_tokens + ' tok' : '';
+          meta.textContent = o.r.status + usage + ' · ' + (Date.now() - t0) + 'ms' + (c && c.finish_reason ? ' · ' + c.finish_reason : '');
+        })
+        .catch(function (err) { out.textContent = String(err.message || err); meta.textContent = 'aborted/error'; });
+    }
+    return fetch('/v1/chat/completions', { method: 'POST', headers: headers, body: JSON.stringify(body), signal: ctl.signal })
+      .then(function (res) {
+        if (!res.ok) return res.text().then(function (t) { out.textContent = t; meta.textContent = 'error ' + res.status; });
+        var reader = res.body.getReader();
+        var dec = new TextDecoder();
+        var buf = '';
+        var acc = '';
+        var finish = '';
+        function pump() {
+          return reader.read().then(function (rd) {
+            if (rd.done) {
+              meta.textContent = '200 · streamed · ' + (Date.now() - t0) + 'ms' + (finish ? ' · ' + finish : '');
+              return undefined;
+            }
+            buf += dec.decode(rd.value, { stream: true });
+            var parts = buf.split('\n\n');
+            buf = parts.pop();
+            parts.forEach(function (ln) {
+              ln = ln.trim();
+              if (ln.indexOf('data:') !== 0) return;
+              var data = ln.slice(5).trim();
+              if (data === '[DONE]') return;
+              try {
+                var j = JSON.parse(data);
+                var ch = j.choices && j.choices[0];
+                if (ch && ch.delta && ch.delta.content) { acc += ch.delta.content; out.textContent = acc; out.scrollTop = out.scrollHeight; }
+                if (ch && ch.delta && ch.delta.tool_calls) { acc += JSON.stringify(ch.delta.tool_calls, null, 2); out.textContent = acc; }
+                if (ch && ch.finish_reason) finish = ch.finish_reason;
+              } catch (_) {}
+            });
+            return pump();
+          });
+        }
+        return pump();
+      })
+      .catch(function (err) { out.textContent = String(err.message || err); meta.textContent = 'aborted/error'; });
+  }
+
+  function runTester() {
+    $('t-run').disabled = true;
+    $('t-stop').disabled = false;
+    $('t-status').textContent = 'Running';
+    testerAborts = [];
+    var runs = [runOne($('t-route').value, 't-out-a', 't-meta-a', 't-tag-a')];
+    if (state.compare) runs.push(runOne($('t-compare-route').value, 't-out-b', 't-meta-b', 't-tag-b'));
+    Promise.all(runs).then(function () {
+      $('t-run').disabled = false;
+      $('t-stop').disabled = true;
+      $('t-status').textContent = 'Done';
+      state.history.unshift(tval(Date.now()) + ' · ' + $('t-route').value.split('-').pop()
+        + (state.compare ? ' vs ' + $('t-compare-route').value.split('-').pop() : '')
+        + ' · ' + state.transport + (state.rf !== 'text' ? ' · ' + state.rf : ''));
+      state.history = state.history.slice(0, 8);
+      $('t-history').innerHTML = state.history.map(esc).join('<br>');
+      throttledRefresh();
+    });
+  }
+
+  function curlSnippet() {
+    var body;
+    try { body = testerBody($('t-route').value); } catch (_) { body = { model: $('t-route').value, messages: [] }; }
+    return 'curl ' + location.origin + '/v1/chat/completions \\\n  -H "Authorization: Bearer ' + (key() || '<key>') + '" \\\n  -H "Content-Type: application/json" \\\n  -d ' + "'" + JSON.stringify(body) + "'";
+  }
+
+  // ── Requests (capture) ───────────────────────────────────────────────
+  function renderCapture() {
+    var s = state.status;
+    var on = s.capture && s.capture.enabled;
+    $('cap-tog').className = 'tog' + (on ? ' on' : '');
+    $('cap-label').textContent = 'Capture bodies: ' + (on ? 'on' : 'off');
+    $('cap-off').style.display = on ? 'none' : '';
+    $('cap-on').style.display = on ? '' : 'none';
+    if (on && state.view === 'requests') loadCaptureList();
+  }
+  function loadCaptureList() {
+    admin('GET', '/admin/capture').then(function (d) {
+      $('cap-list').innerHTML = (d.requests || []).map(function (e) {
+        var sc = e.status >= 500 ? 's5' : e.status >= 400 ? 's4' : 's2';
+        return '<div class="reqitem' + (state.capSelected === e.id ? ' sel' : '') + '" data-cap="' + esc(e.id) + '">'
+          + '<span class="rt num">' + esc(tval(e.startedAt)) + '</span>'
+          + '<span>' + esc(e.routeId || '?') + ' · ' + esc(e.appId || '') + '<div class="sub2">' + ftok(e.promptBytes) + 'B in · ' + ftok(e.outputBytes) + 'B out</div></span>'
+          + '<span class="dsb ' + sc + '">' + esc(e.status == null ? '…' : e.status) + '</span>'
+          + '<span class="sub2 num">' + (e.stages && e.stages.totalMs != null ? fmt(e.stages.totalMs) + 'ms' : '—') + '</span></div>';
+      }).join('') || '<div class="empty">Nothing captured yet — make a request.</div>';
+    }).catch(function () {});
+  }
+  function loadCaptureDetail(id) {
+    state.capSelected = id;
+    admin('GET', '/admin/capture/' + id).then(function (e) {
+      var st = e.stages || {};
+      var total = st.totalMs || 1;
+      var seg = function (ms, cls) { return '<i class="' + cls + '" style="width:' + Math.max(1, Math.round(((ms || 0) / total) * 100)) + '%"></i>'; };
+      var wait = Math.max(0, (st.firstByteMs || total) - (st.queuedMs || 0));
+      var out = Math.max(0, total - (st.firstByteMs || total));
+      $('cap-detail').innerHTML =
+        '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">'
+        + '<span style="font-weight:500">req ' + esc(e.meta.reqId) + ' · ' + esc(e.meta.routeId) + '</span>'
+        + '<span class="dsb ' + (e.status >= 500 ? 's5' : e.status >= 400 ? 's4' : 's2') + '">' + esc(e.status) + (e.error ? ' ' + esc(e.error.kind) : '') + '</span>'
+        + '<span class="spacer"></span><span class="sub2 mono">' + esc(tval(e.startedAt)) + ' · ' + esc(e.meta.appId) + '</span></div>'
+        + '<div class="stages">' + seg(st.queuedMs, 'st-q') + seg(wait, 'st-w') + seg(out, 'st-o') + '</div>'
+        + '<div class="stage-leg">'
+        + '<span><i style="background:var(--hairline)"></i>queued ' + fmt(st.queuedMs || 0) + 'ms</span>'
+        + '<span><i style="background:var(--mint)"></i>CLI wait ' + fmt(wait) + 'ms</span>'
+        + '<span><i style="background:var(--ink)"></i>output ' + fmt(out) + 'ms</span></div>'
+        + '<div class="dtabs" id="cap-dtabs">'
+        + '<button class="dtab active" data-dtab="prompt">Sent prompt</button>'
+        + '<button class="dtab" data-dtab="output">Raw output</button>'
+        + '<button class="dtab" data-dtab="error">Error</button></div>'
+        + '<div class="console" style="border-radius:0 0 4px 4px;border-top:none;min-height:170px">'
+        + '<div class="cbar"><span class="ctag" id="cap-body-tag">flattened prompt</span></div>'
+        + '<div class="cbody" id="cap-body"></div></div>';
+      var bodies = {
+        prompt: e.sentPrompt || '(empty)',
+        output: e.rawOutput || '(no output)',
+        error: e.error ? e.error.kind + ': ' + e.error.message : '(no error)',
+      };
+      $('cap-body').textContent = bodies.prompt;
+      $('cap-dtabs').addEventListener('click', function (ev) {
+        var b = ev.target.closest('.dtab');
+        if (!b) return;
+        [].forEach.call($('cap-dtabs').children, function (x) { x.classList.toggle('active', x === b); });
+        $('cap-body').textContent = bodies[b.getAttribute('data-dtab')];
+        $('cap-body-tag').textContent = b.textContent.toLowerCase();
+      });
+      loadCaptureList();
+    }).catch(function () {});
+  }
+
+  // ── Connect ───────────────────────────────────────────────────────────
+  function snippets() {
+    var s = state.status;
+    var base = s ? s.connection.baseUrl : location.origin + '/v1';
+    var def = s ? s.defaultRoute : 'bridge-fast';
+    var models = s ? (s.routes || []).map(function (r) { return '      - ' + r.id; }).join('\n') : '';
+    return {
+      hermes: { n: '~/.hermes/config.yaml', b: 'providers:\n  ai-cli-bridge:\n    type: openai\n    base_url: ' + base + '\n    api_key: ${AI_CLI_BRIDGE_API_KEY}\n    models:\n' + models },
+      curl: { n: 'POST /v1/chat/completions', b: 'curl ' + base + '/chat/completions \\\n  -H "Authorization: Bearer <key>" \\\n  -H "X-App-Id: my-app" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"model":"' + def + '","messages":[{"role":"user","content":"Hello"}]}\'' },
+      js: { n: 'openai · node', b: 'import OpenAI from "openai";\n\nconst client = new OpenAI({\n  baseURL: "' + base + '",\n  apiKey: process.env.AI_CLI_BRIDGE_API_KEY,\n  defaultHeaders: { "X-App-Id": "my-app" },\n});' },
+      python: { n: 'openai · python', b: 'from openai import OpenAI\n\nclient = OpenAI(\n    base_url="' + base + '",\n    api_key=os.environ["AI_CLI_BRIDGE_API_KEY"],\n    default_headers={"X-App-Id": "my-app"},\n)' },
+    };
+  }
+  function renderConnect() {
+    var s = state.status;
+    if (!s) return;
+    $('c-base').textContent = s.connection.baseUrl;
+    $('c-auth').textContent = s.connection.authHeader;
+    $('c-default').textContent = s.defaultRoute;
+    var sn = snippets()[state.snip];
+    $('snip-name').textContent = sn.n;
+    $('snip-body').textContent = sn.b;
+    [].forEach.call($('c-tabs').children, function (b) { b.classList.toggle('active', b.getAttribute('data-snip') === state.snip); });
+  }
+
+  // ── Render root ───────────────────────────────────────────────────────
+  function renderAll() {
+    if (!state.status) return;
+    renderHeader();
+    if (state.view === 'overview') { renderBanner(); renderEngines(); renderTiles(); renderFeed(); }
+    if (state.view === 'routes') renderRoutes();
+    if (state.view === 'tester') renderTesterRoutes();
+    if (state.view === 'requests') renderCapture();
+    if (state.view === 'connect') renderConnect();
+  }
+
+  // ── Actions ───────────────────────────────────────────────────────────
+  var ACTIONS = {
+    'breaker-reset': function (el) { return admin('POST', '/admin/breakers/' + el.getAttribute('data-engine') + '/reset', {}); },
+    'probe': function (el) {
+      var e = el.getAttribute('data-engine');
+      el.classList.add('busy');
+      return admin('POST', '/admin/engines/' + e + '/probe', {}).then(function (d) {
+        el.classList.remove('busy');
+        var routed = {};
+        (state.status.routes || []).forEach(function (r) { routed[r.upstreamModel] = true; });
+        var chips = (d.models || []).map(function (m) {
+          return '<span class="chip">' + esc(m.id) + ' <span class="estb ' + (routed[m.id] ? 'real">routed' : 'est">new') + '</span></span>';
+        }).join('');
+        $('rt-discovered').innerHTML = '<span class="k">' + esc(e) + '</span><span>' + (chips || '<span class="sub2">none reported</span>') + '</span>';
+      }).catch(function () { el.classList.remove('busy'); });
+    },
+    'kill': function (el) {
+      if (!confirm('Kill this in-flight run? The CLI process is terminated and the caller gets an error.')) return Promise.resolve();
+      return admin('POST', '/admin/requests/' + el.getAttribute('data-id') + '/kill', {});
+    },
+    'engine-disable': function (el) {
+      var e = el.getAttribute('data-engine');
+      if (!confirm('Disable the ' + e + ' engine? All its routes will reject requests until re-enabled.')) return Promise.resolve();
+      return admin('POST', '/admin/engines/' + e + '/disable', {});
+    },
+    'engine-enable': function (el) { return admin('POST', '/admin/engines/' + el.getAttribute('data-engine') + '/enable', {}); },
+    'route-toggle': function (el) {
+      var enabled = el.getAttribute('data-enabled') === 'true';
+      return admin('PUT', '/admin/routes/' + el.getAttribute('data-id'), { enabled: !enabled });
+    },
+    'route-delete': function (el) {
+      var id = el.getAttribute('data-id');
+      if (!confirm('Delete route "' + id + '" from routes.json?')) return Promise.resolve();
+      return admin('DELETE', '/admin/routes/' + id);
+    },
+  };
+
+  document.addEventListener('click', function (ev) {
+    var actEl = ev.target.closest('[data-act]');
+    if (actEl) {
+      var fn = ACTIONS[actEl.getAttribute('data-act')];
+      if (fn) fn(actEl).then(throttledRefresh).catch(function () {});
+      return;
+    }
+    var copyEl = ev.target.closest('[data-copy]');
+    if (copyEl) {
+      var src = $(copyEl.getAttribute('data-copy'));
+      if (src && navigator.clipboard) {
+        navigator.clipboard.writeText(src.textContent);
+        var old = copyEl.textContent;
+        copyEl.textContent = 'Copied';
+        setTimeout(function () { copyEl.textContent = old; }, 1100);
+      }
+      return;
+    }
+    var capEl = ev.target.closest('[data-cap]');
+    if (capEl) loadCaptureDetail(capEl.getAttribute('data-cap'));
+  });
+
+  // Tabs
+  $('tabs').addEventListener('click', function (ev) {
+    var t = ev.target.closest('.tab');
+    if (!t) return;
+    state.view = t.getAttribute('data-view');
+    [].forEach.call($('tabs').children, function (x) { x.classList.toggle('active', x === t); });
+    [].forEach.call(document.querySelectorAll('.view'), function (v) { v.classList.toggle('active', v.id === 'view-' + state.view); });
+    window.scrollTo({ top: 0 });
+    if (state.view === 'usage') fetchUsage();
+    renderAll();
+  });
+
+  // Segmented controls
+  $('us-range').addEventListener('click', function (ev) {
+    var b = ev.target.closest('button');
+    if (!b) return;
+    state.usageRange = b.getAttribute('data-range');
+    [].forEach.call(this.children, function (x) { x.classList.toggle('active', x === b); });
+    fetchUsage();
+  });
+  $('t-rf').addEventListener('click', function (ev) {
+    var b = ev.target.closest('button');
+    if (!b) return;
+    state.rf = b.getAttribute('data-rf');
+    [].forEach.call(this.children, function (x) { x.classList.toggle('active', x === b); });
+    $('t-schema-wrap').style.display = state.rf === 'json_schema' ? '' : 'none';
+  });
+  $('t-transport').addEventListener('click', function (ev) {
+    var b = ev.target.closest('button');
+    if (!b) return;
+    state.transport = b.getAttribute('data-tr');
+    [].forEach.call(this.children, function (x) { x.classList.toggle('active', x === b); });
+  });
+  $('c-tabs').addEventListener('click', function (ev) {
+    var b = ev.target.closest('button');
+    if (!b) return;
+    state.snip = b.getAttribute('data-snip');
+    renderConnect();
+  });
+
+  // Tester controls
+  $('t-compare').addEventListener('click', function () {
+    state.compare = !state.compare;
+    this.classList.toggle('on', state.compare);
+    $('t-compare-route').disabled = !state.compare;
+    $('t-console-b').style.display = state.compare ? '' : 'none';
+  });
+  $('t-run').addEventListener('click', runTester);
+  $('t-stop').addEventListener('click', function () { testerAborts.forEach(function (c) { c.abort(); }); });
+  $('t-curl').addEventListener('click', function () {
+    if (navigator.clipboard) navigator.clipboard.writeText(curlSnippet());
+    $('t-status').textContent = 'cURL copied';
+  });
+
+  // Capture toggle
+  $('cap-tog').addEventListener('click', function () {
+    var on = state.status && state.status.capture && state.status.capture.enabled;
+    admin('POST', '/admin/capture', { enabled: !on }).then(function () {
+      state.capSelected = null;
+      $('cap-detail').innerHTML = '<div class="empty">Select a request.</div>';
+      throttledRefresh();
+    }).catch(function () {});
+  });
+
+  // Routes add form
+  $('rt-add').addEventListener('click', function () {
+    var body = {
+      id: $('rt-id').value.trim(),
+      label: $('rt-label').value.trim() || $('rt-id').value.trim(),
+      engine: $('rt-engine').value,
+      model: $('rt-model').value.trim(),
+      bestFor: '',
+      aliases: $('rt-aliases').value.split(',').map(function (s) { return s.trim(); }).filter(Boolean),
+    };
+    admin('POST', '/admin/routes', body).then(function () {
+      $('rt-msg').textContent = 'Added.';
+      ['rt-id', 'rt-label', 'rt-model', 'rt-aliases'].forEach(function (id) { $(id).value = ''; });
+      throttledRefresh();
+    }).catch(function (err) { $('rt-msg').textContent = err.message; });
+  });
+  document.querySelectorAll('[data-probe]').forEach(function (b) {
+    b.setAttribute('data-act', 'probe');
+    b.setAttribute('data-engine', b.getAttribute('data-probe'));
+  });
+
+  // Key field
+  $('c-key').value = key();
+  $('c-key').addEventListener('change', function () { localStorage.setItem('providerApiKey', this.value); });
+
+  // Live toggle (pause SSE-driven refreshes)
+  $('livebtn').addEventListener('click', function () {
+    if (es) { es.close(); es = null; setLive(false); if (!pollTimer) pollTimer = setInterval(fetchStatus, 10000); }
+    else { connectEvents(); fetchStatus(); }
+  });
+
+  // Boot
+  fetchStatus().then(fetchUsage);
+  connectEvents();
+  setInterval(function () { if (state.view === 'overview' || state.view === 'usage') fetchUsage(); }, 30000);
+}());

@@ -394,6 +394,17 @@ async function main() {
   assert(appRow && appRow.requests >= 2 && appRow.usageAccuracy === 'mixed', `per-app rollup attributes usage (${appRow && appRow.usageAccuracy})`);
   assert(Array.isArray(usage.perDay) && usage.perDay.length >= 1 && usage.perDay[0].byEngine, 'per-day by-engine rollup present');
 
+  console.log('\n## Dashboard static control center');
+  r = await request(P1, { path: '/dashboard/' });
+  assert(r.status === 200 && (r.headers['content-type'] || '').includes('text/html') && r.body.includes('Control Center') && r.body.includes('app.js'),
+    'dashboard index served as static HTML');
+  r = await request(P1, { path: '/dashboard/app.js' });
+  assert(r.status === 200 && (r.headers['content-type'] || '').includes('javascript'), 'dashboard app.js served');
+  r = await request(P1, { path: '/dashboard/styles.css' });
+  assert(r.status === 200 && (r.headers['content-type'] || '').includes('css'), 'dashboard styles.css served');
+  r = await request(P1, { path: '/' });
+  assert(r.status === 302 || r.status === 301, 'root redirects to the dashboard');
+
   console.log('\n## Auth gate');
   const P6 = 19450;
   await bootProvider(P6, { CLAUDE_PATH: CLAUDE_STUB, GEMINI_PATH: AGY_STUB, PROVIDER_API_KEY: 'prov-secret' });

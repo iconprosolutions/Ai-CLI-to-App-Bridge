@@ -18,7 +18,6 @@ const { createSemaphore } = require('./semaphore');
 const { createEventBus } = require('./events');
 const { createCapture } = require('./capture');
 const { createAdminRouter } = require('./admin');
-const { dashboardHtml } = require('./dashboard');
 const {
   estimateTokens, parseToolCallsFromText, messagesToPrompt, openaiErrorBody,
 } = require('./translate');
@@ -120,10 +119,11 @@ app.use('/v1', (req, res, next) => {
   return next();
 });
 
-// ── Dashboard + health ─────────────────────────────────────────────────
-app.get(['/', '/dashboard'], (req, res) => {
-  res.type('html').send(dashboardHtml());
-});
+// ── Dashboard (static control center) + health ─────────────────────────
+// Static middleware passes unknown paths through, so the /dashboard/status,
+// /dashboard/events, and /dashboard/usage handlers below keep working.
+app.get('/', (req, res) => res.redirect('/dashboard/'));
+app.use('/dashboard', express.static(path.join(__dirname, 'dashboard')));
 
 app.get('/dashboard/status', async (req, res) => {
   const checks = await Promise.all(ENGINE_NAMES.map((e) => adapters[e].healthCheck()));
