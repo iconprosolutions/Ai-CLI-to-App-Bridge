@@ -81,6 +81,17 @@ const STDIN_ECHO_CLI = writeFakeCli('stdin-echo-cli.sh', 'cat -');
 // Emits 😀 (F0 9F 98 80) split across two writes — exercises multibyte
 // decoding across chunk boundaries.
 const UTF8_SPLIT_CLI = writeFakeCli('utf8-split-cli.sh', "printf '\\360\\237\\230'; sleep 0.2; printf '\\200\\n'");
+// agy-style stub: answers `models` with a fixed list, logs every invocation,
+// and fails loudly if asked for a completion (--print) — proving /models
+// never spends quota.
+const AGY_LOG = path.join(TMP, 'agy-calls.log');
+const AGY_MODELS_CLI = path.join(TMP, 'agy-models-cli.sh');
+fs.writeFileSync(AGY_MODELS_CLI, `#!/bin/sh
+echo "$@" >> "${AGY_LOG}"
+if [ "$1" = "--version" ]; then echo "fake-agy 0.0.0"; exit 0; fi
+if [ "$1" = "models" ]; then printf 'Model Alpha\\nModel Beta\\n'; exit 0; fi
+echo "completion attempted" >&2; exit 1
+`, { mode: 0o755 });
 
 // Load a bridge module into a unique PORT/contexts dir. We re-require a fresh
 // copy by clearing the cache and monkeypatching env. The module captures its
@@ -258,6 +269,21 @@ async function main() {
     assert(deltas.includes('😀') && !deltas.includes('�'),
       `[${b.name}] split multibyte char decodes cleanly in stream deltas (got ${JSON.stringify(deltas)})`);
   }
+
+  console.log('\n## gemini-bridge — /models uses free `agy models`, never a completion');
+  await bootBridge(BRIDGES[1].server, 19170, { BRIDGE_API_KEY: '', GEMINI_PATH: AGY_MODELS_CLI });
+  sr = await request(19170, { path: '/models' });
+  let models = [];
+  try { models = JSON.parse(sr.body || '[]'); } catch (_) {}
+  assert(sr.status === 200 && models.length === 2 && models[0].id === 'Model Alpha' && models[1].id === 'Model Beta',
+    `[gemini] /models returns the agy models list (got ${models.map((m) => m.id).join(',')})`);
+  const agyCalls = fs.existsSync(AGY_LOG) ? fs.readFileSync(AGY_LOG, 'utf8') : '';
+  assert(!agyCalls.includes('--print'), '[gemini] listing models spends no completions');
+  // Fallback: when the CLI cannot list, serve the static candidates.
+  await bootBridge(BRIDGES[1].server, 19171, { BRIDGE_API_KEY: '', GEMINI_PATH: 'false' });
+  sr = await request(19171, { path: '/models' });
+  try { models = JSON.parse(sr.body || '[]'); } catch (_) { models = []; }
+  assert(sr.status === 200 && models.length >= 5, '[gemini] /models falls back to candidates when CLI listing fails');
 
   console.log(`\n# Result: ${passed} passed, ${failed} failed`);
   process.exit(failed === 0 ? 0 : 1);

@@ -1,6 +1,6 @@
 const express = require('express');
 const cors = require('cors');
-const { spawn, execFileSync } = require('child_process');
+const { spawn, execFile, execFileSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
@@ -107,40 +107,32 @@ const CANDIDATE_MODELS = [
 ];
 
 // ─────────────────────────────────────────────
-// Dynamic model discovery
-// Probes the Gemini CLI to find which models are actually available
-// for the current account. Results are cached for PROBE_CACHE_MS.
+// Dynamic model discovery via `agy models` — a free listing call (no
+// completion, no quota spend). Cached for PROBE_CACHE_MS; ?refresh=true
+// forces a re-list. Replaces the old probe that ran one completion per
+// candidate model.
 // ─────────────────────────────────────────────
 
-const PROBE_CACHE_MS = 60 * 60 * 1000; // re-probe at most once per hour
-let modelCache = null;      // null = never probed
-let probeLastRan = 0;
-let probeRunning = false;
+const PROBE_CACHE_MS = 60 * 60 * 1000; // re-list at most once per hour
+let modelCache = null;      // null = never listed
+let modelCacheAt = 0;
+let listingPromise = null;
 
-async function probeOneModel(candidate) {
-  try {
-    await runGemini('Reply with just the word OK.', candidate.id);
-    return { ...candidate, _status: 'ok' };
-  } catch (err) {
-    const msg = String(err.message || '');
-    // Quota-exceeded models still exist — include them so users can see them
-    if (msg.includes('quota exceeded') || msg.includes('temporarily unavailable') || msg.includes('exhausted')) {
-      return { ...candidate, _status: 'quota' };
-    }
-    // "not available" / "not found" → genuinely absent from this account
-    return null;
-  }
-}
-
-async function probeAllModels() {
-  if (probeRunning) return;
-  probeRunning = true;
-  console.log('[Models] Probing available models for this account…');
-  const results = await Promise.all(CANDIDATE_MODELS.map(probeOneModel));
-  modelCache = results.filter(Boolean).map(({ _status, ...m }) => m);
-  probeLastRan = Date.now();
-  probeRunning = false;
-  console.log(`[Models] Available: ${modelCache.map(m => m.id).join(', ')}`);
+function listAgyModels() {
+  if (listingPromise) return listingPromise;
+  listingPromise = new Promise((resolve) => {
+    execFile(GEMINI_PATH, ['models'], { encoding: 'utf8', timeout: 10000 }, (err, stdoutRaw) => {
+      listingPromise = null;
+      if (err || !stdoutRaw) return resolve(null);
+      const names = stripAnsi(String(stdoutRaw)).split('\n').map((s) => s.trim()).filter(Boolean);
+      if (!names.length) return resolve(null);
+      resolve(names.map((id) => {
+        const known = CANDIDATE_MODELS.find((m) => m.id === id);
+        return known || { id, name: id, description: 'Reported by `agy models`.', contextWindow: 1000000, isFree: false };
+      }));
+    });
+  });
+  return listingPromise;
 }
 
 const MODEL_ALIASES = {
@@ -543,23 +535,21 @@ Respond with plain text only. No JSON, no markdown formatting.`;
 // API Routes
 // ─────────────────────────────────────────────
 
-// Available models — dynamically discovered for the current Gemini account.
-// First call returns all candidates while a background probe runs.
-// Subsequent calls within PROBE_CACHE_MS return the probed (accurate) list.
-// Pass ?refresh=true to force a fresh probe.
-app.get('/models', (req, res) => {
-  const forceRefresh = req.query.refresh === 'true';
-
-  // Always kick off a background probe if stale or force-refresh requested.
-  // Never block the response waiting for it — the probe can take minutes.
-  if (forceRefresh || (!modelCache && !probeRunning)) {
-    if (forceRefresh) probeRunning = false; // allow restart
-    probeAllModels().catch(console.error);
+// Available models — listed from the account's real catalogue via
+// `agy models` (free). Cached; ?refresh=true forces a fresh listing.
+// Falls back to the static candidates when the CLI can't answer.
+app.get('/models', async (req, res) => {
+  const force = req.query.refresh === 'true';
+  if (!force && modelCache && (Date.now() - modelCacheAt) < PROBE_CACHE_MS) {
+    return res.json(modelCache);
   }
-
-  // Return cached probed list if available, otherwise full candidate list.
-  const cacheValid = modelCache && (Date.now() - probeLastRan) < PROBE_CACHE_MS;
-  res.json(cacheValid ? modelCache : CANDIDATE_MODELS.map(({ ...m }) => m));
+  const listed = await listAgyModels();
+  if (listed) {
+    modelCache = listed;
+    modelCacheAt = Date.now();
+    return res.json(listed);
+  }
+  res.json(modelCache || CANDIDATE_MODELS.map(({ ...m }) => m));
 });
 
 // Health check. /health is public (Docker HEALTHCHECK), so when auth is enabled

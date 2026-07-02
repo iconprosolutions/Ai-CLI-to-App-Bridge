@@ -328,8 +328,8 @@ async function restart(only) {
 }
 
 // Print available model routes + each engine's reported model catalogue.
-// Read-only: reuses the bridges' existing /models (cached); never POSTs a
-// completion, so it costs no quota.
+// Read-only and quota-free: the gemini bridge lists models via `agy models`
+// and the claude bridge serves a static catalogue — no completion is run.
 async function probe() {
   const dash = await httpGetJson(ports.provider, '/dashboard/status');
   if (!dash.ok || !dash.body) {
