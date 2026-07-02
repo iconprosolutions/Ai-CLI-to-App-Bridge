@@ -1,0 +1,383 @@
+'use strict';
+
+const path = require('path');
+const crypto = require('crypto');
+const express = require('express');
+const cors = require('cors');
+
+const {
+  httpFor, BridgeError, createSmoothPacer, installGracefulShutdown, intEnv, strEnv,
+} = require('@bridge/core');
+const { createClaudeAdapter, createAgyAdapter } = require('@bridge/adapters');
+const { createRouteRegistry } = require('./routes');
+const { createTelemetry } = require('./telemetry');
+const { dashboardHtml } = require('./dashboard');
+const {
+  estimateTokens, parseToolCallsFromText, messagesToPrompt, openaiErrorBody,
+} = require('./translate');
+
+const app = express();
+
+const CORS_ORIGINS = (process.env.CORS_ORIGINS || '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
+const corsOptions = CORS_ORIGINS.length
+  ? { origin: (origin, cb) => cb(null, !origin || CORS_ORIGINS.includes(origin)) }
+  : {};
+app.use(cors(corsOptions));
+app.use(express.json({ limit: '10mb' }));
+
+const PORT = intEnv('PROVIDER_PORT', 9011);
+// Bind to loopback by default; opt in to 0.0.0.0 only when you mean to expose it.
+const BIND_HOST = strEnv('BIND_HOST', '127.0.0.1');
+const API_KEY = process.env.PROVIDER_API_KEY || process.env.BRIDGE_API_KEY || '';
+const MAX_CONCURRENT_PER_ENGINE = Math.max(1, intEnv('PROVIDER_MAX_CONCURRENT_PER_ENGINE', 1));
+
+// Engines are in-process adapters — no HTTP hop, and every control-plane
+// action operates on state this process owns.
+const adapters = {
+  claude: createClaudeAdapter(),
+  gemini: createAgyAdapter(),
+};
+const ENGINE_NAMES = Object.keys(adapters);
+
+const registry = createRouteRegistry(path.join(__dirname, 'routes.json'));
+const telemetry = createTelemetry({ engines: ENGINE_NAMES });
+const inflight = {};
+for (const e of ENGINE_NAMES) inflight[e] = 0;
+
+function newRequestId() {
+  return crypto.randomBytes(6).toString('hex');
+}
+
+function appIdFrom(req) {
+  const raw = req.headers['x-app-id'] || req.headers['x-client-id'] || '';
+  const cleaned = String(raw).trim().slice(0, 64);
+  return cleaned && /^[A-Za-z0-9_.\- ]+$/.test(cleaned) ? cleaned : 'default';
+}
+
+function sendError(res, status, message, type, param, retryAfterSec) {
+  if (retryAfterSec) res.set('Retry-After', String(retryAfterSec));
+  return res.status(status).json(openaiErrorBody(message, type, param));
+}
+
+// ── Auth (OpenAI error envelope, /v1 only) ─────────────────────────────
+app.use('/v1', (req, res, next) => {
+  if (!API_KEY) return next();
+  const token = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+  const a = Buffer.from(token);
+  const b = Buffer.from(API_KEY);
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+    return sendError(res, 401, 'Missing or invalid Authorization bearer token.', 'invalid_request_error', 'Authorization');
+  }
+  return next();
+});
+
+// ── Dashboard + health ─────────────────────────────────────────────────
+app.get(['/', '/dashboard'], (req, res) => {
+  res.type('html').send(dashboardHtml());
+});
+
+app.get('/dashboard/status', async (req, res) => {
+  const checks = await Promise.all(ENGINE_NAMES.map((e) => adapters[e].healthCheck()));
+  const engines = {};
+  ENGINE_NAMES.forEach((e, i) => {
+    telemetry.recordHealthSample(e, checks[i].ok, 'health');
+    engines[e] = { url: 'in-process', ...checks[i], history: telemetry.healthHistory[e].slice(-120) };
+  });
+  const origin = `${req.protocol}://${req.get('host')}`;
+  res.json({
+    status: 'ok',
+    engine: 'provider-bridge',
+    authEnabled: Boolean(API_KEY),
+    uptime: process.uptime(),
+    inflight: { ...inflight },
+    engines,
+    connection: {
+      baseUrl: `${origin}/v1`,
+      chatCompletionsUrl: `${origin}/v1/chat/completions`,
+      authHeader: API_KEY ? 'Authorization: Bearer <key>' : 'none',
+    },
+    defaultRoute: registry.defaultRoute(),
+    routes: registry.list().map((route) => ({
+      id: route.id,
+      label: route.label,
+      engine: route.engine,
+      upstreamModel: route.model,
+      bestFor: route.bestFor,
+      enabled: route.enabled !== false,
+    })),
+    telemetry: telemetry.computeTelemetry(MAX_CONCURRENT_PER_ENGINE),
+    recentRequests: telemetry.recentRequests.map((r) => ({ ...r })),
+  });
+});
+
+app.get('/health', (req, res) => {
+  res.json({
+    status: 'ok',
+    engine: 'provider-bridge',
+    uptime: process.uptime(),
+    inflightClaude: inflight.claude,
+    inflightGemini: inflight.gemini,
+  });
+});
+
+// ── /v1/models ──────────────────────────────────────────────────────────
+app.get('/v1/models', (req, res) => {
+  const created = Math.floor(Date.now() / 1000);
+  const data = registry.list()
+    .filter((route) => route.enabled !== false)
+    .map((route) => ({
+      id: route.id,
+      object: 'model',
+      created,
+      owned_by: route.engine,
+    }));
+  res.json({ object: 'list', data });
+});
+
+// ── /v1/chat/completions ────────────────────────────────────────────────
+app.post('/v1/chat/completions', async (req, res) => {
+  const reqId = newRequestId();
+  const started = Date.now();
+  const body = req.body || {};
+  const aliasUsed = body.model;
+  const route = registry.resolve(aliasUsed);
+  const appId = appIdFrom(req);
+  let estPromptTokens = 0;
+  let estCompletionTokens = 0;
+  let usageSource = 'estimated';
+
+  const record = (status) => {
+    telemetry.record({
+      id: reqId,
+      appId,
+      aliasUsed: aliasUsed || '?',
+      routeId: route ? route.id : null,
+      label: route ? route.label : (aliasUsed || '?'),
+      engine: route ? route.engine : null,
+      status,
+      durationMs: Date.now() - started,
+      estPromptTokens,
+      estCompletionTokens,
+      usageSource,
+    });
+    console.log(`[req ${reqId}] ${status} model=${aliasUsed || '?'} app=${appId} ${Date.now() - started}ms`);
+  };
+
+  for (const [name, val] of [['logprobs', body.logprobs]]) {
+    if (val !== undefined && val !== null && val !== false) {
+      record(400);
+      return sendError(res, 400, `Parameter "${name}" is not supported by provider-bridge.`, 'unsupported_parameter', name);
+    }
+  }
+
+  if (!route) {
+    record(400);
+    return sendError(res, 400, `Model "${aliasUsed}" is not a known provider route.`, 'invalid_model', 'model');
+  }
+  if (route.enabled === false) {
+    record(400);
+    return sendError(res, 400, `Model route "${route.id}" is currently disabled.`, 'invalid_model', 'model');
+  }
+
+  const messages = body.messages;
+  if (!Array.isArray(messages) || messages.length === 0) {
+    record(400);
+    return sendError(res, 400, '`messages` must be a non-empty array.', 'invalid_request_error', 'messages');
+  }
+  const allowedRoles = ['system', 'user', 'assistant', 'tool', 'developer', 'function'];
+  for (const m of messages) {
+    if (!m || typeof m !== 'object') {
+      record(400);
+      return sendError(res, 400, 'Each message must be an object.', 'invalid_request_error', 'messages');
+    }
+    if (!allowedRoles.includes(m.role)) {
+      record(400);
+      return sendError(res, 400, `Message role "${m.role}" is not supported.`, 'invalid_request_error', 'messages');
+    }
+    if (Array.isArray(m.content)) {
+      for (const item of m.content) {
+        if (!item || typeof item !== 'object' || (!item.type && !item.text && !item.image_url)) {
+          record(400);
+          return sendError(res, 400, 'Invalid items in message content array.', 'invalid_request_error', 'messages');
+        }
+      }
+    } else if (typeof m.content !== 'string' && m.content !== null && m.content !== undefined) {
+      record(400);
+      return sendError(res, 400, 'Message content must be a string, array, or null.', 'invalid_request_error', 'messages');
+    }
+  }
+
+  if (inflight[route.engine] >= MAX_CONCURRENT_PER_ENGINE) {
+    record(429);
+    return sendError(
+      res,
+      429,
+      `Engine "${route.engine}" is busy (max concurrent ${MAX_CONCURRENT_PER_ENGINE}). Please retry shortly.`,
+      'engine_busy',
+      null,
+      5,
+    );
+  }
+
+  inflight[route.engine] += 1;
+  try {
+    const toolsList = body.tools || body.functions;
+    // Only ever interpret model output as tool calls when the caller actually
+    // sent tools — otherwise a reply that *discusses* a tool_calls payload
+    // would be hijacked into a real tool call.
+    const toolsProvided = Array.isArray(toolsList) && toolsList.length > 0;
+    const prompt = messagesToPrompt(messages, {
+      tools: toolsProvided ? toolsList : null,
+      responseFormat: body.response_format,
+    });
+    estPromptTokens = estimateTokens(prompt);
+
+    const adapter = adapters[route.engine];
+    const ac = new AbortController();
+    let activePacer = null;
+    let clientAborted = false;
+    res.on('close', () => {
+      if (!res.writableEnded) {
+        clientAborted = true;
+        if (activePacer) activePacer.stop();
+        ac.abort();
+      }
+    });
+
+    const applyUsage = (result) => {
+      if (result.usage && result.usage.source === 'real') {
+        estPromptTokens = result.usage.promptTokens;
+        estCompletionTokens = result.usage.completionTokens;
+        usageSource = 'real';
+      } else {
+        estCompletionTokens = estimateTokens(result.text);
+      }
+    };
+
+    if (body.stream === true) {
+      const completionId = 'chatcmpl-' + crypto.randomBytes(8).toString('hex');
+      const createdTs = Math.floor(Date.now() / 1000);
+      const chunkBase = { id: completionId, object: 'chat.completion.chunk', created: createdTs, model: aliasUsed };
+      res.status(200);
+      res.set({
+        'Content-Type': 'text/event-stream; charset=utf-8',
+        'Cache-Control': 'no-cache, no-transform',
+        'Connection': 'keep-alive',
+      });
+      res.write(`data: ${JSON.stringify({ ...chunkBase, choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }] })}\n\n`);
+
+      const pacer = createSmoothPacer((deltaText) => {
+        res.write(`data: ${JSON.stringify({ ...chunkBase, choices: [{ index: 0, delta: { content: deltaText }, finish_reason: null }] })}\n\n`);
+      }, { delayMs: 10 });
+      activePacer = pacer;
+
+      let result;
+      try {
+        result = await adapter.invoke({
+          prompt, model: route.model, signal: ac.signal, onDelta: (d) => pacer.push(d),
+        });
+        await pacer.drain();
+      } catch (err) {
+        const mapped = httpFor(err);
+        record(clientAborted || (err instanceof BridgeError && err.kind === 'aborted') ? 499 : mapped.status);
+        res.write(`data: ${JSON.stringify({ ...chunkBase, choices: [{ index: 0, delta: { content: `\n[Error: ${err.message}]` }, finish_reason: 'stop' }] })}\n\n`);
+        res.write('data: [DONE]\n\n');
+        return res.end();
+      }
+
+      applyUsage(result);
+      record(200);
+
+      const detectedTools = toolsProvided ? parseToolCallsFromText(result.text) : null;
+      if (detectedTools) {
+        res.write(`data: ${JSON.stringify({
+          ...chunkBase,
+          choices: [{
+            index: 0,
+            delta: { tool_calls: detectedTools.map((tc, i) => ({ index: i, ...tc })) },
+            finish_reason: 'tool_calls',
+          }],
+        })}\n\n`);
+      } else {
+        res.write(`data: ${JSON.stringify({ ...chunkBase, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}\n\n`);
+      }
+      res.write('data: [DONE]\n\n');
+      return res.end();
+    }
+
+    let result;
+    try {
+      result = await adapter.invoke({ prompt, model: route.model, signal: ac.signal });
+    } catch (err) {
+      const mapped = httpFor(err);
+      if (clientAborted || (err instanceof BridgeError && err.kind === 'aborted')) {
+        record(499);
+        return res.end();
+      }
+      record(mapped.status);
+      return sendError(res, mapped.status, err.message, mapped.type, mapped.param, mapped.retryAfterSec);
+    }
+
+    applyUsage(result);
+    const text = result.text;
+    const detectedTools = toolsProvided ? parseToolCallsFromText(text) : null;
+    const messageObj = detectedTools
+      ? { role: 'assistant', content: null, tool_calls: detectedTools }
+      : { role: 'assistant', content: text };
+
+    const completion = {
+      id: 'chatcmpl-' + crypto.randomBytes(8).toString('hex'),
+      object: 'chat.completion',
+      created: Math.floor(Date.now() / 1000),
+      model: aliasUsed,
+      choices: [
+        {
+          index: 0,
+          message: messageObj,
+          finish_reason: detectedTools ? 'tool_calls' : 'stop',
+        },
+      ],
+      usage: {
+        prompt_tokens: estPromptTokens,
+        completion_tokens: estCompletionTokens,
+        total_tokens: estPromptTokens + estCompletionTokens,
+      },
+    };
+    record(200);
+    return res.status(200).json(completion);
+  } finally {
+    inflight[route.engine] -= 1;
+  }
+});
+
+app.use((req, res) => {
+  sendError(res, 404, `Unknown route: ${req.method} ${req.path}`, 'invalid_request_error', null);
+});
+
+// eslint-disable-next-line no-unused-vars
+app.use((err, req, res, next) => {
+  if (err && (err.type === 'entity.parse.failed' || err.type === 'entity.too.large')) {
+    return sendError(res, 400, 'Malformed or oversized JSON body.', 'invalid_request_error', null);
+  }
+  console.error(err);
+  sendError(res, 500, 'Internal server error.', 'internal_error', null);
+});
+
+const server = app.listen(PORT, BIND_HOST, () => {
+  console.log(`Provider (consolidated) running on ${BIND_HOST}:${PORT}`);
+  console.log(`Auth: ${API_KEY ? 'ENABLED (Bearer token required)' : 'DISABLED (open)'}`);
+  console.log(`Engines: ${ENGINE_NAMES.map((e) => `${e} (in-process)`).join(', ')}`);
+  console.log(`Max concurrent per engine: ${MAX_CONCURRENT_PER_ENGINE}`);
+  console.log(`Routes: ${registry.list().map((r) => r.id).join(', ')}`);
+  if (!API_KEY && BIND_HOST !== '127.0.0.1' && BIND_HOST !== 'localhost') {
+    console.warn(`WARNING: provider bound to ${BIND_HOST} with no API key set — anyone who can reach this port can spend your Claude/Gemini quota. Set PROVIDER_API_KEY or bind to 127.0.0.1.`);
+  }
+});
+
+// A bridge dying must never orphan a quota-burning CLI run (audit H7).
+installGracefulShutdown({ server });
+
+module.exports = { app, server };

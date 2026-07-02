@@ -1,0 +1,59 @@
+{
+  "defaultRoute": "bridge-agy-gemini-3.5-flash-medium-pulse",
+  "routes": [
+    {
+      "id": "bridge-agy-gemini-3.5-flash-medium-pulse",
+      "label": "Bridge AGY Gemini 3.5 Flash Medium · Pulse",
+      "engine": "gemini",
+      "model": "Gemini 3.5 Flash (Medium)",
+      "bestFor": "Balanced everyday app calls",
+      "enabled": true,
+      "aliases": ["bridge-fast", "gemini-flash", "auto-fast", "gemini-cli-flash"]
+    },
+    {
+      "id": "bridge-agy-gemini-3.5-flash-high-forge",
+      "label": "Bridge AGY Gemini 3.5 Flash High · Forge",
+      "engine": "gemini",
+      "model": "Gemini 3.5 Flash (High)",
+      "bestFor": "Stronger fast reasoning",
+      "enabled": true,
+      "aliases": []
+    },
+    {
+      "id": "bridge-agy-gemini-3.1-pro-high-atlas",
+      "label": "Bridge AGY Gemini 3.1 Pro High · Atlas",
+      "engine": "gemini",
+      "model": "Gemini 3.1 Pro (High)",
+      "bestFor": "Long context and broad project scans",
+      "enabled": true,
+      "aliases": ["bridge-long", "gemini-pro", "auto-long-context", "gemini-cli-pro"]
+    },
+    {
+      "id": "bridge-claude-haiku-4.5-spark",
+      "label": "Bridge Claude Haiku 4.5 · Spark",
+      "engine": "claude",
+      "model": "claude-haiku-4-5",
+      "bestFor": "Quick Claude responses",
+      "enabled": true,
+      "aliases": ["claude-haiku", "claude-subscription-haiku"]
+    },
+    {
+      "id": "bridge-claude-sonnet-4.6-northstar",
+      "label": "Bridge Claude Sonnet 4.6 · Northstar",
+      "engine": "claude",
+      "model": "claude-sonnet-4-6",
+      "bestFor": "Coding, planning, careful reasoning",
+      "enabled": true,
+      "aliases": ["bridge-smart", "claude-sonnet", "auto-reasoning", "claude-subscription-default", "claude-subscription-sonnet"]
+    },
+    {
+      "id": "bridge-claude-opus-4.5-oracle",
+      "label": "Bridge Claude Opus 4.5 · Oracle",
+      "engine": "claude",
+      "model": "claude-opus-4-5",
+      "bestFor": "Hard reasoning when Claude limits allow",
+      "enabled": true,
+      "aliases": ["bridge-deep", "claude-opus", "claude-subscription-opus"]
+    }
+  ]
+}

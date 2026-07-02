@@ -1,0 +1,39 @@
+{
+  "vaults": [
+    {
+      "id": "primary",
+      "label": "Second Brain",
+      "root": "/Users/waqar/Projects/Planning/Waqars-Second-Brain"
+    }
+  ],
+  "projects": [
+    {
+      "slug": "ops-hub",
+      "label": "Icon Pro Ops Hub",
+      "repoPath": "/Users/waqar/Projects/experiments/ops-hub",
+      "vaultId": "primary",
+      "files": {
+        "inventory": {
+          "root": "vault",
+          "path": "Projects/IPS - Ops Hub/Feature Map.md"
+        },
+        "roadmap": {
+          "root": "vault",
+          "path": "Projects/IPS - Ops Hub/Roadmap.md"
+        },
+        "decisions": {
+          "root": "vault",
+          "path": "Projects/IPS - Ops Hub/Decisions.md"
+        },
+        "state": {
+          "root": "repo",
+          "path": "docs/STATE.md"
+        },
+        "journal": {
+          "root": "repo",
+          "path": "docs/JOURNAL.md"
+        }
+      }
+    }
+  ]
+}
