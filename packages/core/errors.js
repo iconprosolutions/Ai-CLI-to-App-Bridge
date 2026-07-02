@@ -10,6 +10,7 @@ const KINDS = [
   'spawn_failed', // binary missing, E2BIG, permissions
   'truncated', // output hit the byte cap (usually surfaced as success+flag)
   'bad_output', // CLI succeeded/failed with unusable output
+  'invalid_request', // caller error caught before spawning (e.g. oversized prompt)
   'aborted', // the caller walked away — never an engine fault
 ];
 
@@ -37,6 +38,8 @@ function httpFor(err) {
       return { status: 504, type: 'upstream_timeout', param: null, retryAfterSec: null };
     case 'model_not_found':
       return { status: 400, type: 'invalid_model', param: 'model', retryAfterSec: null };
+    case 'invalid_request':
+      return { status: 400, type: 'invalid_request_error', param: null, retryAfterSec: null };
     case 'aborted':
       return { status: 499, type: null, param: null, retryAfterSec: null };
     case 'spawn_failed':
