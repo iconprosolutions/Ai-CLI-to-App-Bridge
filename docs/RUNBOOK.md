@@ -1,125 +1,136 @@
-# AI CLI Bridge Runbook
+# AI CLI Bridge Runbook (v2 — consolidated provider)
 
-## Local Daily Use
+## Architecture in one paragraph
 
-From the repo root:
+One provider process on **:9011** serves the OpenAI-compatible `/v1` surface and
+the control-center dashboard. Engines run **in-process** as adapters — `claude`
+via `claude -p --output-format stream-json` (real streaming deltas + real token
+counts, prompt via stdin) and `gemini` via `agy --print`. There is no HTTP hop
+to engine bridges anymore; the legacy `claude-bridge`/`gemini-bridge` servers
+remain in-tree for the old `/api/*` surface and Docker, started only by
+explicit name. Routes live in `packages/provider/routes.json` (hot-reloaded),
+usage in `.bridge-runtime/usage/*.jsonl` (durable), credentials in
+`.bridge-runtime/credentials.json` (0600, auto-generated).
 
-```bash
-cd /Users/waqar/Projects/experiments/ai-cli-bridge
-npm run bridge:up
-```
-
-Then open:
-
-```text
-http://127.0.0.1:9011/dashboard
-```
-
-Use this provider API key in the dashboard prompt tester unless you override it:
-
-```text
-test-key
-```
-
-## Check Status
+## Local daily use
 
 ```bash
 cd /Users/waqar/Projects/experiments/ai-cli-bridge
-npm run bridge:status
+npm run bridge:up          # starts the consolidated provider only
+open http://127.0.0.1:9011/dashboard/
 ```
 
-## Stop Launcher-Owned Processes
+The launcher prints the API key on every `up`/`status`. It also lives in
+`.bridge-runtime/credentials.json`. Paste it once into the dashboard's
+**Connect** tab — the Tester and all admin buttons use it from localStorage.
 
 ```bash
-cd /Users/waqar/Projects/experiments/ai-cli-bridge
-npm run bridge:down
+npm run bridge:status      # health + pids
+npm run bridge:down        # stop launcher-owned processes
+npm run bridge:restart     # bounce the provider
+npm run bridge:probe       # routes + live engine status (quota-free)
+npm run bridge:connect     # write .bridge-runtime/connection.json (paste-ready)
+npm run bridge:logs        # tail logs (add --follow)
+node scripts/bridge.js up claude    # legacy engine bridge, explicit only
+node scripts/bridge.js down all     # stop everything incl. legacy
 ```
 
-`bridge:down` only stops processes started by `bridge:up`. If a bridge was started manually in a terminal tab, close that tab or press `Ctrl+C` in that tab.
+## Dashboard (control center)
 
-## App Integration
+`http://127.0.0.1:9011/dashboard/` — six tabs:
 
-Point OpenAI-compatible clients at:
+- **Overview** — is it safe to fire work right now? Engine cards show breaker
+  state, quota reason, slots/queue, 24 h uptime; actions: probe, reset breaker,
+  kill a stuck run, disable engine. Alert banner when a circuit is open.
+- **Routes** — toggle/add/delete routes; edits persist to `routes.json` and
+  hot-apply. "Probe" lists each engine's live catalogue for free (no
+  completions — claude is static, gemini uses `agy models`).
+- **Usage** — durable per-app/per-route/per-day token accounting from the
+  JSONL ledger, with **real** token counts on Claude routes (stream-json) and
+  `~est` labels elsewhere. "API-equivalent value" prices your flat-rate usage
+  at API list prices from the editable `packages/provider/pricing.json`.
+- **Tester** — SSE or blocking, tools JSON, `json_object`/`json_schema`
+  modes, side-by-side A/B route compare, copy-as-cURL.
+- **Requests** — opt-in capture of the last 50 full exchanges (memory only,
+  cleared on restart/toggle-off) with per-request stage timelines. Default
+  stays metadata-only.
+- **Connect** — base URL, key field, Hermes/curl/JS/Python snippets.
+
+Live updates arrive over `GET /dashboard/events` (SSE) with polling fallback.
+
+## App integration
 
 ```text
-http://127.0.0.1:9011/v1/chat/completions
+Base URL:  http://127.0.0.1:9011/v1
+API key:   <from .bridge-runtime/credentials.json>
+Header:    X-App-Id: <your-app>     # enables per-app usage attribution
 ```
 
-Send:
+Routes (aliases like `bridge-fast`/`bridge-smart` still work):
 
-```text
-Authorization: Bearer test-key
-```
+- `bridge-agy-gemini-3.5-flash-medium-pulse` — balanced default (Gemini)
+- `bridge-agy-gemini-3.5-flash-high-forge` — stronger fast reasoning
+- `bridge-agy-gemini-3.1-pro-high-atlas` — long context
+- `bridge-claude-haiku-4.5-spark` — quick Claude
+- `bridge-claude-sonnet-4.6-northstar` — coding/planning Claude
+- `bridge-claude-opus-4.5-oracle` — hard reasoning when limits allow
 
-Recommended model routes:
+Behavior contracts (v2):
 
-- `bridge-agy-gemini-3.5-flash-medium-pulse` for balanced everyday app calls.
-- `bridge-agy-gemini-3.5-flash-high-forge` for stronger fast reasoning through Antigravity.
-- `bridge-agy-gemini-3.1-pro-high-atlas` for long documents and broad project scans.
-- `bridge-claude-haiku-4.5-spark` for quick Claude responses.
-- `bridge-claude-sonnet-4.6-northstar` for planning, coding, and careful reasoning through Claude Sonnet.
-- `bridge-claude-opus-4.5-oracle` for hard reasoning through Claude Opus when usage limits allow.
+- **Quota exhaustion → 429** with `Retry-After` and type `rate_limit_error`
+  (OpenAI SDKs back off correctly). After 2 consecutive quota failures the
+  engine's circuit opens and requests fail fast — no CLI spawns — until the
+  cool-down (15 min) half-opens it. Reset early from the dashboard.
+- Bursts queue briefly (depth 4, 30 s) instead of instantly 429ing. Tune with
+  `PROVIDER_QUEUE_DEPTH` / `PROVIDER_QUEUE_TIMEOUT_MS`.
+- Tool calls: pass `tools`; streamed tool calls arrive as proper indexed
+  `tool_calls` deltas (raw JSON never leaks as content). Tool-shaped replies
+  are ignored unless the request actually sent tools.
+- `response_format` `json_object`/`json_schema` is enforced server-side with
+  one corrective retry; hard failures return 502.
+- Images are rejected with 400 (not silently degraded); `n>1` rejected;
+  ignored sampling params are listed in `bridge_ignored_params`.
+- Client aborts kill the underlying CLI process immediately; provider
+  shutdown (SIGTERM) reaps all CLI children.
 
-Older short names such as `bridge-fast`, `bridge-smart`, `gemini-pro`, and `claude-opus` still work as hidden compatibility aliases, but new apps should use the explicit names above.
+## Hermes
 
-OpenAI SDK-style clients should use:
-
-```text
-Base URL: http://127.0.0.1:9011/v1
-API Key: test-key
-Model: bridge-agy-gemini-3.5-flash-medium-pulse
-```
-
-Raw HTTP clients should call:
-
-```text
-POST http://127.0.0.1:9011/v1/chat/completions
-Authorization: Bearer test-key
-```
-
-## Hermes Integration
-
-Hermes has a custom provider entry named:
-
-```text
-ai-cli-bridge
-```
-
-The provider points at:
-
-```text
-http://127.0.0.1:9011/v1
-```
-
-The API key lives in `~/.hermes/.env`:
-
-```text
-AI_CLI_BRIDGE_API_KEY=test-key
-```
-
-Restart Hermes after changing the config or `.env`. Then use the provider from Hermes with:
+Provider `ai-cli-bridge` → `http://127.0.0.1:9011/v1`, key in
+`~/.hermes/.env` as `AI_CLI_BRIDGE_API_KEY`. Text + tool-JSON calls work;
+keep tool-heavy agentic sessions on a native provider and the Claude MCP
+delegate for handing Hermes work to Claude Code.
 
 ```bash
-hermes -z "Reply with exactly: hermes-bridge-fast-ok" --provider ai-cli-bridge -m bridge-agy-gemini-3.5-flash-medium-pulse -t ""
+hermes -z "Reply with exactly: ok" --provider ai-cli-bridge -m bridge-agy-gemini-3.5-flash-medium-pulse -t ""
 ```
 
-Claude through the provider:
+## Troubleshooting
+
+- **Claude route says usage limit** — the circuit will open after the second
+  consecutive hit; Overview shows the retry countdown. Use a Gemini route
+  meanwhile; reset the breaker after the window if impatient.
+- **429 engine_busy** — the per-engine slot (default 1) plus queue is full;
+  it's protecting your subscription. Retry after `Retry-After`.
+- **Engine shows DOWN** — the CLI binary isn't on PATH for the launcher's
+  environment. Set `CLAUDE_PATH`/`GEMINI_PATH` and `bridge:restart`.
+- **Something looks wrong in a specific request** — flip capture ON in the
+  Requests tab, reproduce, inspect the exact prompt/output/stage timings,
+  flip it off (buffer clears).
+- **Ledger** — `.bridge-runtime/usage/YYYY-MM.jsonl`; delete files to reset
+  history (bodies are never stored there).
+
+## Docker (legacy profile)
+
+`docker-compose.yml` still runs the **three-process v1 stack** (engine
+bridges + old HTTP-proxy provider in `provider-bridge/`) because the
+consolidated provider needs the CLI binaries inside its container — not yet
+built. Bare-metal is the primary path; compose is kept working for the old
+`/api/*` consumers. Containers bind 0.0.0.0 explicitly; bare metal defaults
+to loopback.
+
+## Tests
 
 ```bash
-hermes -z "Reply with exactly: hermes-bridge-smart-ok" --provider ai-cli-bridge -m bridge-claude-sonnet-4.6-northstar -t ""
+npm test        # 5 suites, ~330 assertions, fake CLIs only (no quota spend)
+npm run check   # node --check over every entrypoint
 ```
-
-In the desktop UI, this appears as a configured provider/model route, not as an OAuth account. Look for `AI CLI Bridge` or `ai-cli-bridge` in the model/provider picker after restart.
-
-Use the routes this way:
-
-- `bridge-agy-gemini-3.5-flash-medium-pulse`: default everyday Hermes side-call through Gemini/Antigravity.
-- `bridge-claude-sonnet-4.6-northstar`: Claude Sonnet through the local provider.
-- `bridge-agy-gemini-3.1-pro-high-atlas`: Gemini Pro for long context.
-- `bridge-claude-opus-4.5-oracle`: Claude Opus when limits allow.
-
-Important boundary: provider mode is text-only compatibility for Hermes today. It accepts Hermes tool metadata so simple model calls work, but it does not yet translate real Hermes tool calls. Keep Hermes' main model on a normal provider for tool-heavy sessions, and keep using the Claude MCP delegate when Hermes should hand agentic coding work to Claude.
-
-If `bridge-claude-sonnet-4.6-northstar` or another Claude route says Claude has hit a session limit, the bridge is still working; Claude Code is refusing the underlying subscription request. Use `bridge-agy-gemini-3.5-flash-medium-pulse` or `bridge-agy-gemini-3.1-pro-high-atlas` until Claude resets, then retry the Claude route.
-
-The dashboard's telemetry is local request metadata only: counts, status, route, engine, latency, and estimated token usage. Token counts are a local heuristic (~4 chars/token on prompt + completion length), not a real tokenizer or billing data. Calls are attributed to an app via the optional `X-App-Id` request header (defaults to `default`). The dashboard never stores prompts or response text, and all telemetry is in-memory and resets when the provider process restarts.
