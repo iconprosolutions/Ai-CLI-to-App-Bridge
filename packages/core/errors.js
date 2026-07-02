@@ -1,0 +1,50 @@
+'use strict';
+
+// Typed failure taxonomy for everything that can go wrong between an HTTP
+// request and a CLI subprocess. Adapters classify raw CLI failures into one
+// of these kinds; the provider edge maps kinds to HTTP statuses exactly once.
+const KINDS = [
+  'quota', // subscription/rate capacity exhausted — retryable later
+  'model_not_found', // model absent from this account/CLI install
+  'timeout', // CLI exceeded its wall-clock budget
+  'spawn_failed', // binary missing, E2BIG, permissions
+  'truncated', // output hit the byte cap (usually surfaced as success+flag)
+  'bad_output', // CLI succeeded/failed with unusable output
+  'aborted', // the caller walked away — never an engine fault
+];
+
+class BridgeError extends Error {
+  constructor(kind, message, opts = {}) {
+    if (!KINDS.includes(kind)) {
+      throw new TypeError(`Unknown BridgeError kind: ${kind}`);
+    }
+    super(message);
+    this.name = 'BridgeError';
+    this.kind = kind;
+    if (opts.detail !== undefined) this.detail = opts.detail;
+    if (opts.retryAfterSec !== undefined) this.retryAfterSec = opts.retryAfterSec;
+  }
+}
+
+// HTTP mapping used at the provider edge. `type`/`param` follow the OpenAI
+// error envelope; `retryAfterSec` becomes a Retry-After header when set.
+function httpFor(err) {
+  const kind = err instanceof BridgeError ? err.kind : null;
+  switch (kind) {
+    case 'quota':
+      return { status: 429, type: 'rate_limit_error', param: null, retryAfterSec: err.retryAfterSec || 60 };
+    case 'timeout':
+      return { status: 504, type: 'upstream_timeout', param: null, retryAfterSec: null };
+    case 'model_not_found':
+      return { status: 400, type: 'invalid_model', param: 'model', retryAfterSec: null };
+    case 'aborted':
+      return { status: 499, type: null, param: null, retryAfterSec: null };
+    case 'spawn_failed':
+    case 'truncated':
+    case 'bad_output':
+    default:
+      return { status: 502, type: 'upstream_error', param: null, retryAfterSec: null };
+  }
+}
+
+module.exports = { BridgeError, KINDS, httpFor };
