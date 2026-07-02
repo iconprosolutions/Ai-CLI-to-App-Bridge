@@ -7,10 +7,12 @@ const cors = require('cors');
 
 const {
   httpFor, BridgeError, createSmoothPacer, installGracefulShutdown, intEnv, strEnv,
+  extractJson, assertJsonSchema,
 } = require('@bridge/core');
 const { createClaudeAdapter, createAgyAdapter } = require('@bridge/adapters');
 const { createRouteRegistry } = require('./routes');
 const { createTelemetry } = require('./telemetry');
+const { createUsageLedger } = require('./usage');
 const { dashboardHtml } = require('./dashboard');
 const {
   estimateTokens, parseToolCallsFromText, messagesToPrompt, openaiErrorBody,
@@ -44,6 +46,11 @@ const ENGINE_NAMES = Object.keys(adapters);
 
 const registry = createRouteRegistry(path.join(__dirname, 'routes.json'));
 const telemetry = createTelemetry({ engines: ENGINE_NAMES });
+const ledger = createUsageLedger({
+  dir: process.env.BRIDGE_USAGE_DIR || path.resolve(__dirname, '../../.bridge-runtime/usage'),
+  pricingFile: path.join(__dirname, 'pricing.json'),
+});
+const SSE_HEARTBEAT_MS = intEnv('SSE_HEARTBEAT_MS', 15000);
 const inflight = {};
 for (const e of ENGINE_NAMES) inflight[e] = 0;
 
@@ -123,6 +130,12 @@ app.get('/health', (req, res) => {
   });
 });
 
+// Durable usage rollups (JSONL ledger; survives restarts).
+app.get('/dashboard/usage', async (req, res) => {
+  const range = ['today', '7d', '30d', 'all'].includes(String(req.query.range)) ? String(req.query.range) : '7d';
+  res.json(await ledger.aggregate(range));
+});
+
 // ── /v1/models ──────────────────────────────────────────────────────────
 app.get('/v1/models', (req, res) => {
   const created = Math.floor(Date.now() / 1000);
@@ -163,6 +176,20 @@ app.post('/v1/chat/completions', async (req, res) => {
       estCompletionTokens,
       usageSource,
     });
+    if (route) {
+      ledger.append({
+        reqId,
+        appId,
+        routeId: route.id,
+        engine: route.engine,
+        model: route.model,
+        promptTokens: estPromptTokens,
+        completionTokens: estCompletionTokens,
+        usageSource,
+        durationMs: Date.now() - started,
+        status,
+      });
+    }
     console.log(`[req ${reqId}] ${status} model=${aliasUsed || '?'} app=${appId} ${Date.now() - started}ms`);
   };
 
@@ -172,6 +199,13 @@ app.post('/v1/chat/completions', async (req, res) => {
       return sendError(res, 400, `Parameter "${name}" is not supported by provider-bridge.`, 'unsupported_parameter', name);
     }
   }
+  if (body.n !== undefined && body.n !== null && body.n !== 1) {
+    record(400);
+    return sendError(res, 400, 'Parameter "n" must be 1 — multiple choices are not supported.', 'unsupported_parameter', 'n');
+  }
+  // Accepted-but-ignored sampling params are reported honestly, not dropped.
+  const ignoredParams = ['temperature', 'top_p', 'max_tokens', 'stop', 'presence_penalty', 'frequency_penalty']
+    .filter((p) => body[p] !== undefined && body[p] !== null);
 
   if (!route) {
     record(400);
@@ -202,6 +236,11 @@ app.post('/v1/chat/completions', async (req, res) => {
         if (!item || typeof item !== 'object' || (!item.type && !item.text && !item.image_url)) {
           record(400);
           return sendError(res, 400, 'Invalid items in message content array.', 'invalid_request_error', 'messages');
+        }
+        // Honest unsupported: images used to silently degrade to "[Image: url]".
+        if (item.type === 'image_url' || item.image_url) {
+          record(400);
+          return sendError(res, 400, 'Image content is not supported by this bridge yet. Send text-only messages.', 'invalid_request_error', 'messages');
         }
       }
     } else if (typeof m.content !== 'string' && m.content !== null && m.content !== undefined) {
@@ -247,6 +286,29 @@ app.post('/v1/chat/completions', async (req, res) => {
       }
     });
 
+    const rf = body.response_format;
+    const rfType = rf && typeof rf === 'object' ? (rf.type || (rf.json_schema ? 'json_schema' : null)) : null;
+    const wantsJson = rfType === 'json_object' || rfType === 'json_schema';
+    const rfSchema = wantsJson && rf.json_schema && rf.json_schema.schema ? rf.json_schema.schema : null;
+
+    // response_format enforcement: extract → (optionally) schema-validate →
+    // one corrective retry → bad_output. Returns canonical JSON text.
+    const enforceJson = async (text) => {
+      const attempt = (t) => {
+        const parsed = extractJson(t);
+        if (rfSchema) assertJsonSchema(parsed, rfSchema);
+        return parsed;
+      };
+      try {
+        return JSON.stringify(attempt(text));
+      } catch (err1) {
+        const retryPrompt = `${prompt}\n\n[ASSISTANT]\n${text}\n\n[SYSTEM]\nThe reply above is not acceptable: ${err1.message}. Respond again with ONLY the corrected JSON — no code fences, no commentary.`;
+        const retry = await adapter.invoke({ prompt: retryPrompt, model: route.model, signal: ac.signal });
+        applyUsage(retry); // usage reflects the attempt whose output we return
+        return JSON.stringify(attempt(retry.text)); // still bad → bad_output up the chain
+      }
+    };
+
     const applyUsage = (result) => {
       if (result.usage && result.usage.source === 'real') {
         estPromptTokens = result.usage.promptTokens;
@@ -267,31 +329,69 @@ app.post('/v1/chat/completions', async (req, res) => {
         'Cache-Control': 'no-cache, no-transform',
         'Connection': 'keep-alive',
       });
+      res.flushHeaders();
       res.write(`data: ${JSON.stringify({ ...chunkBase, choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }] })}\n\n`);
 
+      // CLIs can be silent for minutes before the first byte; comments keep
+      // proxies and client idle-timeouts from dropping the stream.
+      const heartbeat = setInterval(() => {
+        if (!res.writableEnded) res.write(': ping\n\n');
+      }, SSE_HEARTBEAT_MS);
+      heartbeat.unref();
+      const endStream = () => {
+        clearInterval(heartbeat);
+        res.write('data: [DONE]\n\n');
+        return res.end();
+      };
+
       const pacer = createSmoothPacer((deltaText) => {
-        res.write(`data: ${JSON.stringify({ ...chunkBase, choices: [{ index: 0, delta: { content: deltaText }, finish_reason: null }] })}\n\n`);
+        const ok = res.write(`data: ${JSON.stringify({ ...chunkBase, choices: [{ index: 0, delta: { content: deltaText }, finish_reason: null }] })}\n\n`);
+        // Backpressure: pause pacing until the socket drains.
+        if (!ok && !res.writableEnded) return new Promise((r) => res.once('drain', r));
+        return undefined;
       }, { delayMs: 10 });
       activePacer = pacer;
+
+      // Tool-call hold-back: when the caller sent tools, buffer deltas while
+      // the head of the reply still looks like a candidate JSON block, so raw
+      // tool JSON is never streamed as visible content. Non-JSON-looking
+      // output (or anything past the cap) flushes through immediately.
+      const HOLD_CAP = 2048;
+      let holding = toolsProvided;
+      let held = '';
+      const feed = (d) => {
+        if (!holding) { pacer.push(d); return; }
+        held += d;
+        const head = held.trimStart();
+        if (!head) return;
+        if (!(head.startsWith('```') || head.startsWith('{')) || held.length > HOLD_CAP) {
+          holding = false;
+          pacer.push(held);
+          held = '';
+        }
+      };
 
       let result;
       try {
         result = await adapter.invoke({
-          prompt, model: route.model, signal: ac.signal, onDelta: (d) => pacer.push(d),
+          prompt, model: route.model, signal: ac.signal, onDelta: feed,
         });
-        await pacer.drain();
       } catch (err) {
         const mapped = httpFor(err);
         record(clientAborted || (err instanceof BridgeError && err.kind === 'aborted') ? 499 : mapped.status);
         res.write(`data: ${JSON.stringify({ ...chunkBase, choices: [{ index: 0, delta: { content: `\n[Error: ${err.message}]` }, finish_reason: 'stop' }] })}\n\n`);
-        res.write('data: [DONE]\n\n');
-        return res.end();
+        return endStream();
       }
 
+      const detectedTools = toolsProvided ? parseToolCallsFromText(result.text) : null;
+      if (holding && held && !detectedTools) {
+        pacer.push(held); // looked like JSON but wasn't a tool call — deliver it
+        held = '';
+      }
+      await pacer.drain();
       applyUsage(result);
       record(200);
 
-      const detectedTools = toolsProvided ? parseToolCallsFromText(result.text) : null;
       if (detectedTools) {
         res.write(`data: ${JSON.stringify({
           ...chunkBase,
@@ -304,8 +404,18 @@ app.post('/v1/chat/completions', async (req, res) => {
       } else {
         res.write(`data: ${JSON.stringify({ ...chunkBase, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}\n\n`);
       }
-      res.write('data: [DONE]\n\n');
-      return res.end();
+      if (body.stream_options && body.stream_options.include_usage) {
+        res.write(`data: ${JSON.stringify({
+          ...chunkBase,
+          choices: [],
+          usage: {
+            prompt_tokens: estPromptTokens,
+            completion_tokens: estCompletionTokens,
+            total_tokens: estPromptTokens + estCompletionTokens,
+          },
+        })}\n\n`);
+      }
+      return endStream();
     }
 
     let result;
@@ -322,8 +432,17 @@ app.post('/v1/chat/completions', async (req, res) => {
     }
 
     applyUsage(result);
-    const text = result.text;
+    let text = result.text;
     const detectedTools = toolsProvided ? parseToolCallsFromText(text) : null;
+    if (wantsJson && !detectedTools) {
+      try {
+        text = await enforceJson(text);
+      } catch (err) {
+        const mapped = httpFor(err);
+        record(mapped.status);
+        return sendError(res, mapped.status, `response_format could not be satisfied: ${err.message}`, mapped.type, mapped.param, mapped.retryAfterSec);
+      }
+    }
     const messageObj = detectedTools
       ? { role: 'assistant', content: null, tool_calls: detectedTools }
       : { role: 'assistant', content: text };
@@ -346,6 +465,7 @@ app.post('/v1/chat/completions', async (req, res) => {
         total_tokens: estPromptTokens + estCompletionTokens,
       },
     };
+    if (ignoredParams.length) completion.bridge_ignored_params = ignoredParams;
     record(200);
     return res.status(200).json(completion);
   } finally {

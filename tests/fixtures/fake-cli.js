@@ -97,7 +97,16 @@ async function main() {
       process.exit(1);
     }
     const prompt = await readStdin();
-    const text = bakedText() || `[claude] replied to "${prompt.trim().slice(0, 24)}"`;
+    let text = bakedText() || `[claude] replied to "${prompt.trim().slice(0, 24)}"`;
+    // Stateful failure injection: first invocation replies garbage, later
+    // ones reply the baked text — exercises the response_format repair retry.
+    if (process.env.FAKE_CLI_GARBAGE_FIRST && process.env.FAKE_CLI_STATE_FILE) {
+      const fsx = require('fs');
+      if (!fsx.existsSync(process.env.FAKE_CLI_STATE_FILE)) {
+        fsx.writeFileSync(process.env.FAKE_CLI_STATE_FILE, '1');
+        text = 'Sure thing! Happy to help, but there is no JSON here at all.';
+      }
+    }
     if (process.env.FAKE_CLI_DELAY) await delay(Number(process.env.FAKE_CLI_DELAY));
     const mid = Math.ceil(text.length / 2);
     const ev = (t) => `${JSON.stringify({ type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: t } } })}\n`;
