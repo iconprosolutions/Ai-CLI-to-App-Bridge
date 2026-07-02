@@ -34,6 +34,10 @@ async function testErrors() {
   assert(httpFor(new BridgeError('model_not_found', 'x')).param === 'model', 'model_not_found sets param');
   assert(httpFor(new BridgeError('aborted', 'x')).status === 499, 'aborted maps to 499');
   assert(httpFor(new Error('plain')).status === 502, 'plain Error maps to 502 upstream_error');
+  const authErr = new BridgeError('auth', 'account logged out');
+  assert(authErr.kind === 'auth', 'auth is a valid BridgeError kind');
+  const am = httpFor(authErr);
+  assert(am.status === 503 && am.type === 'engine_auth_error', 'auth maps to 503 engine_auth_error');
 }
 
 async function testAnsi() {
