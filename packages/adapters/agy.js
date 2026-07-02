@@ -29,6 +29,9 @@ const MODEL_ALIASES = {
 
 function classifyError(stderr, stdout) {
   const text = [stderr, stdout].map((p) => String(p || '').trim()).filter(Boolean).join('\n');
+  if (/authentication failed|please sign in|not signed in|sign in to continue/i.test(text)) {
+    return new BridgeError('auth', 'Antigravity is not signed in for this account. Complete the account login, then retry.', { detail: text.slice(0, 300) });
+  }
   if (text.includes('You have exhausted your capacity on this model')) {
     return new BridgeError('quota', 'Antigravity capacity for this model is exhausted. Retry later or use a Flash mode.', { detail: text.slice(0, 300) });
   }
@@ -58,7 +61,7 @@ function createAgyAdapter(opts = {}) {
     name: 'gemini',
     capabilities: { streaming: true, nativeUsage: false, sessions: false },
 
-    async invoke({ prompt, model, signal, onDelta } = {}) {
+    async invoke({ prompt, model, signal, onDelta, env } = {}) {
       const selected = normalizeModel(model);
       const promptBytes = Buffer.byteLength(prompt || '', 'utf8');
       if (promptBytes > maxPromptBytes) {
@@ -72,6 +75,9 @@ function createAgyAdapter(opts = {}) {
         timeoutMs,
         maxBytes,
         classifyError,
+        // runCli replaces the child env wholesale — spread process.env so an
+        // account override (HOME) adds to, not erases, the base.
+        env: env ? { ...process.env, ...env } : undefined,
         onDelta: typeof onDelta === 'function'
           ? (chunk) => {
             const cleaned = ansi.write(chunk);
@@ -83,8 +89,16 @@ function createAgyAdapter(opts = {}) {
         const tail = ansi.end();
         if (tail) onDelta(tail);
       }
+      // agy prints auth failures to stdout with EXIT 0 (verified live
+      // 2026-07-02: "Error: authentication failed or timed out"), so the
+      // classifier above never fires on them — catch it here rather than
+      // returning the error line as the model's "answer". Length guard: a
+      // long real reply that merely mentions signing in must pass through.
+      const finalText = collapseCarriageReturns(stripAnsi(run.text)).trim();
+      const authErr = classifyError('', finalText);
+      if (authErr && authErr.kind === 'auth' && finalText.length < 200) throw authErr;
       return {
-        text: collapseCarriageReturns(stripAnsi(run.text)).trim(),
+        text: finalText,
         usage: null, // agy reports no token counts — caller estimates
         stopReason: 'end_turn',
       };

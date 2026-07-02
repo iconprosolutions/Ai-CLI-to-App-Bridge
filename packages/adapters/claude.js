@@ -58,7 +58,7 @@ function createClaudeAdapter(opts = {}) {
     return MODEL_ALIASES[model] || model;
   };
 
-  async function invokeStreamJson({ prompt, model, signal, onDelta }) {
+  async function invokeStreamJson({ prompt, model, signal, onDelta, env }) {
     // --verbose is mandatory with -p + stream-json (verified live 2026-07-02).
     const args = ['-p', '--output-format', 'stream-json', '--include-partial-messages', '--verbose', ...lockdownArgs];
     if (model) args.push('--model', model);
@@ -89,6 +89,9 @@ function createClaudeAdapter(opts = {}) {
       timeoutMs,
       maxBytes,
       classifyError,
+      // runCli replaces the child env wholesale — spread process.env so an
+      // account override (CLAUDE_CONFIG_DIR) adds to, not erases, the base.
+      env: env ? { ...process.env, ...env } : undefined,
       onDelta: (chunk) => {
         buffer += chunk;
         const lines = buffer.split('\n');
@@ -103,7 +106,9 @@ function createClaudeAdapter(opts = {}) {
     }
     if (resultLine.is_error) {
       const msg = String(resultLine.result || resultLine.subtype || 'Claude request failed');
-      const kind = /usage limit|limit reached|rate limit/i.test(msg) ? 'quota' : 'bad_output';
+      let kind = 'bad_output';
+      if (/usage limit|limit reached|rate limit/i.test(msg)) kind = 'quota';
+      else if (/not logged in|please run \/login|authentication_failed|oauth token (?:expired|revoked)|invalid api key/i.test(msg)) kind = 'auth';
       throw new BridgeError(kind, msg);
     }
     const u = resultLine.usage || {};
@@ -119,10 +124,13 @@ function createClaudeAdapter(opts = {}) {
     };
   }
 
-  async function invokeText({ prompt, model, signal, onDelta }) {
+  async function invokeText({ prompt, model, signal, onDelta, env }) {
     const args = ['-p', ...lockdownArgs];
     if (model) args.push('--model', model);
-    const run = await runCli(bin, args, { stdin: prompt, signal, timeoutMs, maxBytes, onDelta, classifyError });
+    const run = await runCli(bin, args, {
+      stdin: prompt, signal, timeoutMs, maxBytes, onDelta, classifyError,
+      env: env ? { ...process.env, ...env } : undefined,
+    });
     return { text: run.text.trim(), usage: null, stopReason: 'end_turn' };
   }
 
@@ -130,11 +138,11 @@ function createClaudeAdapter(opts = {}) {
     name: 'claude',
     capabilities: { streaming: true, nativeUsage: true, sessions: false },
 
-    async invoke({ prompt, model, signal, onDelta } = {}) {
+    async invoke({ prompt, model, signal, onDelta, env } = {}) {
       const selected = normalizeModel(model);
       if (!streamJsonBroken) {
         try {
-          return await invokeStreamJson({ prompt, model: selected, signal, onDelta });
+          return await invokeStreamJson({ prompt, model: selected, signal, onDelta, env });
         } catch (err) {
           const msg = String(err.message || '');
           if (err.kind === 'bad_output' && /unknown option|output-format|stream-json|--verbose|--include-partial-messages/i.test(msg)) {
@@ -145,7 +153,7 @@ function createClaudeAdapter(opts = {}) {
           }
         }
       }
-      return invokeText({ prompt, model: selected, signal, onDelta });
+      return invokeText({ prompt, model: selected, signal, onDelta, env });
     },
 
     async listModels() {
