@@ -256,8 +256,10 @@ function runClaude(prompt, model, onChunk, opts = {}) {
   return new Promise((resolve, reject) => {
     const selectedModel = normalizeModel(model);
 
-    // -p: print mode (non-interactive); --model: select specific model
-    const args = ['-p', prompt];
+    // -p: print mode reading the prompt from STDIN (never argv: argv is capped
+    // by ARG_MAX ≈1MB, so long conversations would fail E2BIG, and argv is
+    // visible to every local user via `ps`).
+    const args = ['-p'];
     if (selectedModel) {
       args.push('--model', selectedModel);
     }
@@ -265,8 +267,10 @@ function runClaude(prompt, model, onChunk, opts = {}) {
     const child = spawn(CLAUDE_PATH, args, {
       cwd: __dirname,
       env: { ...process.env, HOME: process.env.HOME },
-      stdio: ['ignore', 'pipe', 'pipe'], // ignore stdin so CLI doesn't wait for it
+      stdio: ['pipe', 'pipe', 'pipe'],
     });
+    child.stdin.on('error', () => {}); // CLI may exit before reading; EPIPE is fine
+    child.stdin.end(prompt);
 
     if (opts && typeof opts.onSpawn === 'function') {
       opts.onSpawn(child);

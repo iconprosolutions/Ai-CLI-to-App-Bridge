@@ -76,6 +76,8 @@ function writeFakeCli(name, bodyLine) {
 const SLEEP_CLI = writeFakeCli('sleep-cli.sh', 'exec sleep 30');
 const BIG_CLI = writeFakeCli('big-cli.sh', 'yes 0123456789ABCDEF | head -c 500000');
 const STDOUT_ERROR_CLI = writeFakeCli('stdout-error-cli.sh', 'echo "session limit resets soon"; exit 1');
+// Echoes stdin back — proves the prompt arrives via stdin, not argv.
+const STDIN_ECHO_CLI = writeFakeCli('stdin-echo-cli.sh', 'cat -');
 
 // Load a bridge module into a unique PORT/contexts dir. We re-require a fresh
 // copy by clearing the cache and monkeypatching env. The module captures its
@@ -216,6 +218,21 @@ async function main() {
   for (const b of BRIDGES) {
     await testBridge(b);
   }
+
+  console.log('\n## claude-bridge — prompt delivered via stdin');
+  const claudeBridge = BRIDGES[0];
+  await bootBridge(claudeBridge.server, 19150, { BRIDGE_API_KEY: '', CLAUDE_PATH: STDIN_ECHO_CLI });
+  let sr = await request(19150, { path: '/api/chat', method: 'POST', body: { prompt: 'stdin-marker-123' } });
+  let sp = {};
+  try { sp = JSON.parse(sr.body || '{}'); } catch (_) {}
+  assert(sr.status === 200 && typeof sp.text === 'string' && sp.text.includes('stdin-marker-123'),
+    '[claude] prompt reaches the CLI via stdin');
+  // A 2MB prompt exceeds ARG_MAX as argv but must work via stdin.
+  const bigPrompt = 'x'.repeat(2 * 1024 * 1024);
+  sr = await request(19150, { path: '/api/chat', method: 'POST', body: { prompt: bigPrompt } });
+  try { sp = JSON.parse(sr.body || '{}'); } catch (_) { sp = {}; }
+  assert(sr.status === 200 && sp.success === true && (sp.text || '').length >= 2 * 1024 * 1024,
+    `[claude] 2MB prompt survives (argv would E2BIG) — got status ${sr.status}, len ${(sp.text || '').length}`);
 
   console.log(`\n# Result: ${passed} passed, ${failed} failed`);
   process.exit(failed === 0 ? 0 : 1);
