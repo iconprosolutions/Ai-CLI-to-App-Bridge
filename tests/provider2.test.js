@@ -666,6 +666,107 @@ async function main() {
   assert(eventsSeen.includes('request.start') && eventsSeen.includes('request.end'),
     `event bus emits request lifecycle (saw: ${eventsSeen.join(',')})`);
 
+  // ── Multi-account: rotation + env redirection + status ────────────────
+  console.log('\n## accounts — rotation, env redirect, failover, needs-login, pinning');
+  const P15 = 19540;
+  const ENVLOG15 = path.join(TMP, 'env15.log');
+  const ACCTS15 = path.join(TMP, 'accounts15.json');
+  fs.writeFileSync(ACCTS15, JSON.stringify({
+    claude: [{ name: 'w1', dir: 'acct/claude/w1' }, { name: 'w2', dir: 'acct/claude/w2' }],
+    gemini: [{ name: 'g1', dir: 'acct/gemini/g1' }],
+  }));
+  const CLAUDE_ACCT = writeStub('claude-acct.sh', 'claude-sim', { FAKE_CLI_ENV_LOG: ENVLOG15 });
+  const AGY_ACCT = writeStub('agy-acct.sh', 'agy-sim', { FAKE_CLI_ENV_LOG: ENVLOG15 });
+  await bootProvider(P15, { CLAUDE_PATH: CLAUDE_ACCT, GEMINI_PATH: AGY_ACCT, BRIDGE_ACCOUNTS_FILE: ACCTS15 });
+  const call15 = (model) => request(P15, {
+    path: '/v1/chat/completions', method: 'POST',
+    body: { model, messages: [{ role: 'user', content: 'hi' }] },
+  });
+  await call15('bridge-claude-haiku-4.5-spark');
+  await call15('bridge-claude-haiku-4.5-spark');
+  await call15('bridge-agy-gemini-3.5-flash-medium-pulse');
+  const envLines15 = fs.readFileSync(ENVLOG15, 'utf8').trim().split('\n').map(JSON.parse);
+  const claudeDirs = new Set(envLines15.filter((l) => l.argv.includes('-p')).map((l) => l.CLAUDE_CONFIG_DIR).filter(Boolean));
+  assert(claudeDirs.size === 2 && [...claudeDirs].every((d) => /acct\/claude\/w[12]$/.test(d)),
+    `rotation spans both claude account config dirs (got ${[...claudeDirs].join(', ')})`);
+  const agyHomes = envLines15.filter((l) => l.argv.includes('--print')).map((l) => l.HOME);
+  assert(agyHomes.length === 1 && /acct\/gemini\/g1$/.test(agyHomes[0]), 'agy spawn HOME redirected to account dir');
+  r = await request(P15, { path: '/dashboard/status' });
+  {
+    const st = JSON.parse(r.body);
+    assert(Array.isArray(st.accounts.claude) && st.accounts.claude.length === 2
+      && st.accounts.gemini.length === 1 && st.accounts.claude[0].needsLogin === false,
+    'status exposes the account pool');
+  }
+
+  // ── Multi-account: quota failover then exhaustion ─────────────────────
+  const P16 = 19550;
+  const ENVLOG16 = path.join(TMP, 'env16.log');
+  const ACCTS16 = path.join(TMP, 'accounts16.json');
+  fs.writeFileSync(ACCTS16, JSON.stringify({
+    claude: [{ name: 'q1', dir: 'acct/claude/q1' }, { name: 'q2', dir: 'acct/claude/q2' }],
+  }));
+  const CLAUDE_QACCT = writeStub('claude-qacct.sh', 'claude-sim', {
+    FAKE_CLI_ENV_LOG: ENVLOG16, FAKE_CLI_STDERR: 'Claude usage limit reached.',
+  });
+  await bootProvider(P16, { CLAUDE_PATH: CLAUDE_QACCT, GEMINI_PATH: AGY_ACCT, BRIDGE_ACCOUNTS_FILE: ACCTS16 });
+  const call16 = () => request(P16, {
+    path: '/v1/chat/completions', method: 'POST',
+    body: { model: 'bridge-claude-haiku-4.5-spark', messages: [{ role: 'user', content: 'x' }] },
+  });
+  r = await call16(); // q1 quota → failover to q2 → quota → 429
+  {
+    const lines = fs.readFileSync(ENVLOG16, 'utf8').trim().split('\n').map(JSON.parse).filter((l) => l.argv.includes('-p'));
+    const dirs = new Set(lines.map((l) => l.CLAUDE_CONFIG_DIR));
+    assert(r.status === 429 && lines.length === 2 && dirs.size === 2,
+      `single request fails over across both accounts before 429 (spawns=${lines.length}, dirs=${dirs.size})`);
+  }
+  await call16(); // second failure each → both breakers open
+  const spawnsBefore16 = fs.readFileSync(ENVLOG16, 'utf8').trim().split('\n').length;
+  r = await call16(); // fail-fast: no spawns
+  const spawnsAfter16 = fs.readFileSync(ENVLOG16, 'utf8').trim().split('\n').length;
+  assert(r.status === 429 && r.headers['retry-after'] && spawnsAfter16 === spawnsBefore16,
+    'exhausted pool fails fast with Retry-After and no spawn');
+
+  // ── Multi-account: auth → needs-login; pinned account fails loud ──────
+  const P17 = 19560;
+  const ENVLOG17 = path.join(TMP, 'env17.log');
+  const ACCTS17 = path.join(TMP, 'accounts17.json');
+  fs.writeFileSync(ACCTS17, JSON.stringify({
+    claude: [{ name: 'a1', dir: 'acct/claude/a1' }, { name: 'a2', dir: 'acct/claude/a2' }],
+  }));
+  const CLAUDE_AUTHFAIL = writeStub('claude-authfail.sh', 'claude-sim', {
+    FAKE_CLI_ENV_LOG: ENVLOG17, FAKE_CLI_AUTH_FAIL: '1',
+  });
+  await bootProvider(P17, {
+    CLAUDE_PATH: CLAUDE_AUTHFAIL, GEMINI_PATH: AGY_ACCT, BRIDGE_ACCOUNTS_FILE: ACCTS17, PROVIDER_API_KEY: 'adm17',
+  });
+  const call17 = (model) => request(P17, {
+    path: '/v1/chat/completions', method: 'POST', headers: { Authorization: 'Bearer adm17' },
+    body: { model, messages: [{ role: 'user', content: 'x' }] },
+  });
+  r = await call17('bridge-claude-haiku-4.5-spark');
+  assert(r.status === 503 && errType(r) === 'engine_auth_error', 'logged-out pool answers 503 engine_auth_error');
+  r = await request(P17, { path: '/dashboard/status' });
+  {
+    const st = JSON.parse(r.body);
+    assert(st.accounts.claude.every((a) => a.needsLogin === true), 'both accounts marked needs-login after auth failures');
+  }
+  r = await request(P17, {
+    path: '/admin/routes', method: 'POST', headers: { Authorization: 'Bearer adm17' },
+    body: { id: 'pin-test', label: 'Pin', engine: 'claude', model: 'x', account: 'a1' },
+  });
+  assert(r.status === 200, 'admin can add a pinned route');
+  const spawnsBefore17 = fs.existsSync(ENVLOG17) ? fs.readFileSync(ENVLOG17, 'utf8').trim().split('\n').length : 0;
+  r = await call17('pin-test');
+  const spawnsAfter17 = fs.existsSync(ENVLOG17) ? fs.readFileSync(ENVLOG17, 'utf8').trim().split('\n').length : 0;
+  assert(r.status === 503 && errType(r) === 'engine_auth_error' && spawnsAfter17 === spawnsBefore17,
+    'pinned needs-login account fails loud without spawning or failing over');
+  r = await request(P17, {
+    path: '/admin/accounts/claude/a1/probe', method: 'POST', headers: { Authorization: 'Bearer adm17' },
+  });
+  assert(r.status === 502 && JSON.parse(r.body).kind === 'auth', 'probe on a logged-out account reports auth failure');
+
   console.log(`\n# Result: ${passed} passed, ${failed} failed`);
   process.exit(failed === 0 ? 0 : 1);
 }

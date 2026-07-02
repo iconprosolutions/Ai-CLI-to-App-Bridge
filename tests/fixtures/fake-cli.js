@@ -101,6 +101,17 @@ async function main() {
   if (mode === 'claude-sim') {
     logInvocation();
     if (simArgs[0] === '--version') { process.stdout.write('fake-claude 0.0.0\n'); return; }
+    // Logged-out account: mirrors the real CLI (verified 2026-07-02) — a
+    // result line with is_error:true and exit 0.
+    if (process.env.FAKE_CLI_AUTH_FAIL) {
+      await readStdin();
+      process.stdout.write(`${JSON.stringify({ type: 'system', subtype: 'init' })}\n`);
+      process.stdout.write(`${JSON.stringify({
+        type: 'result', subtype: 'success', is_error: true, result: 'Not logged in · Please run /login',
+        stop_reason: 'stop_sequence', session_id: 'fake-session-authfail', usage: { input_tokens: 0, output_tokens: 0 },
+      })}\n`);
+      return;
+    }
     if (process.env.FAKE_CLI_STDERR) {
       process.stderr.write(process.env.FAKE_CLI_STDERR);
       process.exit(1);

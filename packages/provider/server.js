@@ -65,9 +65,12 @@ for (const e of ENGINE_NAMES) enginesDisabled[e] = false;
 // no accounts.json every engine gets one implicit "default" account whose
 // spawns leave the environment untouched — exactly the old single-account
 // behavior.
+const ACCOUNTS_FILE = process.env.BRIDGE_ACCOUNTS_FILE || path.resolve(__dirname, '../../.bridge-runtime/accounts.json');
 const pool = createAccountPool({
-  file: process.env.BRIDGE_ACCOUNTS_FILE || path.resolve(__dirname, '../../.bridge-runtime/accounts.json'),
-  baseDir: path.resolve(__dirname, '../../.bridge-runtime'),
+  file: ACCOUNTS_FILE,
+  // Relative account dirs resolve beside accounts.json itself — the runtime
+  // dir in production, the isolated temp dir in tests.
+  baseDir: path.dirname(ACCOUNTS_FILE),
   engines: ENGINE_NAMES,
   breakerOpts: {
     quotaCooldownMs: intEnv('BREAKER_QUOTA_COOLDOWN_MS', 15 * 60 * 1000),
