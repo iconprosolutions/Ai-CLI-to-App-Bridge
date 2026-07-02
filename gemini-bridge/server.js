@@ -23,6 +23,8 @@ app.use(cors(corsOptions));
 app.use(express.json({ limit: '10mb' }));
 
 const PORT = process.env.PORT || 9003;
+// Bind to loopback by default; opt in to 0.0.0.0 (Docker, LAN) explicitly.
+const BIND_HOST = process.env.BIND_HOST || '127.0.0.1';
 const CONTEXTS_DIR = process.env.CONTEXTS_DIR || path.join(__dirname, 'contexts');
 const SESSION_TIMEOUT_MS = 24 * 60 * 60 * 1000; // 24 hours
 const AGENCY_NAME = process.env.AGENCY_NAME || 'Your Agency';
@@ -619,6 +621,7 @@ app.post('/api/chat', async (req, res) => {
     return res.status(400).json({ error: 'Missing prompt or content' });
   }
 
+  let activeChild = null;
   try {
     let session = getSession(clientSlug);
     if (!session) {
@@ -630,7 +633,6 @@ app.post('/api/chat', async (req, res) => {
     const fullPrompt = buildPrompt(task === 'chat' ? 'raw' : task, clientSlug, { prompt: input, content: input });
     const resolvedModel = normalizeModel(model || session.model);
 
-    let activeChild = null;
     res.on('close', () => {
       if (activeChild && !res.writableEnded) {
         try { activeChild.kill('SIGTERM'); } catch (_) {}
@@ -829,8 +831,8 @@ setInterval(() => {
 // Start
 // ─────────────────────────────────────────────
 
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Gemini CLI Bridge running on port ${PORT}`);
+app.listen(PORT, BIND_HOST, () => {
+  console.log(`Gemini CLI Bridge running on ${BIND_HOST}:${PORT}`);
   console.log(`Auth: ${API_KEY ? 'ENABLED (Bearer token required)' : 'DISABLED (open, set BRIDGE_API_KEY)'}`);
   console.log(`Agency: ${AGENCY_NAME}`);
   console.log(`Default model: ${DEFAULT_MODEL}`);

@@ -12,6 +12,9 @@ services:
     ports:
       - "${CLAUDE_PORT:-9002}:9002"
     environment:
+      # Containers must accept connections from the docker network / port map;
+      # bare-metal runs default to loopback-only.
+      - BIND_HOST=0.0.0.0
       - CLAUDE_MODEL=${CLAUDE_MODEL:-}
       - AGENCY_NAME=${AGENCY_NAME:-Your Agency}
       - TEAM_MEMBERS=${TEAM_MEMBERS:-Team Member or Client}
@@ -41,6 +44,9 @@ services:
     ports:
       - "${GEMINI_PORT:-9003}:9003"
     environment:
+      # Containers must accept connections from the docker network / port map;
+      # bare-metal runs default to loopback-only.
+      - BIND_HOST=0.0.0.0
       - GEMINI_MODEL=${GEMINI_MODEL:-Gemini 3.5 Flash (Low)}
       - AGENCY_NAME=${AGENCY_NAME:-Your Agency}
       - TEAM_MEMBERS=${TEAM_MEMBERS:-Team Member or Client}
@@ -72,6 +78,9 @@ services:
     ports:
       - "${PROVIDER_PORT:-9010}:9010"
     environment:
+      # Containers must accept connections from the docker network / port map;
+      # bare-metal runs default to loopback-only.
+      - BIND_HOST=0.0.0.0
       # Incoming auth for /v1/* endpoints. Falls back to BRIDGE_API_KEY.
       - PROVIDER_API_KEY=${PROVIDER_API_KEY:-}
       # Also used as the outgoing bearer token when calling the bridges.
