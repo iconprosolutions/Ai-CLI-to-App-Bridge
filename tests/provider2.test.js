@@ -61,6 +61,8 @@ async function bootProvider(port, env) {
   process.env.PROVIDER_PORT = String(port);
   delete process.env.PROVIDER_API_KEY;
   delete process.env.BRIDGE_API_KEY;
+  // Never let test traffic pollute the real usage ledger.
+  process.env.BRIDGE_USAGE_DIR = path.join(TMP, `usage-${port}`);
   Object.assign(process.env, env);
   require(SERVER);
   process.env = oldEnv;
