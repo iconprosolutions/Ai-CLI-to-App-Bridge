@@ -26,6 +26,16 @@ last-updated: '2026-07-03T08:00:00.000Z'
   (`/admin/keys`). Ledger + telemetry attribute `keyName`. New `tests/keys.test.js`
   (33) + provider2 key suite; 413 assertions green; live mint→call→revoke smoke
   passed.
+- **Server Edition Phase E (gap mitigations) — in progress.** Shipped: **E1
+  tool-call hardening** (one corrective retry when the model emits malformed tool
+  JSON — non-stream and streaming pre-first-byte via the hold-back — so raw JSON
+  never leaks as content; few-shot example; `toolRetries` counter) and **E2
+  oversized-prompt policy** (prompt flattened before lane acquisition; over the
+  engine cap → loud 400 naming cap+remedies, or opt-in `overflowFallback` reroute
+  to a validated different-engine route, marked `bridge_rerouted`). **Remaining:
+  E3 session continuity** (`claude --resume`/prefix-hash; needs a live spike).
+  Plus an out-of-band user request: **signed-in account shown per engine** on the
+  Overview + Accounts tabs (reads each CLI's config identity, mtime-cached).
 - **Server Edition Phase C (dashboard) shipped** — Tasks 1–6 of
   `docs/superpowers/plans/2026-07-02-server-edition-phase-c-dashboard.md`.
   Backend: `pool.setEnabled` + `POST /admin/accounts/:e/:name/{enable,disable}`;
