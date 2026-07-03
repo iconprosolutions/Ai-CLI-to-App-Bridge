@@ -770,6 +770,100 @@ async function main() {
   });
   assert(r.status === 502 && JSON.parse(r.body).kind === 'auth', 'probe on a logged-out account reports auth failure');
 
+  // ── Named API keys: roles, mint/revoke, key pin, ledger attribution ──────
+  console.log('\n## Named API keys — roles, mint/revoke, key pin, ledger');
+  const P18 = 19570;
+  const CREDS18 = path.join(TMP, 'creds18.json');
+  const ENVLOG18 = path.join(TMP, 'env18.log');
+  const ACCTS18 = path.join(TMP, 'accounts18.json');
+  const USAGE18 = path.join(TMP, 'usage-19570'); // bootProvider's default for this port
+  const ADMIN18 = 'A'.repeat(48);
+  const APP18 = 'B'.repeat(48);
+  fs.writeFileSync(ACCTS18, JSON.stringify({
+    claude: [{ name: 'w1', dir: 'acct/claude/w1' }, { name: 'w2', dir: 'acct/claude/w2' }],
+  }));
+  fs.writeFileSync(CREDS18, JSON.stringify({
+    version: 2,
+    keys: [
+      { name: 'admin', role: 'admin', key: ADMIN18, createdAt: '2026-01-01T00:00:00Z' },
+      { name: 'hermes', role: 'app', key: APP18, accountPin: { claude: 'w1' }, createdAt: '2026-01-02T00:00:00Z' },
+    ],
+  }));
+  const CLAUDE_KEYS = writeStub('claude-keys.sh', 'claude-sim', { FAKE_CLI_ENV_LOG: ENVLOG18 });
+  await bootProvider(P18, {
+    CLAUDE_PATH: CLAUDE_KEYS, GEMINI_PATH: AGY_ACCT,
+    BRIDGE_CREDENTIALS_FILE: CREDS18, BRIDGE_ACCOUNTS_FILE: ACCTS18, USAGE_FLUSH_MS: '50',
+  });
+  const chat18 = (key, model) => request(P18, {
+    path: '/v1/chat/completions', method: 'POST', headers: { Authorization: `Bearer ${key}` },
+    body: { model, messages: [{ role: 'user', content: 'hi' }] },
+  });
+  const envCount18 = () => (fs.existsSync(ENVLOG18) ? fs.readFileSync(ENVLOG18, 'utf8').trim().split('\n').filter(Boolean).length : 0);
+  const envDirsSince = (from) => fs.readFileSync(ENVLOG18, 'utf8').trim().split('\n').filter(Boolean).slice(from)
+    .map(JSON.parse).filter((l) => l.argv.includes('-p')).map((l) => l.CLAUDE_CONFIG_DIR);
+
+  // Roles: app key reaches /v1 but not /admin; admin key reaches both.
+  r = await chat18(APP18, 'bridge-claude-haiku-4.5-spark');
+  assert(r.status === 200, 'app-role key can call /v1/chat/completions');
+  r = await request(P18, { path: '/admin/keys', headers: { Authorization: `Bearer ${APP18}` } });
+  assert(r.status === 403, 'app-role key is rejected (403) on /admin');
+  r = await request(P18, { path: '/admin/keys', headers: { Authorization: `Bearer ${ADMIN18}` } });
+  {
+    const keys = JSON.parse(r.body).keys || [];
+    const hermes = keys.find((k) => k.name === 'hermes');
+    assert(r.status === 200 && keys.length === 2, 'admin key lists all named keys');
+    assert(keys.every((k) => !('key' in k)), '/admin/keys never returns secret values');
+    assert(hermes && hermes.role === 'app' && hermes.accountPin.claude === 'w1', 'listed app key carries role + accountPin');
+  }
+  r = await request(P18, { path: '/admin/keys', method: 'POST', headers: { Authorization: `Bearer ${ADMIN18}` }, body: { name: 'ci', role: 'app' } });
+  const minted = JSON.parse(r.body);
+  assert(r.status === 200 && /^[0-9a-f]{48}$/.test(minted.key), 'mint returns a 48-hex secret once');
+  r = await chat18(minted.key, 'bridge-claude-haiku-4.5-spark');
+  assert(r.status === 200, 'freshly minted key authorizes /v1');
+  r = await request(P18, { path: '/admin/keys/ci', method: 'DELETE', headers: { Authorization: `Bearer ${ADMIN18}` } });
+  assert(r.status === 200, 'admin can revoke a key');
+  r = await chat18(minted.key, 'bridge-claude-haiku-4.5-spark');
+  assert(r.status === 401, 'revoked key no longer authorizes');
+
+  // Key pin overrides rotation: admin (unpinned) rotates w1/w2; hermes pins w1.
+  const a0 = envCount18();
+  await chat18(ADMIN18, 'bridge-claude-haiku-4.5-spark');
+  await chat18(ADMIN18, 'bridge-claude-haiku-4.5-spark');
+  const adminDirs = envDirsSince(a0);
+  assert(new Set(adminDirs).size === 2, 'unpinned admin key rotates across both accounts');
+  const h0 = envCount18();
+  await chat18(APP18, 'bridge-claude-haiku-4.5-spark');
+  await chat18(APP18, 'bridge-claude-haiku-4.5-spark');
+  const hermesDirs = envDirsSince(h0);
+  assert(hermesDirs.length === 2 && hermesDirs.every((d) => /\/w1$/.test(d)), 'key accountPin forces every call onto the pinned account');
+
+  // Durable ledger attributes keyName + account (flush is 50ms here).
+  await new Promise((res) => setTimeout(res, 150));
+  const ledger18 = fs.existsSync(USAGE18)
+    ? fs.readdirSync(USAGE18).filter((f) => f.endsWith('.jsonl'))
+      .flatMap((f) => fs.readFileSync(path.join(USAGE18, f), 'utf8').trim().split('\n')).filter(Boolean)
+      .map((l) => { try { return JSON.parse(l); } catch (_) { return null; } }).filter(Boolean)
+    : [];
+  assert(ledger18.some((e) => e.keyName === 'hermes' && e.account === 'w1'), 'ledger records keyName + account for pinned app-key traffic');
+  assert(ledger18.some((e) => e.keyName === 'admin'), 'ledger records keyName for admin-key traffic');
+
+  // v1 → v2 migration on a real boot: legacy file still authorizes, file upgraded.
+  console.log('\n## Credentials v1 → v2 migration');
+  const P19 = 19580;
+  const CREDS19 = path.join(TMP, 'creds19.json');
+  const LEGACY = 'legacy'.padEnd(48, '0');
+  fs.writeFileSync(CREDS19, JSON.stringify({ apiKey: LEGACY, createdAt: '2026-01-01T00:00:00Z' }));
+  await bootProvider(P19, { CLAUDE_PATH: CLAUDE_KEYS, GEMINI_PATH: AGY_ACCT, BRIDGE_CREDENTIALS_FILE: CREDS19 });
+  r = await request(P19, { path: '/v1/models', headers: { Authorization: `Bearer ${LEGACY}` } });
+  assert(r.status === 200, 'migrated legacy key still authorizes /v1');
+  r = await request(P19, { path: '/v1/models' });
+  assert(r.status === 401, 'auth is enforced after migration (no token → 401)');
+  {
+    const onDisk = JSON.parse(fs.readFileSync(CREDS19, 'utf8'));
+    assert(onDisk.version === 2 && onDisk.keys[0].key === LEGACY && onDisk.keys[0].role === 'admin',
+      'v1 file migrated to v2 in place, key value preserved as admin');
+  }
+
   console.log(`\n# Result: ${passed} passed, ${failed} failed`);
   process.exit(failed === 0 ? 0 : 1);
 }
