@@ -4,10 +4,11 @@ How to run the consolidated provider as a LAN-only server on the Ugreen NAS
 (`192.168.1.10`, x86_64 Debian 12, Docker 26.1). Companion: `HOW-IT-WORKS.md`
 (architecture), `superpowers/specs/2026-07-02-server-edition-design.md` (design).
 
-> **Engines:** the `claude` engine runs in the container. The `gemini`/agy engine
-> does **not** yet — Antigravity ships a macOS binary and no confirmed
-> linux-amd64 build (Spike D0). Gemini routes degrade cleanly (the engine reports
-> "down"); every Claude route works. See [Gemini on the NAS](#gemini-on-the-nas).
+> **Engines:** both `claude` (Claude Code CLI) and `gemini` (Antigravity `agy`)
+> run in the container — the image installs agy's official linux-amd64 build.
+> Claude accounts log in headlessly; gemini accounts need credentials copied from
+> a browser login (agy has no headless login). See [onboarding](#5-onboard-accounts).
+> If agy is ever missing, gemini routes just report "down" and claude keeps working.
 
 > **Security:** this binds `0.0.0.0` *inside* the container — the NAS LAN/firewall
 > is the boundary. Do **not** forward `9011` to the internet. If you must expose
@@ -52,30 +53,47 @@ docker logs ai-cli-bridge 2>&1 | grep 'admin API key'
 It persists in `./data/runtime/credentials.json`; it won't change on restart.
 Mint per-app keys later from the dashboard **Connect** tab (admin key required).
 
-## 5. Onboard Claude accounts
+## 5. Onboard accounts
 
-The container starts with no Claude login. Add one or more accounts:
+The container starts with no logins. Add one or more per engine — the helper
+writes each account's credentials into `./data/runtime/accounts/<engine>/<name>/`.
+
+**Claude** (headless — issues a long-lived token in-container):
 
 ```bash
 cd ~/ai-cli-bridge
-./scripts/account-login.sh work        # opens claude setup-token; paste the code
+./scripts/account-login.sh claude work    # opens claude setup-token; paste the code
 ```
 
-Then append what it prints to `./data/runtime/accounts.json` (create it if absent):
+**Gemini** (agy has no headless login — log in on a machine with a browser, copy
+the creds in). Run `./scripts/account-login.sh gemini team` for the exact steps;
+in short:
+
+```bash
+# On your Mac (or any machine with a browser + agy):
+export HOME=/tmp/agy-team && mkdir -p "$HOME" && agy   # complete Google login, then quit
+rsync -a /tmp/agy-team/.gemini/ waqar@192.168.1.10:~/ai-cli-bridge/data/runtime/accounts/gemini/team/.gemini/
+```
+
+agy reads `<account dir>/.gemini/oauth_creds.json` (via the account's `HOME`); the
+refresh token keeps it alive. Then append the accounts to
+`./data/runtime/accounts.json` (create it if absent):
 
 ```json
 {
   "claude": [
     { "name": "work",     "dir": "accounts/claude/work" },
     { "name": "personal", "dir": "accounts/claude/personal" }
+  ],
+  "gemini": [
+    { "name": "team", "dir": "accounts/gemini/team" }
   ]
 }
 ```
 
-`accounts.json` hot-reloads — no restart. With **no** file, the container runs a
-single implicit `default` account using its own `~/.claude` (also fine if you
-`claude setup-token` once without `CLAUDE_CONFIG_DIR`). Multiple accounts give you
-parallel lanes and automatic quota failover.
+`accounts.json` hot-reloads — no restart. With **no** file, each engine runs a
+single implicit `default` account using the container's own `~/.claude` / `~/.gemini`.
+Multiple accounts per engine give you parallel lanes and automatic quota failover.
 
 ## 6. Verify
 
@@ -112,16 +130,21 @@ Send `X-App-Id: <app>` to attribute usage per app; use a per-app named key
 
 ## Gemini on the NAS
 
-Not supported in the container yet — the `agy` binary Antigravity distributes is
-macOS-only, and no linux-amd64 build is confirmed. Options:
+Supported. The image installs Antigravity's official **linux-amd64** `agy` build
+(`curl -fsSL https://antigravity.google/cli/install.sh | bash`, which detects the
+platform). The one wrinkle is auth: `agy` logs in through a browser and can't do
+that headless, so you copy credentials in rather than logging in on the NAS —
+see [§5 onboarding](#5-onboard-accounts). Once `<account>/.gemini/oauth_creds.json`
+is in place, `agy` runs non-interactively and the refresh token self-renews.
 
-1. **Claude-only on the NAS** (current default). Gemini routes return a clean
-   "engine down"; nothing else is affected.
-2. **When a Linux `agy` exists:** add its install to `deploy/Dockerfile`, then
-   onboard a gemini account. If its login needs a browser, the documented
-   fallback is to log in on the Mac under a scratch `HOME`, then
-   `rsync` that `~/.gemini` dir into `./data/runtime/accounts/gemini/<name>/` on
-   the NAS and reference it in `accounts.json`.
+- **First-deploy check:** confirm `docker exec ai-cli-bridge agy --version` prints
+  a version (proves the linux binary installed). Then, after copying a gemini
+  account's creds, `docker exec -e HOME=/app/.bridge-runtime/accounts/gemini/<name> ai-cli-bridge agy -p "say ok" -m "Gemini 3.5 Flash (Low)"` should answer — if it instead
+  demands a keyring/login, the file creds weren't picked up; re-copy `.gemini/`
+  and check ownership (`chown 10001:10001`). The dashboard Accounts tab shows the
+  gemini account's signed-in email when it's working.
+- **Claude-only fallback:** if you skip gemini onboarding, gemini routes report
+  "engine down" and everything else works — no action needed.
 
 ## Backup
 

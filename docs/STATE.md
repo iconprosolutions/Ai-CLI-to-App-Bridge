@@ -86,19 +86,21 @@ Nothing blocked.
 - **Server Edition Phase D (Docker + NAS deploy) — artifacts shipped.**
   `deploy/Dockerfile` (node:22-slim, claude via npm, non-root, healthcheck),
   `deploy/entrypoint.sh`, `deploy/docker-compose.yml` (9011, single runtime
-  volume, restart), `scripts/account-login.sh`, `docs/DEPLOY-NAS.md`. Spike D0
-  resolved: agy is a macOS-only binary → NAS ships **claude-only**, gemini
-  degrades gracefully. Container runtime config verified locally (bootstrap +
-  boot + auth); the actual `docker build` + live deploy to 192.168.1.10 need the
-  operator present.
+  volume, restart), `scripts/account-login.sh`, `docs/DEPLOY-NAS.md`. **Both
+  engines on the NAS**: the image installs claude (npm) and agy (Antigravity's
+  official linux-amd64 installer — Spike D0 corrected: agy *does* ship for Linux).
+  agy has no headless login, so gemini accounts are onboarded by copying `.gemini`
+  creds (file-based OAuth, self-refreshing); claude logs in in-container.
+  Container runtime config verified locally (bootstrap + boot + auth); the actual
+  `docker build` + live deploy to 192.168.1.10 need the operator present.
 
 ## Up Next
 
 - **The whole Server Edition (Phases A–E) is implemented on `feat/dashboard-overhaul`.**
   Decide push/PR/merge. Nothing is pushed yet.
 - **Operator-gated:** run the NAS deploy (`docs/DEPLOY-NAS.md`) — `docker build`,
-  onboard Claude accounts, point Hermes at `http://192.168.1.10:9011/v1`.
-- **External dependency:** an agy linux-amd64 binary would re-enable gemini on the
-  NAS (claude-only until then; gemini degrades gracefully).
+  onboard claude + gemini accounts, point Hermes at `http://192.168.1.10:9011/v1`.
+  First deploy should confirm `agy --version` in-container and one gemini creds-copy
+  round-trip (headless auth is the only unverified link, per DEPLOY-NAS.md).
 - Later (out of scope per spec): real image handoff, CLI session continuity
   (`--resume`), deleting the legacy provider-bridge once nothing depends on it.

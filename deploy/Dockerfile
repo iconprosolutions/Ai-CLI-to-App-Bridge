@@ -1,19 +1,27 @@
 # Bridge Server Edition — consolidated provider on :9011.
 #
-# claude engine: installed here (Claude Code CLI, npm). gemini/agy engine:
-# Antigravity ships only a macOS binary today (no confirmed linux-amd64 build —
-# Spike D0), so it is NOT installed in this image. The bridge degrades
-# gracefully: the gemini engine reports "down" and gemini routes fail cleanly
-# while every claude route works. Add an agy Linux binary later to enable it.
+# Both engines run here: claude (Claude Code CLI, npm) and gemini (Antigravity
+# `agy`, whose official installer ships a linux-amd64 build). agy auth is
+# file-based under a per-account HOME (.gemini/oauth_creds.json) — onboard a
+# gemini account by copying credentials logged in elsewhere (see DEPLOY-NAS.md);
+# there is no in-container browser login. If agy is ever absent the gemini engine
+# just reports "down" and claude routes keep working.
 FROM node:22-bookworm-slim
 
-# curl for the HEALTHCHECK; git + ca-certificates for completeness.
+# curl for the HEALTHCHECK + the agy installer; git + ca-certificates for completeness.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       curl git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # The Claude Code CLI provides the `claude` engine binary on PATH.
 RUN npm install -g @anthropic-ai/claude-code
+
+# The Antigravity CLI provides the `gemini` engine binary. The official installer
+# detects linux/amd64 and downloads the matching build; --dir puts it on PATH for
+# all users. Pinned to the current line via the installer's own manifest.
+RUN curl -fsSL https://antigravity.google/cli/install.sh | bash -s -- --dir /usr/local/bin \
+    && test -x /usr/local/bin/agy \
+    && /usr/local/bin/agy --version
 
 WORKDIR /app
 

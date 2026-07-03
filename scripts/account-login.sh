@@ -1,41 +1,74 @@
 #!/usr/bin/env bash
-# Onboard a Claude account into the bridge's account pool (run on the NAS host,
-# once per account). Issues a long-lived headless token into the account's
-# credential dir inside the mounted runtime volume, then tells you the one line
-# to add to accounts.json (which hot-reloads — no restart).
+# Onboard an account into the bridge's pool (run on the NAS host, once per
+# account). Writes the account's credentials into a dir inside the mounted
+# runtime volume, then tells you the one line to add to accounts.json (which
+# hot-reloads — no restart).
 #
-# Usage:  scripts/account-login.sh <account-name>
-# Example: scripts/account-login.sh work
+# Usage:  scripts/account-login.sh <engine> <name>
+#   claude — headless: issues a long-lived token in-container.
+#   gemini — agy has no in-container browser login, so you log in on a machine
+#            that has a browser and this script copies those creds in.
 #
-# gemini/agy is not supported in the container yet (macOS-only binary); see
-# docs/DEPLOY-NAS.md for the Mac-login + rsync fallback if you obtain a Linux agy.
+# Examples:
+#   scripts/account-login.sh claude work
+#   scripts/account-login.sh gemini team
 set -euo pipefail
 
-NAME="${1:?usage: account-login.sh <account-name>}"
+ENGINE="${1:?usage: account-login.sh <claude|gemini> <account-name>}"
+NAME="${2:?usage: account-login.sh <claude|gemini> <account-name>}"
 CONTAINER="${BRIDGE_CONTAINER:-ai-cli-bridge}"
-REL="accounts/claude/${NAME}"
+REL="accounts/${ENGINE}/${NAME}"
 DIR="/app/.bridge-runtime/${REL}"
 
 if ! docker ps --format '{{.Names}}' | grep -qx "$CONTAINER"; then
-  echo "error: container '${CONTAINER}' is not running. Start it first: docker compose -f deploy/docker-compose.yml up -d" >&2
+  echo "error: container '${CONTAINER}' is not running. Start it: docker compose -f deploy/docker-compose.yml up -d" >&2
   exit 1
 fi
 
-echo "Onboarding Claude account '${NAME}' → ${DIR}"
 docker exec "$CONTAINER" mkdir -p "$DIR"
 
-# 'claude setup-token' prints a URL; open it, approve, paste the code back. The
-# token is written into CLAUDE_CONFIG_DIR and self-refreshes afterward.
-docker exec -it -e CLAUDE_CONFIG_DIR="$DIR" "$CONTAINER" claude setup-token
+case "$ENGINE" in
+  claude)
+    echo "Onboarding Claude account '${NAME}' → ${DIR}"
+    # 'claude setup-token' prints a URL; open it, approve, paste the code back.
+    # The long-lived token lands in CLAUDE_CONFIG_DIR and self-refreshes.
+    docker exec -it -e CLAUDE_CONFIG_DIR="$DIR" "$CONTAINER" claude setup-token
+    ;;
+  gemini)
+    HOSTDIR="./data/runtime/${REL}"
+    cat <<EOF
+Onboarding Gemini account '${NAME}' (Antigravity / agy).
+
+agy authenticates in a browser and can't do that inside a headless container, so
+log in on a machine that HAS a browser (e.g. your Mac) under a scratch HOME, then
+copy the resulting credentials into this account's dir. On that machine:
+
+  export HOME=/tmp/agy-${NAME}
+  mkdir -p "\$HOME"
+  agy            # complete the Google login in the browser it opens, then quit
+  # this writes \$HOME/.gemini/{oauth_creds.json,google_accounts.json}
+
+Then copy that .gemini dir onto the NAS account dir (agy reads it via HOME; the
+refresh token keeps it alive):
+
+  rsync -a /tmp/agy-${NAME}/.gemini/ waqar@192.168.1.10:~/ai-cli-bridge/${HOSTDIR}/.gemini/
+
+(If logging in on the NAS host directly, just point HOME at ${HOSTDIR} and run agy there.)
+EOF
+    ;;
+  *)
+    echo "error: unknown engine '${ENGINE}' (expected claude or gemini)" >&2
+    exit 1
+    ;;
+esac
 
 cat <<EOF
 
-✓ Logged in. Add this account to the pool by appending it to the "claude" array
-  in ./data/runtime/accounts.json:
+✓ Add this account to the pool — append it to the "${ENGINE}" array in
+  ./data/runtime/accounts.json:
 
     { "name": "${NAME}", "dir": "${REL}" }
 
-accounts.json hot-reloads — the new account joins rotation immediately. Verify on
-the dashboard Accounts tab (it will show the signed-in email), or:
-  curl -s http://<nas-ip>:9011/dashboard/status | grep -o '"${NAME}"[^}]*'
+accounts.json hot-reloads — the account joins rotation immediately. The dashboard
+Accounts tab will show its signed-in email once creds are in place.
 EOF
