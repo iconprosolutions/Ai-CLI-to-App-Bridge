@@ -521,6 +521,7 @@ async function main() {
   r = await request(P1, { path: '/dashboard/app.js' });
   assert(r.status === 200 && (r.headers['content-type'] || '').includes('javascript'), 'dashboard app.js served');
   assert(r.body.includes('renderAccounts') && r.body.includes('acct-probe'), 'dashboard app.js wires the Accounts tab');
+  assert(r.body.includes('renderKeys') && r.body.includes('key-revoke') && r.body.includes('/admin/keys'), 'dashboard app.js wires key management');
   r = await request(P1, { path: '/dashboard/styles.css' });
   assert(r.status === 200 && (r.headers['content-type'] || '').includes('css'), 'dashboard styles.css served');
   r = await request(P1, { path: '/' });

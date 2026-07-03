@@ -553,6 +553,31 @@
     $('snip-name').textContent = sn.n;
     $('snip-body').textContent = sn.b;
     [].forEach.call($('c-tabs').children, function (b) { b.classList.toggle('active', b.getAttribute('data-snip') === state.snip); });
+    renderKeys();
+  }
+
+  // Key management (admin-role only). Uses a raw fetch for the read so a
+  // missing/app-role key shows a hint in-place instead of alerting on refresh.
+  function renderKeys() {
+    var el = $('keys-table');
+    if (!el) return;
+    if (!key()) { el.innerHTML = '<div class="empty">Set your admin API key (left) to manage keys.</div>'; return; }
+    fetch('/admin/keys', { headers: { Authorization: 'Bearer ' + key() } }).then(function (r) {
+      if (r.status === 401) { el.innerHTML = '<div class="empty">Key not recognized.</div>'; return null; }
+      if (r.status === 403) { el.innerHTML = '<div class="empty">This key is app-role — an admin key is required to manage keys.</div>'; return null; }
+      if (r.status === 503) { el.innerHTML = '<div class="empty">Auth is disabled — no keys to manage.</div>'; return null; }
+      return r.json();
+    }).then(function (d) {
+      if (!d) return;
+      el.innerHTML = (d.keys || []).map(function (k) {
+        var pins = k.accountPin ? Object.keys(k.accountPin).map(function (e) { return esc(e + ':' + k.accountPin[e]); }).join(', ') : '—';
+        return '<div class="trow" style="grid-template-columns:1.3fr 80px 1.2fr 90px">'
+          + '<span>' + esc(k.name) + '</span>'
+          + '<span><span class="nbadge">' + esc(k.role) + '</span></span>'
+          + '<span class="sub2">' + pins + '</span>'
+          + '<span><button class="abtn danger" data-act="key-revoke" data-name="' + esc(k.name) + '">Revoke</button></span></div>';
+      }).join('') || '<div class="empty">No keys.</div>';
+    }).catch(function () { el.innerHTML = '<div class="empty">Could not load keys.</div>'; });
   }
 
   // ── Render root ───────────────────────────────────────────────────────
@@ -607,6 +632,11 @@
       var n = el.getAttribute('data-name');
       if (!confirm('Disable ' + e + ':' + n + '? It leaves rotation until re-enabled (runtime only).')) return Promise.resolve();
       return admin('POST', '/admin/accounts/' + e + '/' + n + '/disable', {});
+    },
+    'key-revoke': function (el) {
+      var n = el.getAttribute('data-name');
+      if (!confirm('Revoke key "' + n + '"? Any app using it stops working immediately.')) return Promise.resolve();
+      return admin('DELETE', '/admin/keys/' + encodeURIComponent(n)).then(function () { renderKeys(); });
     },
     'route-toggle': function (el) {
       var enabled = el.getAttribute('data-enabled') === 'true';
@@ -728,7 +758,25 @@
 
   // Key field
   $('c-key').value = key();
-  $('c-key').addEventListener('change', function () { localStorage.setItem('providerApiKey', this.value); });
+  $('c-key').addEventListener('change', function () { localStorage.setItem('providerApiKey', this.value); renderKeys(); });
+
+  // Mint a named key (admin). Secret is shown once, in-page, then cleared from state.
+  $('key-mint').addEventListener('click', function () {
+    var name = $('key-name').value.trim();
+    if (!name) { $('key-msg').textContent = 'Name required.'; return; }
+    var body = { name: name, role: $('key-role').value };
+    var pin = {};
+    if ($('key-pin-claude').value.trim()) pin.claude = $('key-pin-claude').value.trim();
+    if ($('key-pin-gemini').value.trim()) pin.gemini = $('key-pin-gemini').value.trim();
+    if (Object.keys(pin).length) body.accountPin = pin;
+    admin('POST', '/admin/keys', body).then(function (d) {
+      $('key-msg').textContent = 'Minted "' + d.name + '".';
+      $('minted-key').style.display = '';
+      $('minted-secret').textContent = d.key;
+      ['key-name', 'key-pin-claude', 'key-pin-gemini'].forEach(function (id) { $(id).value = ''; });
+      renderKeys();
+    }).catch(function (err) { if (err && err.message !== 'unauthorized') $('key-msg').textContent = err.message; });
+  });
 
   // Live toggle (pause SSE-driven refreshes)
   $('livebtn').addEventListener('click', function () {

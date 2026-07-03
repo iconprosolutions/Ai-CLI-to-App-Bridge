@@ -197,6 +197,29 @@
       <div class="console" style="min-height:0"><div class="cbar"><span class="ctag" id="snip-name">—</span><button class="abtn" data-copy="snip-body" style="color:var(--on-dark);background:var(--dark-soft);border-color:var(--dark-fill)">Copy</button></div><pre class="code" id="snip-body"></pre></div>
     </div>
   </div>
+
+  <div class="sec-head" style="margin-top:32px"><h2>API keys</h2><span class="note">admin only · one per app or teammate · attributed in Usage</span></div>
+  <div class="grid2">
+    <div>
+      <div class="table scrollx"><div style="min-width:520px">
+        <div class="thead" style="grid-template-columns:1.3fr 80px 1.2fr 90px"><span>Name</span><span>Role</span><span>Account pins</span><span>Actions</span></div>
+        <div id="keys-table"><div class="empty">Set your admin API key (left) to manage keys.</div></div>
+      </div></div>
+      <div class="privacy" style="margin-top:12px">Secrets are shown once at mint and never returned again — <code>GET /admin/keys</code> lists names, roles and pins only. The last admin key can't be revoked.</div>
+    </div>
+    <div class="panel">
+      <h3>Mint a key</h3>
+      <div class="field"><label for="key-name">Name</label><input id="key-name" placeholder="hermes, ci, alice"></div>
+      <div class="field"><label for="key-role">Role</label><select id="key-role"><option value="app">app — /v1 only</option><option value="admin">admin — full control</option></select></div>
+      <div class="field"><label for="key-pin-claude">Pin claude account (optional)</label><input id="key-pin-claude" placeholder="work"></div>
+      <div class="field"><label for="key-pin-gemini">Pin gemini account (optional)</label><input id="key-pin-gemini" placeholder="main"></div>
+      <button class="abtn primary" id="key-mint">Mint key</button>
+      <span class="mono" id="key-msg" style="font-size:11px;color:var(--faint);margin-left:10px"></span>
+      <div id="minted-key" style="display:none;margin-top:14px">
+        <div class="console" style="min-height:0"><div class="cbar"><span class="ctag" style="color:var(--warn-d)">new secret · copy now — not retrievable</span><button class="abtn" data-copy="minted-secret" style="color:var(--on-dark);background:var(--dark-soft);border-color:var(--dark-fill)">Copy</button></div><pre class="code" id="minted-secret"></pre></div>
+      </div>
+    </div>
+  </div>
 </main>
 
 <footer>
