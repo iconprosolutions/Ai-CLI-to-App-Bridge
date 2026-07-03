@@ -72,7 +72,7 @@
   function connectEvents() {
     try {
       es = new EventSource('/dashboard/events');
-      ['request.start', 'request.end', 'breaker.change', 'engine.health', 'capture.change'].forEach(function (t) {
+      ['request.start', 'request.end', 'breaker.change', 'engine.health', 'capture.change', 'account.change', 'keys.change'].forEach(function (t) {
         es.addEventListener(t, throttledRefresh);
       });
       es.onopen = function () { setLive(true); if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } };
@@ -123,6 +123,7 @@
     var inf = Object.keys(s.inflight).map(function (e) { return s.inflight[e]; }).join(' / ');
     $('v-inflight').textContent = inf;
     $('cnt-routes').textContent = (s.routes || []).length;
+    $('cnt-accounts').textContent = Object.keys(s.accounts || {}).reduce(function (n, e) { return n + s.accounts[e].length; }, 0) || '';
     $('cnt-capture').textContent = s.capture && s.capture.enabled ? (s.capture.count + ' held') : '';
     $('foot-note').textContent = (s.authEnabled ? 'auth enabled' : 'open') + ' · local';
   }
@@ -240,6 +241,57 @@
         + '<span><button class="abtn danger" data-act="route-delete" data-id="' + esc(r.id) + '"' + (isDefault ? ' disabled title="default route"' : '') + '>Delete</button></span>'
         + '</div>';
     }).join('');
+  }
+
+  // ── Accounts ──────────────────────────────────────────────────────────
+  function accountState(a) {
+    if (!a.enabled) return { cls: 'down', label: 'Disabled' };
+    if (a.needsLogin) return { cls: 'down', label: 'Needs login' };
+    if (a.breaker && a.breaker.state === 'open') return { cls: 'down', label: 'Cooling ~' + a.breaker.retryInSec + 's' };
+    if ((a.inflight || 0) > 0) return { cls: 'warn', label: 'Busy' };
+    return { cls: 'ok', label: 'Ready' };
+  }
+  function renderAccounts() {
+    var s = state.status;
+    if (!s || !s.accounts) return;
+    var usageByAcct = {};
+    if (state.usage && state.usage.perAccount) {
+      state.usage.perAccount.forEach(function (a) { usageByAcct[a.account] = a; });
+    }
+    var max = (s.telemetry && s.telemetry.maxConcurrent) || 1;
+    var total = 0;
+    var cards = Object.keys(s.accounts).map(function (e) {
+      return (s.accounts[e] || []).map(function (a) {
+        total += 1;
+        var st = accountState(a);
+        var b = a.breaker || {};
+        var u = usageByAcct[a.name];
+        var pips = '';
+        for (var i = 0; i < max; i++) pips += '<span class="pip' + (i < (a.inflight || 0) ? ' on' : '') + '"></span>';
+        var badgeCls = st.cls === 'ok' ? 'ok' : st.cls === 'warn' ? 'warn' : 'down';
+        var loginCmd = (e === 'claude' ? 'CLAUDE_CONFIG_DIR=' : 'HOME=') + (a.dir || '<account dir>') + (e === 'claude' ? ' claude' : ' agy');
+        var loginId = 'login-' + e + '-' + a.name;
+        return '<div class="ecard">'
+          + '<div class="erow"><span class="ename">' + esc(e) + ' · ' + esc(a.name) + '</span>'
+          + (a.implicit ? '<span class="chip" style="background:var(--tint-mint)">default</span>' : '')
+          + '<span class="spacer"></span><span class="sbadge ' + badgeCls + '"><i></i>' + esc(st.label) + '</span></div>'
+          + '<div class="ekv">'
+          + '<span class="k">Breaker</span><span>' + esc(b.state || 'closed') + (b.reason ? ' · ' + esc(b.reason) : '') + (b.state === 'open' ? ' · retry ~' + b.retryInSec + 's' : '') + '</span>'
+          + '<span class="k">Slots</span><span class="pips">' + pips + '<span class="sub2" style="margin-left:6px">' + (a.inflight || 0) + '/' + max + (a.queued ? ' · ' + a.queued + ' queued' : '') + '</span></span>'
+          + '<span class="k">Usage</span><span class="sub2">' + (u ? ftok(u.promptTokens + u.completionTokens) + ' tok · $' + (u.apiEquivalentUsd || 0).toFixed(2) + ' · ' + fmt(u.requests) + ' calls' : 'none in range') + '</span>'
+          + '<span class="k">Config</span><span class="sub2 mono" style="word-break:break-all">' + (a.implicit ? 'ambient environment (no isolation)' : esc(a.dir)) + '</span>'
+          + '</div>'
+          + (a.needsLogin ? '<div class="loginbox"><span class="eyebrow">Log in once under this account, then Probe:</span><code id="' + esc(loginId) + '">' + esc(loginCmd) + '</code><button class="abtn" data-copy="' + esc(loginId) + '">Copy</button></div>' : '')
+          + '<div class="eactions">'
+          + '<button class="abtn primary" data-act="acct-probe" data-engine="' + esc(e) + '" data-name="' + esc(a.name) + '">Probe</button>'
+          + (a.enabled
+            ? '<button class="abtn" data-act="acct-disable" data-engine="' + esc(e) + '" data-name="' + esc(a.name) + '">Disable</button>'
+            : '<button class="abtn" data-act="acct-enable" data-engine="' + esc(e) + '" data-name="' + esc(a.name) + '">Enable</button>')
+          + '</div></div>';
+      }).join('');
+    }).join('');
+    $('acct-cards').innerHTML = cards || '<div class="empty">No accounts.</div>';
+    $('cnt-accounts').textContent = total;
   }
 
   // ── Usage ─────────────────────────────────────────────────────────────
@@ -509,6 +561,7 @@
     renderHeader();
     if (state.view === 'overview') { renderBanner(); renderEngines(); renderTiles(); renderFeed(); }
     if (state.view === 'routes') renderRoutes();
+    if (state.view === 'accounts') renderAccounts();
     if (state.view === 'tester') renderTesterRoutes();
     if (state.view === 'requests') renderCapture();
     if (state.view === 'connect') renderConnect();
@@ -540,6 +593,21 @@
       return admin('POST', '/admin/engines/' + e + '/disable', {});
     },
     'engine-enable': function (el) { return admin('POST', '/admin/engines/' + el.getAttribute('data-engine') + '/enable', {}); },
+    'acct-probe': function (el) {
+      var e = el.getAttribute('data-engine');
+      var n = el.getAttribute('data-name');
+      el.classList.add('busy');
+      return admin('POST', '/admin/accounts/' + e + '/' + n + '/probe', {})
+        .then(function () { el.classList.remove('busy'); })
+        .catch(function (err) { el.classList.remove('busy'); if (err && err.message !== 'unauthorized') alert('Probe failed for ' + e + ':' + n + ' — ' + err.message); });
+    },
+    'acct-enable': function (el) { return admin('POST', '/admin/accounts/' + el.getAttribute('data-engine') + '/' + el.getAttribute('data-name') + '/enable', {}); },
+    'acct-disable': function (el) {
+      var e = el.getAttribute('data-engine');
+      var n = el.getAttribute('data-name');
+      if (!confirm('Disable ' + e + ':' + n + '? It leaves rotation until re-enabled (runtime only).')) return Promise.resolve();
+      return admin('POST', '/admin/accounts/' + e + '/' + n + '/disable', {});
+    },
     'route-toggle': function (el) {
       var enabled = el.getAttribute('data-enabled') === 'true';
       return admin('PUT', '/admin/routes/' + el.getAttribute('data-id'), { enabled: !enabled });

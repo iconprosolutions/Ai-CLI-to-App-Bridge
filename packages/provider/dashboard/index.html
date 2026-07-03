@@ -20,6 +20,7 @@
     <nav class="tabs" id="tabs">
       <button class="tab active" data-view="overview">Overview</button>
       <button class="tab" data-view="routes">Routes<span class="cnt" id="cnt-routes"></span></button>
+      <button class="tab" data-view="accounts">Accounts<span class="cnt" id="cnt-accounts"></span></button>
       <button class="tab" data-view="usage">Usage</button>
       <button class="tab" data-view="tester">Tester</button>
       <button class="tab" data-view="requests">Requests<span class="cnt" id="cnt-capture"></span></button>
@@ -75,6 +76,13 @@
       </div>
     </div>
   </div>
+</main>
+
+<!-- ═══ ACCOUNTS ═══ -->
+<main class="wrap view" id="view-accounts">
+  <div class="sec-head"><h2>Accounts</h2><span class="note">per-engine credential pool · rotation · one-shot failover · needs-login</span></div>
+  <div class="engines" id="acct-cards"></div>
+  <div class="privacy" style="margin-top:16px">Accounts come from <code>.bridge-runtime/accounts.json</code> (hot-reloaded, validated). With no file, each engine runs one implicit <code>default</code> account whose spawns use the ambient environment. Enable/disable here is runtime-only — edit the file to persist. Each account gets its own circuit breaker and CLI lane, so multiple accounts run in parallel; a quota/auth failure on an un-pinned account fails the request over to the next healthy one exactly once.</div>
 </main>
 
 <!-- ═══ USAGE ═══ -->
