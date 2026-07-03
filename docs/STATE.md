@@ -1,5 +1,5 @@
 ---
-last-updated: '2026-07-03T06:00:00.000Z'
+last-updated: '2026-07-03T07:00:00.000Z'
 ---
 # AI CLI Bridge State
 
@@ -16,6 +16,16 @@ last-updated: '2026-07-03T06:00:00.000Z'
   implicit `default` account (verified live — single real call + status
   snapshot). Adapters take per-invocation `env` (claude→`CLAUDE_CONFIG_DIR`,
   agy→`HOME`); fixed a latent agy exit-0 auth bug. 364 assertions green.
+- **Server Edition Phase B (named API keys) shipped** — Tasks 1–6 of
+  `docs/superpowers/plans/2026-07-02-server-edition-phase-b-keys.md`.
+  `packages/provider/keys.js` owns a v2 `credentials.json` (named keys, `admin`/
+  `app` roles, optional per-engine `accountPin`); a v1 `{apiKey}` file migrates
+  in place preserving the key value (verified live — Hermes/launcher unaffected).
+  `/v1` accepts any valid key and attaches `req.auth`; account-pin precedence is
+  key → route → pool; the admin router is admin-role-gated with mint/revoke/list
+  (`/admin/keys`). Ledger + telemetry attribute `keyName`. New `tests/keys.test.js`
+  (33) + provider2 key suite; 413 assertions green; live mint→call→revoke smoke
+  passed.
 - One provider process on :9011; engines are **in-process adapters**
   (`packages/adapters`): claude via stream-json (real deltas + real token
   usage, stdin prompts), agy via guarded argv with streaming ANSI strip.
@@ -56,9 +66,10 @@ Nothing blocked.
 - User review of the live dashboard at http://127.0.0.1:9011/dashboard/
 - Decide merge/push of `feat/dashboard-overhaul`
 - Server Edition remaining phases (per
-  `docs/superpowers/specs/2026-07-02-server-edition-design.md`): **B** named
-  API keys v2, **C** dashboard Accounts tab (surface `pool.snapshot()` +
-  per-account probe/login UX), **D** Docker image + NAS deploy, **E** gap
-  mitigations.
+  `docs/superpowers/specs/2026-07-02-server-edition-design.md`): **C** dashboard
+  (Accounts tab surfacing `pool.snapshot()` + probe/login UX; Connect-tab key
+  management via `/admin/keys`; Usage account/key dimension), **D** Docker image
+  + NAS deploy (needs the live NAS), **E** gap mitigations (session continuity,
+  overflow policy, tool-call hardening).
 - Later (out of scope per spec): real image handoff, CLI session continuity
   (`--resume`), deleting the legacy provider-bridge once nothing depends on it.
