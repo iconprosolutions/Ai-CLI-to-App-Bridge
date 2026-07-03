@@ -227,6 +227,27 @@ keystore (`packages/provider/keys.js`) owns `credentials.json`.
 - **Attribution:** every telemetry row and usage-ledger line carries `keyName`
   (alongside `appId` and `account`); pre-Phase-B entries render as `legacy`.
 
+## Session continuity (flat prompt size on long conversations)
+
+Every OpenAI-style request resends the whole history, and a fresh CLI spawn would
+re-ingest all of it. Instead the bridge resumes the CLI's own conversation and
+sends only the new turn. **claude only** (agy exposes no conversation id).
+
+- After each successful **claude** completion the store
+  (`packages/provider/continuity.js`) keys `sha256([routeId, normalized(messages
+  + assistantReply)])` → the `session_id` from the result line, tagged with the
+  serving account. In-memory, LRU 200, TTL 24h.
+- On a new request whose `messages[0..n-2]` hashes to a stored entry **and** the
+  owning account is the one selected, the bridge spawns `claude --resume
+  <session_id>` and sends **only** the trailing turn (verified live: `--resume`
+  carries prior context). Prompt size per call stays flat regardless of length.
+- **Pure accelerator, never a correctness dependency.** Any mismatch — edited
+  history, different route, a different account selected, or `BRIDGE_SESSIONS=0` —
+  silently falls back to a normal full-prompt spawn. A *failed* resume (e.g. the
+  session expired) retries the full prompt on the same account before any account
+  failover. Streaming continuity is a planned follow-up (streamed calls always
+  send the full prompt today, but are still remembered for later resumption).
+
 ## The packages
 
 ```
@@ -256,6 +277,8 @@ packages/
                       round-robin, pinning, needs-login, hot-reload
     keys.js           named API keys: v2 credentials, roles, account pins,
                       v1→v2 migration, mint/revoke/verify (0600)
+    continuity.js     session-resume store: prefix-hash → claude session_id,
+                      LRU/TTL, delta-only follow-ups (claude --resume)
     translate.js      OpenAI messages ⇄ prompt, tool-call parsing
     breaker.js        per-account circuit breaker
     semaphore.js      slot + bounded FIFO wait queue (one per account)
@@ -342,5 +365,6 @@ Six suites, ~410 assertions: `npm test`.
 | `BRIDGE_USAGE_DIR` / `BRIDGE_ROUTES_FILE` | runtime dir / routes.json | overridable for tests |
 | `BRIDGE_ACCOUNTS_FILE` | `.bridge-runtime/accounts.json` | multi-account pool config (absent → one implicit `default` account) |
 | `BRIDGE_CREDENTIALS_FILE` | `.bridge-runtime/credentials.json` | named-keys file (v2; v1 auto-migrates); env key layered on as implicit admin |
+| `BRIDGE_SESSIONS` | on | `0` disables claude session continuity (always full prompt) |
 | `BREAKER_TIMEOUT_COOLDOWN_MS` | 120000 | breaker open time after repeated timeouts |
 | `SSE_HEARTBEAT_MS` / `HEALTH_SAMPLE_MS` | 15000 / 30000 | stream pings / health sampling |
