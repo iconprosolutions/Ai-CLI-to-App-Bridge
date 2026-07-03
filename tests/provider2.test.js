@@ -518,6 +518,7 @@ async function main() {
   assert(r.status === 200 && (r.headers['content-type'] || '').includes('text/html') && r.body.includes('Control Center') && r.body.includes('app.js'),
     'dashboard index served as static HTML');
   assert(r.body.includes('data-view="accounts"') && r.body.includes('id="view-accounts"'), 'dashboard exposes the Accounts tab');
+  assert(r.body.includes('data-dim="account"') && r.body.includes('data-dim="key"') && r.body.includes('id="keys-table"'), 'dashboard exposes usage account/key dimension + key management');
   r = await request(P1, { path: '/dashboard/app.js' });
   assert(r.status === 200 && (r.headers['content-type'] || '').includes('javascript'), 'dashboard app.js served');
   assert(r.body.includes('renderAccounts') && r.body.includes('acct-probe'), 'dashboard app.js wires the Accounts tab');

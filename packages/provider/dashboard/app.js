@@ -10,6 +10,7 @@
     status: null,
     usage: null,
     usageRange: '7d',
+    usageDim: 'app',
     view: 'overview',
     live: true,
     compare: false,
@@ -305,16 +306,22 @@
       + '<div class="tile mint"><div class="tl">API-equivalent value</div><div class="big num">$' + (t.apiEquivalentUsd || 0).toFixed(2) + '</div><div class="sub">vs $0 marginal on subscription</div></div>'
       + '<div class="tile peach"><div class="tl">Top app</div><div class="big">' + esc(topApp ? topApp.appId : '—') + '</div><div class="sub">' + (topApp ? fmt(topApp.requests) + ' calls' : 'no traffic in range') + '</div></div>'
       + '<div class="tile plain"><div class="tl">Requests / errors</div><div class="big num">' + fmt(t.requests) + '</div><div class="sub">' + fmt(t.errors) + ' errors in range</div></div>';
-    $('us-apps').innerHTML = (u.perApp || []).map(function (a) {
-      var acc = a.usageAccuracy === 'real' ? '<span class="estb real">real</span>' : a.usageAccuracy === 'mixed' ? '<span class="estb real">mixed</span>' : '<span class="estb est">~est</span>';
+    var dim = state.usageDim || 'app';
+    var dimRows = dim === 'account' ? (u.perAccount || []) : dim === 'key' ? (u.perKey || []) : (u.perApp || []);
+    $('us-dim-label').textContent = dim === 'account' ? 'Account' : dim === 'key' ? 'Key' : 'App';
+    $('us-apps').innerHTML = dimRows.map(function (a) {
+      var name = dim === 'account' ? a.account : dim === 'key' ? a.keyName : a.appId;
+      var acc = dim === 'app'
+        ? (a.usageAccuracy === 'real' ? '<span class="estb real">real</span>' : a.usageAccuracy === 'mixed' ? '<span class="estb real">mixed</span>' : '<span class="estb est">~est</span>')
+        : '';
       return '<div class="trow" style="grid-template-columns:1.2fr 70px 90px 90px 95px 70px 70px">'
-        + '<span>' + esc(a.appId) + acc + '</span>'
+        + '<span>' + esc(name) + acc + '</span>'
         + '<span class="sub2 num">' + fmt(a.requests) + '</span>'
         + '<span class="sub2 num">' + ftok(a.promptTokens) + '</span>'
         + '<span class="sub2 num">' + ftok(a.completionTokens) + '</span>'
         + '<span class="sub2 num">$' + (a.apiEquivalentUsd || 0).toFixed(2) + '</span>'
         + '<span class="sub2 num">' + fmt(a.errors) + '</span>'
-        + '<span class="sub2 num">' + fmt(a.avgLatencyMs) + 'ms</span></div>';
+        + '<span class="sub2 num">' + (dim === 'app' ? fmt(a.avgLatencyMs) + 'ms' : '—') + '</span></div>';
     }).join('') || '<div class="empty">No usage in range</div>';
     $('us-note').textContent = u.note || '';
     var days = (u.perDay || []).slice(-14);
@@ -690,6 +697,13 @@
     state.usageRange = b.getAttribute('data-range');
     [].forEach.call(this.children, function (x) { x.classList.toggle('active', x === b); });
     fetchUsage();
+  });
+  $('us-dim').addEventListener('click', function (ev) {
+    var b = ev.target.closest('button');
+    if (!b) return;
+    state.usageDim = b.getAttribute('data-dim');
+    [].forEach.call(this.children, function (x) { x.classList.toggle('active', x === b); });
+    renderUsage();
   });
   $('t-rf').addEventListener('click', function (ev) {
     var b = ev.target.closest('button');
