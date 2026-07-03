@@ -427,6 +427,24 @@ async function main() {
   const new2 = fs.readFileSync(CONTLOG, 'utf8').trim().split('\n').slice(before2).filter((l) => l.includes('-p'));
   assert(new2.some((l) => l.includes('--resume') && l.includes('fake-session-1')), 'extending turn resumes with --resume <session_id>');
   assert(reply2.includes('continue') && !reply2.includes('hello'), 'resumed turn sends only the new delta, not the full history');
+  // Turn 3 — a STREAMING extension resumes the same way (delta only, pre-first-byte).
+  const before3 = fs.readFileSync(CONTLOG, 'utf8').trim().split('\n').length;
+  const t3 = await request(P23, {
+    path: '/v1/chat/completions', method: 'POST',
+    body: {
+      model: 'bridge-claude-haiku-4.5-spark',
+      stream: true,
+      messages: [
+        { role: 'user', content: 'hello' }, { role: 'assistant', content: reply1 },
+        { role: 'user', content: 'continue please' }, { role: 'assistant', content: reply2 },
+        { role: 'user', content: 'stream more' },
+      ],
+    },
+  });
+  const new3 = fs.readFileSync(CONTLOG, 'utf8').trim().split('\n').slice(before3).filter((l) => l.includes('-p'));
+  const streamed3 = parseSse(t3.body).map((e) => (e.choices && e.choices[0].delta && e.choices[0].delta.content) || '').join('');
+  assert(new3.some((l) => l.includes('--resume') && l.includes('fake-session-1')), 'streaming extension also resumes with --resume');
+  assert(streamed3.includes('stream more') && !streamed3.includes('hello'), 'streaming resume streams only the new delta');
   // BRIDGE_SESSIONS=0 disables continuity end-to-end.
   const CONT2LOG = path.join(TMP, 'cont2.log');
   const CLAUDE_CONT2 = writeStub('claude-cont2.sh', 'claude-sim', { FAKE_CLI_LOG: CONT2LOG });

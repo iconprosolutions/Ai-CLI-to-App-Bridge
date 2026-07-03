@@ -504,7 +504,9 @@ app.post('/v1/chat/completions', async (req, res) => {
       } catch (err) {
         // A failed resume on the same account (e.g. the session expired) → one
         // retry with the full prompt on the same account, before account failover.
+        // onFailover drops any partial stream state the failed resume buffered.
         if (rid && canFailover() && !clientAborted) {
+          if (onFailover) onFailover();
           console.log(`[req ${reqId}] resume failed (${err.kind || 'err'}); retrying full prompt on ${sel.account.name}`);
           try {
             return await adapter.invoke({ prompt: fullPrompt, model: route.model, signal: ac.signal, onDelta, env: pool.envFor(route.engine, sel.account) });
@@ -565,6 +567,25 @@ app.post('/v1/chat/completions', async (req, res) => {
       }
     };
 
+    // Session continuity (claude only): if this conversation extends one we
+    // served on the SAME account, resume it and send just the new turn. `prompt`
+    // (the full flatten) stays intact for retries and any failover. Shared by
+    // both the streaming and non-streaming paths below.
+    let resumeId = null;
+    let sendPrompt = prompt;
+    if (route.engine === 'claude' && !rerouted && continuity.enabled) {
+      const cont = continuity.lookup(route.id, messages);
+      if (cont && cont.engine === 'claude' && cont.account === sel.account.name) {
+        resumeId = cont.resumeId;
+        sendPrompt = messagesToPrompt(cont.deltaMessages, {
+          tools: toolsProvided ? toolsList : null, toolChoice, forcedToolName, responseFormat: body.response_format,
+        });
+        estPromptTokens = estimateTokens(sendPrompt);
+        if (cap) cap.sentPrompt = sendPrompt;
+        console.log(`[req ${reqId}] resuming ${route.engine}:${sel.account.name} session ${resumeId} (delta only)`);
+      }
+    }
+
     if (body.stream === true) {
       const completionId = 'chatcmpl-' + crypto.randomBytes(8).toString('hex');
       const createdTs = Math.floor(Date.now() / 1000);
@@ -623,9 +644,9 @@ app.post('/v1/chat/completions', async (req, res) => {
       let result;
       try {
         result = await invokeWithFailover({
-          prompt,
+          prompt: sendPrompt,
           fullPrompt: prompt,
-          resumeId: null, // streaming continuity is a follow-up; stream always sends full
+          resumeId, // resume pre-first-byte; the hold-back keeps output buffered until parse
           onDelta: feed,
           canFailover: () => !streamedBytes,
           onFailover: () => { held = ''; holding = toolsProvided; }, // drop the failed attempt's held head
@@ -692,24 +713,6 @@ app.post('/v1/chat/completions', async (req, res) => {
         })}\n\n`);
       }
       return endStream();
-    }
-
-    // Session continuity (claude only, non-streaming): if this conversation
-    // extends one we served on the SAME account, resume it and send just the new
-    // turn. `prompt` (the full flatten) stays intact for retries and failover.
-    let resumeId = null;
-    let sendPrompt = prompt;
-    if (route.engine === 'claude' && !rerouted && continuity.enabled) {
-      const cont = continuity.lookup(route.id, messages);
-      if (cont && cont.engine === 'claude' && cont.account === sel.account.name) {
-        resumeId = cont.resumeId;
-        sendPrompt = messagesToPrompt(cont.deltaMessages, {
-          tools: toolsProvided ? toolsList : null, toolChoice, forcedToolName, responseFormat: body.response_format,
-        });
-        estPromptTokens = estimateTokens(sendPrompt);
-        if (cap) cap.sentPrompt = sendPrompt;
-        console.log(`[req ${reqId}] resuming ${route.engine}:${sel.account.name} session ${resumeId} (delta only)`);
-      }
     }
 
     let result;
