@@ -159,6 +159,15 @@ app.get('/dashboard/status', async (req, res) => {
       history: telemetry.healthHistory[e].slice(-120),
     };
   });
+  // Annotate each account with the identity currently signed in for its config
+  // dir (read from disk, no CLI call) so the operator can see who's logged in.
+  const accountsSnap = pool.snapshot();
+  for (const e of ENGINE_NAMES) {
+    for (const a of accountsSnap[e]) {
+      const acct = pool.accounts(e).find((x) => x.name === a.name);
+      try { a.identity = adapters[e].identity(pool.envFor(e, acct)); } catch (_) { a.identity = null; }
+    }
+  }
   const origin = `${req.protocol}://${req.get('host')}`;
   res.json({
     status: 'ok',
@@ -168,7 +177,7 @@ app.get('/dashboard/status', async (req, res) => {
     inflight: Object.fromEntries(ENGINE_NAMES.map((e) => [e, pool.inflight(e)])),
     queue: Object.fromEntries(ENGINE_NAMES.map((e) => [e, pool.queued(e)])),
     breakers: Object.fromEntries(ENGINE_NAMES.map((e) => [e, pool.engineBreakerStatus(e)])),
-    accounts: pool.snapshot(),
+    accounts: accountsSnap,
     capture: { enabled: capture.enabled, count: capture.size },
     activeRequests: [...activeRequests.values()].map((a) => ({
       id: a.id, routeId: a.routeId, engine: a.engine, appId: a.appId, startedAt: a.startedAt, streaming: a.streaming,

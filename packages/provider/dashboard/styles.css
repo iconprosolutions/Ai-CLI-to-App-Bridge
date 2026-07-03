@@ -84,6 +84,8 @@
   .loginbox{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:10px 0 4px;padding:9px 11px;background:var(--tint-peach);border-radius:var(--r-sm)}
   .loginbox .eyebrow{width:100%;color:var(--warn)}
   .loginbox code{font-family:var(--mono);font-size:11px;word-break:break-all;color:var(--ink)}
+  .idmail{font-weight:500;color:var(--ink);word-break:break-all}
+  .idwarn{color:var(--warn);font-family:var(--mono);font-size:11px;text-transform:uppercase;letter-spacing:.04em}
   .abtn{font-family:var(--mono);font-size:10px;font-weight:500;text-transform:uppercase;letter-spacing:.05em;color:var(--ink);background:var(--canvas);border:1px solid var(--hairline);border-radius:var(--r-xs);padding:7px 12px}
   .abtn:hover{border-color:var(--ink)}
   .abtn.danger{color:var(--down)}

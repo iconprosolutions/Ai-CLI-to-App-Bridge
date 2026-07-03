@@ -1,6 +1,7 @@
 'use strict';
 
 const { runCli, BridgeError, createAnsiStripper, stripAnsi, collapseCarriageReturns } = require('@bridge/core');
+const { geminiIdentity } = require('./identity');
 
 // Antigravity model names are display names. (Moved from gemini-bridge.)
 const CANDIDATE_MODELS = [
@@ -102,6 +103,11 @@ function createAgyAdapter(opts = {}) {
         usage: null, // agy reports no token counts — caller estimates
         stopReason: 'end_turn',
       };
+    },
+
+    // Which Google account is signed in for this spawn's HOME (no CLI call).
+    identity(env) {
+      return geminiIdentity((env && env.HOME) || process.env.HOME || null);
     },
 
     async listModels({ refresh = false } = {}) {

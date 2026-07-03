@@ -85,6 +85,25 @@ function parseSse(body) {
 async function main() {
   console.log('# Consolidated provider — verification (fake CLIs, in-process adapters)');
 
+  // ── Account identity readers (pure, no HTTP/CLI) ──────────────────────
+  console.log('\n## identity.js — signed-in account readers');
+  {
+    const { claudeIdentity, geminiIdentity } = require(path.join(REPO, 'packages', 'adapters', 'identity.js'));
+    const idDir = fs.mkdtempSync(path.join(os.tmpdir(), 'id-'));
+    fs.writeFileSync(path.join(idDir, '.claude.json'), JSON.stringify({
+      oauthAccount: { emailAddress: 'a@b.com', displayName: 'A', organizationName: 'Org', organizationType: 'claude_max' },
+    }));
+    const ci = claudeIdentity(idDir);
+    assert(ci && ci.email === 'a@b.com' && ci.label === 'A' && ci.plan === 'claude_max', 'claudeIdentity reads oauthAccount from <dir>/.claude.json');
+    assert(claudeIdentity(path.join(idDir, 'nope')) === null, 'claudeIdentity → null when no config (no crash)');
+    fs.writeFileSync(path.join(idDir, 'blank.json'), '{}');
+    fs.mkdirSync(path.join(idDir, '.gemini'));
+    fs.writeFileSync(path.join(idDir, '.gemini', 'google_accounts.json'), JSON.stringify({ active: 'g@b.com', old: ['x@y.com'] }));
+    const gi = geminiIdentity(idDir);
+    assert(gi && gi.email === 'g@b.com', 'geminiIdentity reads the active Google account');
+    assert(geminiIdentity(path.join(idDir, 'nope')) === null, 'geminiIdentity → null when no config (no crash)');
+  }
+
   // ── Routes registry unit checks ─────────────────────────────────────
   console.log('\n## routes.js — validation + reload');
   const { validateRoutes, createRouteRegistry } = require(path.join(REPO, 'packages', 'provider', 'routes.js'));
@@ -752,6 +771,20 @@ async function main() {
     assert(Array.isArray(st.accounts.claude) && st.accounts.claude.length === 2
       && st.accounts.gemini.length === 1 && st.accounts.claude[0].needsLogin === false,
     'status exposes the account pool');
+  }
+
+  // Signed-in identity surfaces per account from its config dir. Write a
+  // .claude.json into w1's dir (the pool created it under the runtime baseDir).
+  fs.writeFileSync(path.join(TMP, 'acct', 'claude', 'w1', '.claude.json'), JSON.stringify({
+    oauthAccount: { emailAddress: 'w1@team.com', displayName: 'W One', organizationType: 'claude_max' },
+  }));
+  r = await request(P15, { path: '/dashboard/status' });
+  {
+    const st = JSON.parse(r.body);
+    const w1 = st.accounts.claude.find((a) => a.name === 'w1');
+    const w2 = st.accounts.claude.find((a) => a.name === 'w2');
+    assert(w1.identity && w1.identity.email === 'w1@team.com' && w1.identity.plan === 'claude_max', 'status shows the signed-in account per credential dir');
+    assert(w2.identity === null, 'an account with no login reports identity null (surfaces as "not signed in")');
   }
 
   // Admin enable/disable of a pooled account (in-memory, removes from rotation).

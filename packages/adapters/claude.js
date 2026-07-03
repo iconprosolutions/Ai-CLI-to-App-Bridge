@@ -1,6 +1,7 @@
 'use strict';
 
 const { runCli, BridgeError } = require('@bridge/core');
+const { claudeIdentity } = require('./identity');
 
 // Static catalogue — Claude Code has no free model-listing command; this
 // mirrors what the CLI accepts. (Moved from claude-bridge KNOWN_MODELS.)
@@ -158,6 +159,11 @@ function createClaudeAdapter(opts = {}) {
 
     async listModels() {
       return KNOWN_MODELS;
+    },
+
+    // Which account is signed in for this spawn's config dir (no CLI call).
+    identity(env) {
+      return claudeIdentity((env && env.CLAUDE_CONFIG_DIR) || process.env.CLAUDE_CONFIG_DIR || null);
     },
 
     async healthCheck() {

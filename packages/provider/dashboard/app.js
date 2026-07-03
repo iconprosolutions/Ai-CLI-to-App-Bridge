@@ -37,6 +37,18 @@
   }
   function tval(d) { return new Date(d).toLocaleTimeString(); }
   function pct(a, b) { return b ? Math.round((a / b) * 100) : 0; }
+  function prettyPlan(p) {
+    if (!p) return '';
+    return String(p).replace(/^claude[_-]?/i, '').replace(/_/g, ' ').replace(/\b\w/g, function (c) { return c.toUpperCase(); });
+  }
+  // Renders "who is signed in" for an account; flags a blank/expired login.
+  function identityHtml(id) {
+    if (!id || !id.email) return '<span class="idwarn">not signed in</span>';
+    var sub = [];
+    if (id.org) sub.push(esc(id.org));
+    if (id.plan) sub.push(esc(prettyPlan(id.plan)));
+    return '<span class="idmail">' + esc(id.email) + '</span>' + (sub.length ? '<div class="sub2">' + sub.join(' · ') + '</div>' : '');
+  }
 
   // ── Transport ─────────────────────────────────────────────────────────
   function fetchStatus() {
@@ -149,6 +161,13 @@
     return out;
   }
 
+  function engineIdentityCell(e) {
+    var accts = (state.status.accounts && state.status.accounts[e]) || [];
+    if (!accts.length) return '<span class="sub2">no account</span>';
+    if (accts.length === 1) return identityHtml(accts[0].identity);
+    var signedIn = accts.filter(function (a) { return a.identity && a.identity.email; }).length;
+    return '<span class="idmail">' + accts.length + ' accounts</span> <span class="sub2">' + signedIn + ' signed in · see Accounts tab</span>';
+  }
   function renderEngines() {
     var s = state.status;
     var lastErrByEngine = {};
@@ -170,6 +189,7 @@
         + '<div class="erow"><span class="ename">' + esc(e) + '</span><span class="emodel">' + esc(eng.detail || '') + '</span><span class="spacer"></span>'
         + '<span class="sbadge ' + badgeCls + '"><i></i>' + esc(badgeTxt) + '</span></div>'
         + '<div class="ekv">'
+        + '<span class="k">Signed in</span><span>' + engineIdentityCell(e) + '</span>'
         + '<span class="k">Breaker</span><span>' + esc(b.state) + (b.reason ? ' · ' + esc(b.reason) : '') + (b.state === 'open' ? ' · retry ~' + b.retryInSec + 's' : '') + '</span>'
         + '<span class="k">Slots</span><span class="pips">' + pips + '<span class="sub2" style="margin-left:6px">' + (s.inflight[e] || 0) + '/' + max + (s.queue[e] ? ' · ' + s.queue[e] + ' queued' : '') + '</span></span>'
         + '<span class="k">Last error</span><span class="sub2">' + (lastErr ? esc(lastErr.status + ' · ' + (lastErr.label || '') + ' · ' + tval(lastErr.at)) : 'none in window') + '</span>'
@@ -277,6 +297,7 @@
           + (a.implicit ? '<span class="chip" style="background:var(--tint-mint)">default</span>' : '')
           + '<span class="spacer"></span><span class="sbadge ' + badgeCls + '"><i></i>' + esc(st.label) + '</span></div>'
           + '<div class="ekv">'
+          + '<span class="k">Signed in</span><span>' + identityHtml(a.identity) + '</span>'
           + '<span class="k">Breaker</span><span>' + esc(b.state || 'closed') + (b.reason ? ' · ' + esc(b.reason) : '') + (b.state === 'open' ? ' · retry ~' + b.retryInSec + 's' : '') + '</span>'
           + '<span class="k">Slots</span><span class="pips">' + pips + '<span class="sub2" style="margin-left:6px">' + (a.inflight || 0) + '/' + max + (a.queued ? ' · ' + a.queued + ' queued' : '') + '</span></span>'
           + '<span class="k">Usage</span><span class="sub2">' + (u ? ftok(u.promptTokens + u.completionTokens) + ' tok · $' + (u.apiEquivalentUsd || 0).toFixed(2) + ' · ' + fmt(u.requests) + ' calls' : 'none in range') + '</span>'
