@@ -1,0 +1,17 @@
+# Keep the image slim and the build context small. node_modules is reinstalled
+# in-image; the legacy per-engine bridges and dev-only files aren't used by the
+# consolidated provider that Docker runs.
+**/node_modules
+.git
+.bridge-runtime
+deploy/data
+docs
+tests
+claude-bridge
+gemini-bridge
+provider-bridge
+claude-mcp-delegate
+*.log
+.env
+.env.*
+.DS_Store

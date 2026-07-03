@@ -1,0 +1,31 @@
+# Bridge Server Edition — LAN-only deployment (e.g. the Ugreen NAS).
+# BIND_HOST=0.0.0.0 is container-internal; the NAS firewall / LAN is the trust
+# boundary. Do NOT expose this port to the internet — put an HTTPS reverse proxy
+# in front if you ever must.
+services:
+  bridge:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: ai-cli-bridge:latest
+    container_name: ai-cli-bridge
+    restart: unless-stopped
+    ports:
+      - "9011:9011"
+    environment:
+      - PROVIDER_PORT=9011
+      - BIND_HOST=0.0.0.0
+      # Uncomment to pin a fixed admin key instead of the auto-generated one:
+      # - PROVIDER_API_KEY=${PROVIDER_API_KEY}
+    volumes:
+      # The entire durable state: credentials.json (named keys), accounts.json
+      # (pool config) + per-account credential dirs under accounts/, the usage
+      # ledger, and connection.json. Back this one directory up and you have
+      # everything. routes.json + pricing.json ship baked into the image; mount
+      # them here too only if you customize them.
+      - ./data/runtime:/app/.bridge-runtime
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9011/dashboard/status"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

@@ -15,8 +15,8 @@ gemini-bridge/contexts/clients/*.md
 # Personal agency context is committed as a generic template.
 # If you customize it with private info, add it to your own .gitignore.
 
-# Docker build artifacts
-.dockerignore
+# Deploy data (per-host runtime state; never committed)
+deploy/data/
 
 # OS
 .DS_Store
