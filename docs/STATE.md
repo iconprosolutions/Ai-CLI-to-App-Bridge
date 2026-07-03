@@ -83,16 +83,23 @@ implementation commits), unpushed, not merged to main.
 
 Nothing blocked.
 
+- **Server Edition Phase D (Docker + NAS deploy) — artifacts shipped.**
+  `deploy/Dockerfile` (node:22-slim, claude via npm, non-root, healthcheck),
+  `deploy/entrypoint.sh`, `deploy/docker-compose.yml` (9011, single runtime
+  volume, restart), `scripts/account-login.sh`, `docs/DEPLOY-NAS.md`. Spike D0
+  resolved: agy is a macOS-only binary → NAS ships **claude-only**, gemini
+  degrades gracefully. Container runtime config verified locally (bootstrap +
+  boot + auth); the actual `docker build` + live deploy to 192.168.1.10 need the
+  operator present.
+
 ## Up Next
 
-- User review of the live dashboard at http://127.0.0.1:9011/dashboard/
-- Decide merge/push of `feat/dashboard-overhaul`
-- Server Edition remaining phases (per
-  `docs/superpowers/specs/2026-07-02-server-edition-design.md`): **D** Docker
-  image + NAS deploy — artifacts (Dockerfile, compose, onboarding script,
-  DEPLOY-NAS.md) can be authored now, but the live deploy to 192.168.1.10 and
-  agy-on-linux auth (Spike D0) need the operator present; **E** gap mitigations
-  (session continuity, overflow policy, tool-call hardening) — codeable/testable
-  locally, independent of D.
+- **The whole Server Edition (Phases A–E) is implemented on `feat/dashboard-overhaul`.**
+  Decide push/PR/merge. Nothing is pushed yet.
+- **Operator-gated:** run the NAS deploy (`docs/DEPLOY-NAS.md`) — `docker build`,
+  onboard Claude accounts, point Hermes at `http://192.168.1.10:9011/v1`.
+- **Small follow-up:** streaming session continuity (non-streaming ships; streamed
+  calls send full prompt but are already remembered for later resumption). An
+  agy linux-amd64 binary would re-enable gemini on the NAS.
 - Later (out of scope per spec): real image handoff, CLI session continuity
   (`--resume`), deleting the legacy provider-bridge once nothing depends on it.
