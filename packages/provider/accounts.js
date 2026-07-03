@@ -171,6 +171,16 @@ function createAccountPool({
     for (const a of (state[engine] ? state[engine].accounts : [])) a.breaker.reset();
   }
 
+  // Runtime enable/disable, mirroring engine-level disable. In-memory: an
+  // accounts.json reload reasserts the file's `enabled` value (file is truth).
+  function setEnabled(engine, name, enabled) {
+    const acct = state[engine] && state[engine].accounts.find((a) => a.name === name);
+    if (!acct) return null;
+    acct.enabled = Boolean(enabled);
+    emit({ kind: 'enabled', engine, account: name, enabled: acct.enabled });
+    return acct;
+  }
+
   // Engine-level aggregate kept for the existing dashboard/status contract:
   // closed while any account can take traffic; open (min retry) when none can.
   function engineBreakerStatus(engine) {
@@ -205,7 +215,7 @@ function createAccountPool({
   }
 
   return {
-    select, envFor, feedback, clearNeedsLogin, resetBreakers, engineBreakerStatus, snapshot,
+    select, envFor, feedback, clearNeedsLogin, resetBreakers, setEnabled, engineBreakerStatus, snapshot,
     inflight: (engine) => sums(engine, 'active'),
     queued: (engine) => sums(engine, 'queued'),
     accounts: (engine) => (state[engine] ? state[engine].accounts.slice() : []),

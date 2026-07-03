@@ -72,6 +72,17 @@ function createAdminRouter({
     }
   });
 
+  // Runtime enable/disable of a pooled account (in-memory; accounts.json wins on reload).
+  router.post('/accounts/:engine/:name/:op(enable|disable)', (req, res) => {
+    const engine = engineOr404(req, res);
+    if (!engine) return undefined;
+    const enabled = req.params.op === 'enable';
+    const acct = pool.setEnabled(engine, req.params.name, enabled);
+    if (!acct) return res.status(404).json({ error: `Unknown account "${engine}:${req.params.name}"` });
+    events.emit('account.change', { kind: 'enabled', engine, account: acct.name, enabled });
+    return res.json({ engine, account: acct.name, enabled });
+  });
+
   // ── Engines ────────────────────────────────────────────────────────────
   router.post('/engines/:engine/probe', async (req, res) => {
     const engine = engineOr404(req, res);

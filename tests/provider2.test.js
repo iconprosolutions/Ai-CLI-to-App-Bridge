@@ -680,9 +680,9 @@ async function main() {
   }));
   const CLAUDE_ACCT = writeStub('claude-acct.sh', 'claude-sim', { FAKE_CLI_ENV_LOG: ENVLOG15 });
   const AGY_ACCT = writeStub('agy-acct.sh', 'agy-sim', { FAKE_CLI_ENV_LOG: ENVLOG15 });
-  await bootProvider(P15, { CLAUDE_PATH: CLAUDE_ACCT, GEMINI_PATH: AGY_ACCT, BRIDGE_ACCOUNTS_FILE: ACCTS15 });
+  await bootProvider(P15, { CLAUDE_PATH: CLAUDE_ACCT, GEMINI_PATH: AGY_ACCT, BRIDGE_ACCOUNTS_FILE: ACCTS15, PROVIDER_API_KEY: 'adm15' });
   const call15 = (model) => request(P15, {
-    path: '/v1/chat/completions', method: 'POST',
+    path: '/v1/chat/completions', method: 'POST', headers: { Authorization: 'Bearer adm15' },
     body: { model, messages: [{ role: 'user', content: 'hi' }] },
   });
   await call15('bridge-claude-haiku-4.5-spark');
@@ -701,6 +701,21 @@ async function main() {
       && st.accounts.gemini.length === 1 && st.accounts.claude[0].needsLogin === false,
     'status exposes the account pool');
   }
+
+  // Admin enable/disable of a pooled account (in-memory, removes from rotation).
+  r = await request(P15, { path: '/admin/accounts/claude/nope/disable', method: 'POST', headers: { Authorization: 'Bearer adm15' } });
+  assert(r.status === 404, 'disabling an unknown account → 404');
+  const adBefore = fs.readFileSync(ENVLOG15, 'utf8').trim().split('\n').length;
+  r = await request(P15, { path: '/admin/accounts/claude/w2/disable', method: 'POST', headers: { Authorization: 'Bearer adm15' } });
+  assert(r.status === 200 && JSON.parse(r.body).enabled === false, 'admin disables account w2');
+  await call15('bridge-claude-haiku-4.5-spark');
+  await call15('bridge-claude-haiku-4.5-spark');
+  const adAfter = fs.readFileSync(ENVLOG15, 'utf8').trim().split('\n').slice(adBefore).map(JSON.parse).filter((l) => l.argv.includes('-p'));
+  assert(adAfter.length === 2 && adAfter.every((l) => /w1$/.test(l.CLAUDE_CONFIG_DIR)), 'disabled account is skipped — both calls route to w1');
+  r = await request(P15, { path: '/dashboard/status' });
+  assert(JSON.parse(r.body).accounts.claude.find((a) => a.name === 'w2').enabled === false, 'status reflects the disabled account');
+  r = await request(P15, { path: '/admin/accounts/claude/w2/enable', method: 'POST', headers: { Authorization: 'Bearer adm15' } });
+  assert(r.status === 200 && JSON.parse(r.body).enabled === true, 'admin re-enables account w2');
 
   // ── Multi-account: quota failover then exhaustion ─────────────────────
   const P16 = 19550;
