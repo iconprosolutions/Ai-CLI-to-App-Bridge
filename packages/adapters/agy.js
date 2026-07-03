@@ -67,7 +67,8 @@ function createAgyAdapter(opts = {}) {
       const promptBytes = Buffer.byteLength(prompt || '', 'utf8');
       if (promptBytes > maxPromptBytes) {
         throw new BridgeError('invalid_request',
-          `Prompt too large for the Antigravity CLI (${promptBytes} bytes; limit ${maxPromptBytes}). Trim the conversation history.`);
+          `Prompt too large for the Antigravity (Gemini) CLI: ${promptBytes} bytes exceeds the ${maxPromptBytes}-byte cap (agy passes the prompt as a command-line argument, so ARG_MAX applies). Remedies: send this request to a Claude route (uses stdin, no cap), shorten the conversation history, or enable session continuity so only new turns are sent.`,
+          { code: 'prompt_overflow' });
       }
       const args = ['--print', prompt, '--model', selected, '--print-timeout', `${Math.ceil(timeoutMs / 1000)}s`];
       const ansi = createAnsiStripper();

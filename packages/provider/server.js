@@ -123,6 +123,13 @@ function looksLikeToolAttempt(t) {
   return /"tool_calls"|```json/i.test(String(t));
 }
 
+// Max prompt bytes an engine accepts: agy passes the prompt as a CLI argument
+// (ARG_MAX-bound, ~200KB); claude streams it over stdin (effectively uncapped).
+const MAX_PROMPT_BYTES = intEnv('MAX_PROMPT_BYTES', 200 * 1024);
+function engineCap(engine) {
+  return engine === 'gemini' ? MAX_PROMPT_BYTES : Infinity;
+}
+
 function sendError(res, status, message, type, param, retryAfterSec) {
   if (retryAfterSec) res.set('Retry-After', String(retryAfterSec));
   return res.status(status).json(openaiErrorBody(message, type, param));
@@ -246,11 +253,9 @@ app.post('/v1/chat/completions', async (req, res) => {
   const started = Date.now();
   const body = req.body || {};
   const aliasUsed = body.model;
-  const route = registry.resolve(aliasUsed);
+  let route = registry.resolve(aliasUsed); // may be reassigned by overflow reroute
   const appId = appIdFrom(req);
   const keyName = (req.auth && req.auth.name) || null;
-  // A key may pin the engine to a specific account (key pin → route pin → pool).
-  const keyPin = req.auth && req.auth.accountPin && route ? req.auth.accountPin[route.engine] || null : null;
   let estPromptTokens = 0;
   let estCompletionTokens = 0;
   let usageSource = 'estimated';
@@ -360,10 +365,54 @@ app.post('/v1/chat/completions', async (req, res) => {
     }
   }
 
+  // Flatten the prompt up front (before taking a lane) so an oversized prompt
+  // for a capped engine can be rejected — or rerouted — without spawning.
+  const toolsList = body.tools || body.functions;
+  const tc = body.tool_choice;
+  let toolChoice = 'auto';
+  let forcedToolName = null;
+  if (tc === 'none') toolChoice = 'none';
+  else if (tc === 'required') toolChoice = 'required';
+  else if (tc && typeof tc === 'object' && tc.type === 'function' && tc.function && tc.function.name) {
+    toolChoice = 'required';
+    forcedToolName = tc.function.name;
+  }
+  // Only ever interpret model output as tool calls when the caller actually sent
+  // tools — otherwise a reply that *discusses* a tool_calls payload is hijacked.
+  const toolsProvided = Array.isArray(toolsList) && toolsList.length > 0 && toolChoice !== 'none';
+  const prompt = messagesToPrompt(messages, {
+    tools: toolsProvided ? toolsList : null,
+    toolChoice,
+    forcedToolName,
+    responseFormat: body.response_format,
+  });
+  estPromptTokens = estimateTokens(prompt);
+
+  // Oversized-prompt policy: over the engine's cap → loud 400 with remedies, or
+  // a one-time reroute to a declared different-engine fallback (marked in the
+  // reply so the caller always knows it was moved).
+  let rerouted = null;
+  {
+    const promptBytes = Buffer.byteLength(prompt, 'utf8');
+    if (promptBytes > engineCap(route.engine)) {
+      const fb = route.overflowFallback ? registry.resolve(route.overflowFallback) : null;
+      if (fb && promptBytes <= engineCap(fb.engine)) {
+        rerouted = { from: route.id, to: fb.id, reason: 'prompt_overflow', bytes: promptBytes };
+        console.log(`[req ${reqId}] prompt overflow ${promptBytes}B → reroute ${route.id} → ${fb.id}`);
+        route = fb;
+      } else {
+        record(400);
+        return sendError(res, 400, `Prompt is ${promptBytes} bytes, over the ${engineCap(route.engine)}-byte cap for the "${route.engine}" engine. Send it to a Claude route (uncapped stdin), shorten the conversation history, or set "overflowFallback" on this route.`, 'invalid_request_error', 'messages');
+      }
+    }
+  }
+
   // Account selection precedence: key pin → route pin → pool rotation. Pinned
   // requests fail loud rather than silently switching accounts. Per-account
   // breakers make a known-exhausted account fail fast (or rotate past it)
-  // instead of spawning a doomed CLI run.
+  // instead of spawning a doomed CLI run. Key pin → route pin → pool rotation;
+  // recomputed against the (possibly rerouted) engine.
+  const keyPin = (req.auth && req.auth.accountPin && req.auth.accountPin[route.engine]) || null;
   const pin = keyPin || route.account || null;
   let sel = pool.select(route.engine, { pin });
   if (!sel.ok) {
@@ -413,30 +462,8 @@ app.post('/v1/chat/completions', async (req, res) => {
   const queuedMs = Date.now() - started;
 
   try {
-    const toolsList = body.tools || body.functions;
-    // tool_choice: 'none' disables tools entirely; 'required' or a named
-    // function demands a call (enforced with one corrective retry on the
-    // non-streaming path).
-    const tc = body.tool_choice;
-    let toolChoice = 'auto';
-    let forcedToolName = null;
-    if (tc === 'none') toolChoice = 'none';
-    else if (tc === 'required') toolChoice = 'required';
-    else if (tc && typeof tc === 'object' && tc.type === 'function' && tc.function && tc.function.name) {
-      toolChoice = 'required';
-      forcedToolName = tc.function.name;
-    }
-    // Only ever interpret model output as tool calls when the caller actually
-    // sent tools — otherwise a reply that *discusses* a tool_calls payload
-    // would be hijacked into a real tool call.
-    const toolsProvided = Array.isArray(toolsList) && toolsList.length > 0 && toolChoice !== 'none';
-    const prompt = messagesToPrompt(messages, {
-      tools: toolsProvided ? toolsList : null,
-      toolChoice,
-      forcedToolName,
-      responseFormat: body.response_format,
-    });
-    estPromptTokens = estimateTokens(prompt);
+    // prompt / toolsProvided / toolChoice / forcedToolName were built up front
+    // (before lane acquisition) for the oversized-prompt pre-flight above.
 
     // Opt-in debug capture (memory-only ring buffer; null when capture off).
     const cap = capture.start({
@@ -531,7 +558,7 @@ app.post('/v1/chat/completions', async (req, res) => {
         'Connection': 'keep-alive',
       });
       res.flushHeaders();
-      res.write(`data: ${JSON.stringify({ ...chunkBase, choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }] })}\n\n`);
+      res.write(`data: ${JSON.stringify({ ...chunkBase, ...(rerouted ? { bridge_rerouted: rerouted } : {}), choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }] })}\n\n`);
 
       // CLIs can be silent for minutes before the first byte; comments keep
       // proxies and client idle-timeouts from dropping the stream.
@@ -737,6 +764,7 @@ app.post('/v1/chat/completions', async (req, res) => {
       },
     };
     if (ignoredParams.length) completion.bridge_ignored_params = ignoredParams;
+    if (rerouted) completion.bridge_rerouted = rerouted;
     record(200);
     return res.status(200).json(completion);
   } finally {

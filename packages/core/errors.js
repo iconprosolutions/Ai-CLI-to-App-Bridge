@@ -25,6 +25,9 @@ class BridgeError extends Error {
     this.kind = kind;
     if (opts.detail !== undefined) this.detail = opts.detail;
     if (opts.retryAfterSec !== undefined) this.retryAfterSec = opts.retryAfterSec;
+    // Optional fine-grained tag within a kind (e.g. 'prompt_overflow' inside
+    // invalid_request) so the edge can special-case without string matching.
+    if (opts.code !== undefined) this.code = opts.code;
   }
 }
 

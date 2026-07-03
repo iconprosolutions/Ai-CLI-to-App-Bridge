@@ -28,6 +28,16 @@ function validateRoutes(data) {
       seen.add(a);
     }
   }
+  // overflowFallback (oversized-prompt policy): must name a real route on a
+  // different engine (only agy is argv-capped; the fallback is a Claude route).
+  const routeById = new Map(data.routes.map((r) => [r.id, r]));
+  for (const r of data.routes) {
+    if (r.overflowFallback === undefined) continue;
+    const target = typeof r.overflowFallback === 'string' ? routeById.get(r.overflowFallback) : null;
+    if (!target) throw new Error(`routes.json: "overflowFallback" must name an existing route id on ${r.id}`);
+    if (target.id === r.id) throw new Error(`routes.json: "overflowFallback" cannot point to itself on ${r.id}`);
+    if (target.engine === r.engine) throw new Error(`routes.json: "overflowFallback" on ${r.id} must target a different engine`);
+  }
   if (typeof data.defaultRoute !== 'string' || !data.routes.some((r) => r.id === data.defaultRoute)) {
     throw new Error('routes.json: "defaultRoute" must name an existing route id');
   }

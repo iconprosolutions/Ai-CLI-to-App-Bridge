@@ -117,6 +117,15 @@ async function main() {
   threw = false;
   try { validateRoutes({ defaultRoute: 'a', routes: [{ id: 'a', label: 'x', engine: 'claude', model: 'm', account: 'bad name!' }] }); } catch (e) { threw = /account/.test(e.message); }
   assert(threw, 'bad account pin rejected');
+  // overflowFallback validation
+  assert(validateRoutes({ defaultRoute: 'a', routes: [{ id: 'a', label: 'x', engine: 'gemini', model: 'm', overflowFallback: 'b' }, { id: 'b', label: 'y', engine: 'claude', model: 'm' }] }).routes[0].overflowFallback === 'b',
+    'overflowFallback to a different engine accepted');
+  threw = false;
+  try { validateRoutes({ defaultRoute: 'a', routes: [{ id: 'a', label: 'x', engine: 'gemini', model: 'm', overflowFallback: 'nope' }] }); } catch (e) { threw = /overflowFallback/.test(e.message); }
+  assert(threw, 'overflowFallback to a nonexistent route rejected');
+  threw = false;
+  try { validateRoutes({ defaultRoute: 'a', routes: [{ id: 'a', label: 'x', engine: 'gemini', model: 'm', overflowFallback: 'b' }, { id: 'b', label: 'y', engine: 'gemini', model: 'm' }] }); } catch (e) { threw = /overflowFallback/.test(e.message); }
+  assert(threw, 'overflowFallback to the same engine rejected');
   const routesFile = path.join(TMP, 'routes.json');
   fs.writeFileSync(routesFile, JSON.stringify({ defaultRoute: 'r1', routes: [{ id: 'r1', label: 'R1', engine: 'claude', model: 'm1', aliases: ['fast'] }] }));
   const reg = createRouteRegistry(routesFile, { watch: false, logger: { log: () => {}, error: () => {} } });
@@ -325,6 +334,51 @@ async function main() {
     assert(toolDelta && toolDelta.choices[0].delta.tool_calls[0].function.name === 'read_file' && !leaked,
       'streaming malformed tool JSON is retried pre-first-byte; no raw JSON leaks as content');
   }
+
+  // ── §5 oversized-prompt policy: loud 400 + opt-in reroute ──────────────
+  console.log('\n## Oversized-prompt policy (overflow → 400 / reroute)');
+  const OV_ROUTES = path.join(TMP, 'ov-routes.json');
+  fs.writeFileSync(OV_ROUTES, JSON.stringify({
+    defaultRoute: 'ov-claude',
+    routes: [
+      { id: 'ov-claude', label: 'C', engine: 'claude', model: 'claude-x', enabled: true, aliases: [] },
+      { id: 'ov-gem', label: 'G', engine: 'gemini', model: 'Gemini X', enabled: true, aliases: [], overflowFallback: 'ov-claude' },
+      { id: 'ov-gem-nofb', label: 'G2', engine: 'gemini', model: 'Gemini X', enabled: true, aliases: [] },
+    ],
+  }));
+  const OVLOG = path.join(TMP, 'ov.log');
+  const CLAUDE_OV = writeStub('claude-ov.sh', 'claude-sim', { FAKE_CLI_LOG: OVLOG });
+  const AGY_OV = writeStub('agy-ov.sh', 'agy-sim', { FAKE_CLI_LOG: OVLOG });
+  const P22 = 19610;
+  await bootProvider(P22, { CLAUDE_PATH: CLAUDE_OV, GEMINI_PATH: AGY_OV, BRIDGE_ROUTES_FILE: OV_ROUTES, MAX_PROMPT_BYTES: '80' });
+  const bigPrompt = 'x'.repeat(500);
+  // gemini route with a fallback → reroutes to the claude route, marks it.
+  r = await request(P22, {
+    path: '/v1/chat/completions', method: 'POST',
+    body: { model: 'ov-gem', messages: [{ role: 'user', content: bigPrompt }] },
+  });
+  completion = JSON.parse(r.body || '{}');
+  assert(r.status === 200 && completion.bridge_rerouted && completion.bridge_rerouted.from === 'ov-gem'
+    && completion.bridge_rerouted.to === 'ov-claude' && completion.bridge_rerouted.reason === 'prompt_overflow',
+  'oversized prompt on a route with overflowFallback reroutes and marks bridge_rerouted');
+  assert(completion.choices[0].message.content.includes('[claude]'), 'rerouted request is served by the fallback (claude) engine');
+  // gemini route without a fallback → loud 400 naming the cap + remedies.
+  r = await request(P22, {
+    path: '/v1/chat/completions', method: 'POST',
+    body: { model: 'ov-gem-nofb', messages: [{ role: 'user', content: bigPrompt }] },
+  });
+  assert(r.status === 400 && errType(r) === 'invalid_request_error', 'oversized prompt without fallback → 400 invalid_request');
+  {
+    const msg = JSON.parse(r.body).error.message || '';
+    assert(/cap/.test(msg) && /Claude/.test(msg) && /overflowFallback/.test(msg), '400 message names the cap and the remedies');
+  }
+  // under-cap prompt on the same gemini route → served normally, no reroute.
+  r = await request(P22, {
+    path: '/v1/chat/completions', method: 'POST',
+    body: { model: 'ov-gem', messages: [{ role: 'user', content: 'hi' }] },
+  });
+  completion = JSON.parse(r.body || '{}');
+  assert(r.status === 200 && !completion.bridge_rerouted, 'under-cap prompt is served normally (no reroute)');
 
   // ── Failure taxonomy boot ─────────────────────────────────────────────
   const CLAUDE_QUOTA = writeStub('claude-quota.sh', 'claude-sim', { FAKE_CLI_STDERR: 'Claude usage limit reached. Your limit will reset at 5pm.' });
