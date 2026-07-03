@@ -268,10 +268,11 @@ Static files served at `/dashboard/`; all data comes from four endpoints:
 |---|---|---|
 | Overview | `/dashboard/status`, `/dashboard/usage?range=today`, SSE | `/admin/breakers/:e/reset`, `/admin/requests/:id/kill`, `/admin/engines/:e/*` |
 | Routes | `status.routes` | `POST/PUT/DELETE /admin/routes`, `/admin/engines/:e/probe` |
-| Usage | `/dashboard/usage?range=` | — |
+| Accounts | `status.accounts`, `usage.perAccount` | `/admin/accounts/:e/:name/{probe,enable,disable}` |
+| Usage | `/dashboard/usage?range=` (by app / account / key) | — |
 | Tester | `status.routes` | `POST /v1/chat/completions` (SSE or blocking) |
 | Requests | `GET /admin/capture(/:id)` | `POST /admin/capture {enabled}` |
-| Connect | `status.connection` | stores the API key in localStorage |
+| Connect | `status.connection`, `GET /admin/keys` | stores the API key in localStorage; `POST/DELETE /admin/keys` (mint/revoke) |
 
 Live updates: `EventSource('/dashboard/events')` triggers a throttled status
 refresh on every request/breaker/health/capture event; if SSE drops, the page

@@ -1,5 +1,5 @@
 ---
-last-updated: '2026-07-03T07:00:00.000Z'
+last-updated: '2026-07-03T08:00:00.000Z'
 ---
 # AI CLI Bridge State
 
@@ -26,6 +26,16 @@ last-updated: '2026-07-03T07:00:00.000Z'
   (`/admin/keys`). Ledger + telemetry attribute `keyName`. New `tests/keys.test.js`
   (33) + provider2 key suite; 413 assertions green; live mint→call→revoke smoke
   passed.
+- **Server Edition Phase C (dashboard) shipped** — Tasks 1–6 of
+  `docs/superpowers/plans/2026-07-02-server-edition-phase-c-dashboard.md`.
+  Backend: `pool.setEnabled` + `POST /admin/accounts/:e/:name/{enable,disable}`;
+  `usage.aggregate()` gains `perAccount` + `perKey` rollups. Dashboard: new
+  **Accounts tab** (per-account cards — state/breaker countdown, slots, month
+  usage, Probe, Enable/Disable, one-time login command on needs-login), **Connect
+  tab key management** (list/mint/revoke, secret shown once, admin-gated), and a
+  **Usage attribution toggle** (by app / account / key). Static files, same
+  `renderAll()`/`admin()`/`ACTIONS` patterns, SSE `account.change`/`keys.change`.
+  446 assertions green; live smoke on restarted provider confirmed all endpoints.
 - One provider process on :9011; engines are **in-process adapters**
   (`packages/adapters`): claude via stream-json (real deltas + real token
   usage, stdin prompts), agy via guarded argv with streaming ANSI strip.
@@ -66,10 +76,11 @@ Nothing blocked.
 - User review of the live dashboard at http://127.0.0.1:9011/dashboard/
 - Decide merge/push of `feat/dashboard-overhaul`
 - Server Edition remaining phases (per
-  `docs/superpowers/specs/2026-07-02-server-edition-design.md`): **C** dashboard
-  (Accounts tab surfacing `pool.snapshot()` + probe/login UX; Connect-tab key
-  management via `/admin/keys`; Usage account/key dimension), **D** Docker image
-  + NAS deploy (needs the live NAS), **E** gap mitigations (session continuity,
-  overflow policy, tool-call hardening).
+  `docs/superpowers/specs/2026-07-02-server-edition-design.md`): **D** Docker
+  image + NAS deploy — artifacts (Dockerfile, compose, onboarding script,
+  DEPLOY-NAS.md) can be authored now, but the live deploy to 192.168.1.10 and
+  agy-on-linux auth (Spike D0) need the operator present; **E** gap mitigations
+  (session continuity, overflow policy, tool-call hardening) — codeable/testable
+  locally, independent of D.
 - Later (out of scope per spec): real image handoff, CLI session continuity
   (`--resume`), deleting the legacy provider-bridge once nothing depends on it.
