@@ -34,8 +34,8 @@ last-updated: '2026-07-03T08:00:00.000Z'
   400 naming cap+remedies, or opt-in `overflowFallback` reroute marked
   `bridge_rerouted`). **E3 session continuity** (`claude --resume` with a
   prefix-hash store → delta-only follow-ups on the same account; pure accelerator
-  with full-prompt fallback; `BRIDGE_SESSIONS=0` off; **non-streaming**, verified
-  live end-to-end — streaming resumption is the remaining follow-up). Plus a user
+  with full-prompt fallback; `BRIDGE_SESSIONS=0` off; **streaming + non-streaming**,
+  both verified live end-to-end). Plus a user
   request: **signed-in account shown per engine** on Overview + Accounts (reads
   each CLI's config identity, mtime-cached).
 - **Server Edition Phase C (dashboard) shipped** — Tasks 1–6 of
@@ -98,8 +98,7 @@ Nothing blocked.
   Decide push/PR/merge. Nothing is pushed yet.
 - **Operator-gated:** run the NAS deploy (`docs/DEPLOY-NAS.md`) — `docker build`,
   onboard Claude accounts, point Hermes at `http://192.168.1.10:9011/v1`.
-- **Small follow-up:** streaming session continuity (non-streaming ships; streamed
-  calls send full prompt but are already remembered for later resumption). An
-  agy linux-amd64 binary would re-enable gemini on the NAS.
+- **External dependency:** an agy linux-amd64 binary would re-enable gemini on the
+  NAS (claude-only until then; gemini degrades gracefully).
 - Later (out of scope per spec): real image handoff, CLI session continuity
   (`--resume`), deleting the legacy provider-bridge once nothing depends on it.

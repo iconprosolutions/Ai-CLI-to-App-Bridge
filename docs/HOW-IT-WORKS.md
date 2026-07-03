@@ -245,8 +245,9 @@ sends only the new turn. **claude only** (agy exposes no conversation id).
   history, different route, a different account selected, or `BRIDGE_SESSIONS=0` —
   silently falls back to a normal full-prompt spawn. A *failed* resume (e.g. the
   session expired) retries the full prompt on the same account before any account
-  failover. Streaming continuity is a planned follow-up (streamed calls always
-  send the full prompt today, but are still remembered for later resumption).
+  failover. Works for **both streaming and non-streaming** requests (streaming
+  resumes pre-first-byte — the tool-call hold-back keeps output buffered until the
+  first content byte, so a failed resume drops its buffer and retries cleanly).
 
 ## The packages
 
