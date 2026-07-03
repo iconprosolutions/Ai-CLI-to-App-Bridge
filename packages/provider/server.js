@@ -13,13 +13,14 @@ const { createClaudeAdapter, createAgyAdapter } = require('@bridge/adapters');
 const { createRouteRegistry } = require('./routes');
 const { createAccountPool } = require('./accounts');
 const { createKeyStore } = require('./keys');
+const { createContinuityStore } = require('./continuity');
 const { createTelemetry } = require('./telemetry');
 const { createUsageLedger } = require('./usage');
 const { createEventBus } = require('./events');
 const { createCapture } = require('./capture');
 const { createAdminRouter } = require('./admin');
 const {
-  estimateTokens, parseToolCallsFromText, messagesToPrompt, openaiErrorBody,
+  estimateTokens, parseToolCallsFromText, messagesToPrompt, openaiErrorBody, formatContent,
 } = require('./translate');
 
 const app = express();
@@ -61,6 +62,11 @@ const ledger = createUsageLedger({
   pricingFile: path.join(__dirname, 'pricing.json'),
 });
 const SSE_HEARTBEAT_MS = intEnv('SSE_HEARTBEAT_MS', 15000);
+
+// Session continuity: resume a CLI conversation (claude --resume) and send only
+// the new turn when a request extends one we already served on the same account.
+// Pure accelerator — any mismatch falls back to a full-prompt spawn. BRIDGE_SESSIONS=0 off.
+const continuity = createContinuityStore({ formatContent });
 
 const events = createEventBus();
 const capture = createCapture({ max: 50 });
@@ -489,10 +495,21 @@ app.post('/v1/chat/completions', async (req, res) => {
     // (un-pinned) account moves the SAME request to the next healthy account
     // — but never after content bytes have reached the client.
     const FAILOVER_KINDS = new Set(['quota', 'auth', 'spawn_failed']);
-    const invokeWithFailover = async ({ prompt: p, onDelta, canFailover, onFailover }) => {
+    // `p` is what's actually sent (a resume delta or the full prompt); `fullPrompt`
+    // is always the complete prompt used for any fallback. When not resuming,
+    // `p === fullPrompt` and `rid` is null, so this behaves exactly as before.
+    const invokeWithFailover = async ({ prompt: p, fullPrompt, resumeId: rid, onDelta, canFailover, onFailover }) => {
       try {
-        return await adapter.invoke({ prompt: p, model: route.model, signal: ac.signal, onDelta, env: pool.envFor(route.engine, sel.account) });
+        return await adapter.invoke({ prompt: p, model: route.model, signal: ac.signal, onDelta, env: pool.envFor(route.engine, sel.account), resumeId: rid || undefined });
       } catch (err) {
+        // A failed resume on the same account (e.g. the session expired) → one
+        // retry with the full prompt on the same account, before account failover.
+        if (rid && canFailover() && !clientAborted) {
+          console.log(`[req ${reqId}] resume failed (${err.kind || 'err'}); retrying full prompt on ${sel.account.name}`);
+          try {
+            return await adapter.invoke({ prompt: fullPrompt, model: route.model, signal: ac.signal, onDelta, env: pool.envFor(route.engine, sel.account) });
+          } catch (err2) { err = err2; }
+        }
         const kind = err instanceof BridgeError ? err.kind : null;
         // A pinned request (route or key) never fails over — it fails loud.
         if (!pin && FAILOVER_KINDS.has(kind) && canFailover() && !clientAborted) {
@@ -506,7 +523,8 @@ app.post('/v1/chat/completions', async (req, res) => {
             active.account = sel.account.name;
             if (onFailover) onFailover();
             console.log(`[req ${reqId}] failover ${route.engine} → account ${sel.account.name} (${kind})`);
-            return adapter.invoke({ prompt: p, model: route.model, signal: ac.signal, onDelta, env: pool.envFor(route.engine, sel.account) });
+            // The new account has no session → always the full prompt, no resume.
+            return adapter.invoke({ prompt: fullPrompt, model: route.model, signal: ac.signal, onDelta, env: pool.envFor(route.engine, sel.account) });
           }
         }
         throw err;
@@ -606,6 +624,8 @@ app.post('/v1/chat/completions', async (req, res) => {
       try {
         result = await invokeWithFailover({
           prompt,
+          fullPrompt: prompt,
+          resumeId: null, // streaming continuity is a follow-up; stream always sends full
           onDelta: feed,
           canFailover: () => !streamedBytes,
           onFailover: () => { held = ''; holding = toolsProvided; }, // drop the failed attempt's held head
@@ -644,6 +664,9 @@ app.post('/v1/chat/completions', async (req, res) => {
       breakerFeedback();
       capFinish(200, result);
       record(200);
+      // Remember this turn so a later request extending it can resume (claude
+      // only — result.sessionId is undefined for agy, making this a no-op).
+      if (!detectedTools) continuity.remember(route.id, route.engine, sel.account.name, messages, result.text, result.sessionId);
 
       if (detectedTools) {
         res.write(`data: ${JSON.stringify({
@@ -671,9 +694,27 @@ app.post('/v1/chat/completions', async (req, res) => {
       return endStream();
     }
 
+    // Session continuity (claude only, non-streaming): if this conversation
+    // extends one we served on the SAME account, resume it and send just the new
+    // turn. `prompt` (the full flatten) stays intact for retries and failover.
+    let resumeId = null;
+    let sendPrompt = prompt;
+    if (route.engine === 'claude' && !rerouted && continuity.enabled) {
+      const cont = continuity.lookup(route.id, messages);
+      if (cont && cont.engine === 'claude' && cont.account === sel.account.name) {
+        resumeId = cont.resumeId;
+        sendPrompt = messagesToPrompt(cont.deltaMessages, {
+          tools: toolsProvided ? toolsList : null, toolChoice, forcedToolName, responseFormat: body.response_format,
+        });
+        estPromptTokens = estimateTokens(sendPrompt);
+        if (cap) cap.sentPrompt = sendPrompt;
+        console.log(`[req ${reqId}] resuming ${route.engine}:${sel.account.name} session ${resumeId} (delta only)`);
+      }
+    }
+
     let result;
     try {
-      result = await invokeWithFailover({ prompt, onDelta: markFirstByte, canFailover: () => true });
+      result = await invokeWithFailover({ prompt: sendPrompt, fullPrompt: prompt, resumeId, onDelta: markFirstByte, canFailover: () => true });
     } catch (err) {
       const mapped = httpFor(err);
       breakerFeedback(err);
@@ -741,6 +782,10 @@ app.post('/v1/chat/completions', async (req, res) => {
       }
     }
     capFinish(200, result);
+    // Remember this turn so a follow-up extending it can resume on this account
+    // (claude only; agy returns no sessionId → no-op). Tool-call turns are
+    // skipped — their assistant message shape complicates prefix matching.
+    if (!detectedTools) continuity.remember(route.id, route.engine, sel.account.name, messages, text, result.sessionId);
     const messageObj = detectedTools
       ? { role: 'assistant', content: null, tool_calls: detectedTools }
       : { role: 'assistant', content: text };

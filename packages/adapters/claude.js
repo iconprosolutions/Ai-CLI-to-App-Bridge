@@ -59,9 +59,12 @@ function createClaudeAdapter(opts = {}) {
     return MODEL_ALIASES[model] || model;
   };
 
-  async function invokeStreamJson({ prompt, model, signal, onDelta, env }) {
+  async function invokeStreamJson({ prompt, model, signal, onDelta, env, resumeId }) {
     // --verbose is mandatory with -p + stream-json (verified live 2026-07-02).
     const args = ['-p', '--output-format', 'stream-json', '--include-partial-messages', '--verbose', ...lockdownArgs];
+    // Session continuity: resume the CLI's conversation and send only the new
+    // turn (verified live: --resume carries prior context). Account-specific.
+    if (resumeId) args.push('--resume', resumeId);
     if (model) args.push('--model', model);
 
     let buffer = '';
@@ -125,8 +128,9 @@ function createClaudeAdapter(opts = {}) {
     };
   }
 
-  async function invokeText({ prompt, model, signal, onDelta, env }) {
+  async function invokeText({ prompt, model, signal, onDelta, env, resumeId }) {
     const args = ['-p', ...lockdownArgs];
+    if (resumeId) args.push('--resume', resumeId);
     if (model) args.push('--model', model);
     const run = await runCli(bin, args, {
       stdin: prompt, signal, timeoutMs, maxBytes, onDelta, classifyError,
@@ -137,13 +141,13 @@ function createClaudeAdapter(opts = {}) {
 
   return {
     name: 'claude',
-    capabilities: { streaming: true, nativeUsage: true, sessions: false },
+    capabilities: { streaming: true, nativeUsage: true, sessions: true },
 
-    async invoke({ prompt, model, signal, onDelta, env } = {}) {
+    async invoke({ prompt, model, signal, onDelta, env, resumeId } = {}) {
       const selected = normalizeModel(model);
       if (!streamJsonBroken) {
         try {
-          return await invokeStreamJson({ prompt, model: selected, signal, onDelta, env });
+          return await invokeStreamJson({ prompt, model: selected, signal, onDelta, env, resumeId });
         } catch (err) {
           const msg = String(err.message || '');
           if (err.kind === 'bad_output' && /unknown option|output-format|stream-json|--verbose|--include-partial-messages/i.test(msg)) {
@@ -154,7 +158,7 @@ function createClaudeAdapter(opts = {}) {
           }
         }
       }
-      return invokeText({ prompt, model: selected, signal, onDelta, env });
+      return invokeText({ prompt, model: selected, signal, onDelta, env, resumeId });
     },
 
     async listModels() {

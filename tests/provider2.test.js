@@ -104,6 +104,32 @@ async function main() {
     assert(geminiIdentity(path.join(idDir, 'nope')) === null, 'geminiIdentity → null when no config (no crash)');
   }
 
+  // ── Session continuity store (pure) ───────────────────────────────────
+  console.log('\n## continuity.js — session resume store');
+  {
+    const { createContinuityStore } = require(path.join(REPO, 'packages', 'provider', 'continuity.js'));
+    const store = createContinuityStore({ enabled: true });
+    const m1 = [{ role: 'user', content: 'hello' }];
+    assert(store.lookup('r', m1) === null, 'no match before anything is stored');
+    store.remember('r', 'claude', 'acctA', m1, 'hi there', 'sess-1');
+    const m2 = [{ role: 'user', content: 'hello' }, { role: 'assistant', content: 'hi there' }, { role: 'user', content: 'and now?' }];
+    const hit = store.lookup('r', m2);
+    assert(hit && hit.resumeId === 'sess-1' && hit.account === 'acctA' && hit.engine === 'claude', 'extending request matches the stored session');
+    assert(hit.deltaMessages.length === 1 && hit.deltaMessages[0].content === 'and now?', 'delta is only the new trailing turn');
+    const edited = [{ role: 'user', content: 'HELLO EDITED' }, { role: 'assistant', content: 'hi there' }, { role: 'user', content: 'and now?' }];
+    assert(store.lookup('r', edited) === null, 'edited history falls back to full prompt (no match)');
+    assert(store.lookup('other', m2) === null, 'route id is part of the key');
+    store.remember('r', 'claude', 'acctA', m2, 'reply', null);
+    const m3 = m2.concat([{ role: 'assistant', content: 'reply' }, { role: 'user', content: 'x' }]);
+    assert(store.lookup('r', m3) === null, 'remember without a sessionId stores nothing');
+    const off = createContinuityStore({ enabled: false });
+    off.remember('r', 'claude', 'a', m1, 'hi', 'sess-x');
+    assert(off.enabled === false && off.lookup('r', m2) === null, 'BRIDGE_SESSIONS=0 disables lookup + remember');
+    const small = createContinuityStore({ enabled: true, max: 2 });
+    for (const n of ['a', 'b', 'c']) small.remember('r', 'claude', 'x', [{ role: 'user', content: n }], 'ok', `sid-${n}`);
+    assert(small.size() === 2, 'LRU caps the store at max entries');
+  }
+
   // ── Routes registry unit checks ─────────────────────────────────────
   console.log('\n## routes.js — validation + reload');
   const { validateRoutes, createRouteRegistry } = require(path.join(REPO, 'packages', 'provider', 'routes.js'));
@@ -379,6 +405,38 @@ async function main() {
   });
   completion = JSON.parse(r.body || '{}');
   assert(r.status === 200 && !completion.bridge_rerouted, 'under-cap prompt is served normally (no reroute)');
+
+  // ── §4 session continuity (claude): resume + delta-only prompt ─────────
+  console.log('\n## Session continuity (claude --resume + delta)');
+  const CONTLOG = path.join(TMP, 'cont.log');
+  const CLAUDE_CONT = writeStub('claude-cont.sh', 'claude-sim', { FAKE_CLI_LOG: CONTLOG });
+  const P23 = 19620;
+  await bootProvider(P23, { CLAUDE_PATH: CLAUDE_CONT, GEMINI_PATH: AGY_STUB });
+  const contCall = (messages) => request(P23, {
+    path: '/v1/chat/completions', method: 'POST',
+    body: { model: 'bridge-claude-haiku-4.5-spark', messages },
+  });
+  // Turn 1 — no resume; the session is remembered.
+  const t1 = await contCall([{ role: 'user', content: 'hello' }]);
+  const reply1 = JSON.parse(t1.body).choices[0].message.content;
+  assert(!fs.readFileSync(CONTLOG, 'utf8').split('\n').filter((l) => l.includes('-p')).some((l) => l.includes('--resume')), 'first turn does not resume');
+  // Turn 2 — client echoes the reply and adds a turn → extends turn 1 → resumes.
+  const before2 = fs.readFileSync(CONTLOG, 'utf8').trim().split('\n').length;
+  const t2 = await contCall([{ role: 'user', content: 'hello' }, { role: 'assistant', content: reply1 }, { role: 'user', content: 'continue please' }]);
+  const reply2 = JSON.parse(t2.body).choices[0].message.content;
+  const new2 = fs.readFileSync(CONTLOG, 'utf8').trim().split('\n').slice(before2).filter((l) => l.includes('-p'));
+  assert(new2.some((l) => l.includes('--resume') && l.includes('fake-session-1')), 'extending turn resumes with --resume <session_id>');
+  assert(reply2.includes('continue') && !reply2.includes('hello'), 'resumed turn sends only the new delta, not the full history');
+  // BRIDGE_SESSIONS=0 disables continuity end-to-end.
+  const CONT2LOG = path.join(TMP, 'cont2.log');
+  const CLAUDE_CONT2 = writeStub('claude-cont2.sh', 'claude-sim', { FAKE_CLI_LOG: CONT2LOG });
+  const P24 = 19630;
+  await bootProvider(P24, { CLAUDE_PATH: CLAUDE_CONT2, GEMINI_PATH: AGY_STUB, BRIDGE_SESSIONS: '0' });
+  const cc2 = (messages) => request(P24, { path: '/v1/chat/completions', method: 'POST', body: { model: 'bridge-claude-haiku-4.5-spark', messages } });
+  const d1 = await cc2([{ role: 'user', content: 'hi' }]);
+  const drep1 = JSON.parse(d1.body).choices[0].message.content;
+  await cc2([{ role: 'user', content: 'hi' }, { role: 'assistant', content: drep1 }, { role: 'user', content: 'more' }]);
+  assert(!fs.readFileSync(CONT2LOG, 'utf8').includes('--resume'), 'BRIDGE_SESSIONS=0 disables resume end-to-end');
 
   // ── Failure taxonomy boot ─────────────────────────────────────────────
   const CLAUDE_QUOTA = writeStub('claude-quota.sh', 'claude-sim', { FAKE_CLI_STDERR: 'Claude usage limit reached. Your limit will reset at 5pm.' });
