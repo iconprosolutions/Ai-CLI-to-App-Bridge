@@ -61,11 +61,14 @@ async function bootProvider(port, env) {
   process.env.PROVIDER_PORT = String(port);
   delete process.env.PROVIDER_API_KEY;
   delete process.env.BRIDGE_API_KEY;
-  // Never let test traffic pollute the real usage ledger or routes.json.
+  // Never let test traffic pollute the real usage ledger or routes.json, and
+  // never read/migrate the real credentials.json — each boot gets its own file
+  // (absent unless the test writes one, so auth is open by default as before).
   process.env.BRIDGE_USAGE_DIR = path.join(TMP, `usage-${port}`);
   const routesCopy = path.join(TMP, `routes-${port}.json`);
   fs.copyFileSync(path.join(REPO, 'packages', 'provider', 'routes.json'), routesCopy);
   process.env.BRIDGE_ROUTES_FILE = routesCopy;
+  process.env.BRIDGE_CREDENTIALS_FILE = path.join(TMP, `creds-${port}.json`);
   Object.assign(process.env, env);
   require(SERVER);
   process.env = oldEnv;

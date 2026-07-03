@@ -12,6 +12,7 @@ const {
 const { createClaudeAdapter, createAgyAdapter } = require('@bridge/adapters');
 const { createRouteRegistry } = require('./routes');
 const { createAccountPool } = require('./accounts');
+const { createKeyStore } = require('./keys');
 const { createTelemetry } = require('./telemetry');
 const { createUsageLedger } = require('./usage');
 const { createEventBus } = require('./events');
@@ -38,6 +39,12 @@ const PORT = intEnv('PROVIDER_PORT', 9011);
 const BIND_HOST = strEnv('BIND_HOST', '127.0.0.1');
 const API_KEY = process.env.PROVIDER_API_KEY || process.env.BRIDGE_API_KEY || '';
 const MAX_CONCURRENT_PER_ENGINE = Math.max(1, intEnv('PROVIDER_MAX_CONCURRENT_PER_ENGINE', 1));
+
+// Named API keys (v2 credentials.json). The env key, if set, is layered on as
+// an implicit admin key so the launcher and tests keep working unchanged.
+const CREDENTIALS_FILE = process.env.BRIDGE_CREDENTIALS_FILE
+  || path.resolve(__dirname, '../../.bridge-runtime/credentials.json');
+const keyStore = createKeyStore({ file: CREDENTIALS_FILE, envKey: API_KEY });
 
 // Engines are in-process adapters — no HTTP hop, and every control-plane
 // action operates on state this process owns.
@@ -116,14 +123,16 @@ function sendError(res, status, message, type, param, retryAfterSec) {
 }
 
 // ── Auth (OpenAI error envelope, /v1 only) ─────────────────────────────
+// Any valid named key (admin or app) may call /v1. The matched key is attached
+// as req.auth so the request path can honor its accountPin and attribute usage.
 app.use('/v1', (req, res, next) => {
-  if (!API_KEY) return next();
+  if (!keyStore.authEnabled) return next();
   const token = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
-  const a = Buffer.from(token);
-  const b = Buffer.from(API_KEY);
-  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+  const who = keyStore.verify(token);
+  if (!who) {
     return sendError(res, 401, 'Missing or invalid Authorization bearer token.', 'invalid_request_error', 'Authorization');
   }
+  req.auth = who;
   return next();
 });
 
@@ -148,7 +157,7 @@ app.get('/dashboard/status', async (req, res) => {
   res.json({
     status: 'ok',
     engine: 'provider-bridge',
-    authEnabled: Boolean(API_KEY),
+    authEnabled: keyStore.authEnabled,
     uptime: process.uptime(),
     inflight: Object.fromEntries(ENGINE_NAMES.map((e) => [e, pool.inflight(e)])),
     queue: Object.fromEntries(ENGINE_NAMES.map((e) => [e, pool.queued(e)])),
@@ -162,7 +171,7 @@ app.get('/dashboard/status', async (req, res) => {
     connection: {
       baseUrl: `${origin}/v1`,
       chatCompletionsUrl: `${origin}/v1/chat/completions`,
-      authHeader: API_KEY ? 'Authorization: Bearer <key>' : 'none',
+      authHeader: keyStore.authEnabled ? 'Authorization: Bearer <key>' : 'none',
     },
     defaultRoute: registry.defaultRoute(),
     routes: registry.list().map((route) => ({
@@ -193,7 +202,7 @@ app.get('/dashboard/events', events.handler);
 
 // Control plane (always key-gated; see admin.js).
 app.use('/admin', createAdminRouter({
-  apiKey: API_KEY, registry, pool, adapters, activeRequests, capture, events, enginesDisabled,
+  keyStore, registry, pool, adapters, activeRequests, capture, events, enginesDisabled,
 }));
 
 // Durable usage rollups (JSONL ledger; survives restarts).
@@ -224,6 +233,9 @@ app.post('/v1/chat/completions', async (req, res) => {
   const aliasUsed = body.model;
   const route = registry.resolve(aliasUsed);
   const appId = appIdFrom(req);
+  const keyName = (req.auth && req.auth.name) || null;
+  // A key may pin the engine to a specific account (key pin → route pin → pool).
+  const keyPin = req.auth && req.auth.accountPin && route ? req.auth.accountPin[route.engine] || null : null;
   let estPromptTokens = 0;
   let estCompletionTokens = 0;
   let usageSource = 'estimated';
@@ -233,6 +245,7 @@ app.post('/v1/chat/completions', async (req, res) => {
     telemetry.record({
       id: reqId,
       appId,
+      keyName,
       aliasUsed: aliasUsed || '?',
       routeId: route ? route.id : null,
       label: route ? route.label : (aliasUsed || '?'),
@@ -248,6 +261,7 @@ app.post('/v1/chat/completions', async (req, res) => {
       ledger.append({
         reqId,
         appId,
+        keyName,
         routeId: route.id,
         engine: route.engine,
         model: route.model,
@@ -331,11 +345,12 @@ app.post('/v1/chat/completions', async (req, res) => {
     }
   }
 
-  // Account selection honors the route pin; pinned requests fail loud rather
-  // than silently switching accounts. Per-account breakers make a known-
-  // exhausted account fail fast (or rotate past it) instead of spawning a
-  // doomed CLI run.
-  let sel = pool.select(route.engine, { pin: route.account || null });
+  // Account selection precedence: key pin → route pin → pool rotation. Pinned
+  // requests fail loud rather than silently switching accounts. Per-account
+  // breakers make a known-exhausted account fail fast (or rotate past it)
+  // instead of spawning a doomed CLI run.
+  const pin = keyPin || route.account || null;
+  let sel = pool.select(route.engine, { pin });
   if (!sel.ok) {
     record(sel.status);
     return sendError(res, sel.status, sel.message, sel.status === 429 ? 'rate_limit_error' : 'engine_auth_error', null, sel.retryInSec);
@@ -437,7 +452,8 @@ app.post('/v1/chat/completions', async (req, res) => {
         return await adapter.invoke({ prompt: p, model: route.model, signal: ac.signal, onDelta, env: pool.envFor(route.engine, sel.account) });
       } catch (err) {
         const kind = err instanceof BridgeError ? err.kind : null;
-        if (!route.account && FAILOVER_KINDS.has(kind) && canFailover() && !clientAborted) {
+        // A pinned request (route or key) never fails over — it fails loud.
+        if (!pin && FAILOVER_KINDS.has(kind) && canFailover() && !clientAborted) {
           pool.feedback(route.engine, sel.account, err);
           const next = pool.select(route.engine, { exclude: sel.account.name });
           if (next.ok) {

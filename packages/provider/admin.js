@@ -1,26 +1,29 @@
 'use strict';
 
-const crypto = require('crypto');
 const express = require('express');
 
-// Control-plane endpoints backing the dashboard's buttons. ALWAYS behind the
-// bearer key — even when /v1 auth is open — because these mutate state and
-// can spend quota (probe). With no key configured at all, admin is disabled.
+// Control-plane endpoints backing the dashboard's buttons. ALWAYS behind an
+// admin-role key — even when /v1 auth is open — because these mutate state and
+// can spend quota (probe). App-role keys are rejected with 403. With no key
+// configured at all, admin is disabled.
 function createAdminRouter({
-  apiKey, registry, pool, adapters, activeRequests, capture, events, enginesDisabled,
+  keyStore, registry, pool, adapters, activeRequests, capture, events, enginesDisabled,
 }) {
   const router = express.Router();
 
   router.use((req, res, next) => {
-    if (!apiKey) {
-      return res.status(503).json({ error: 'Admin API disabled: no PROVIDER_API_KEY configured.' });
+    if (!keyStore.authEnabled) {
+      return res.status(503).json({ error: 'Admin API disabled: no API key configured.' });
     }
     const token = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
-    const a = Buffer.from(token);
-    const b = Buffer.from(apiKey);
-    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+    const who = keyStore.verify(token);
+    if (!who) {
       return res.status(401).json({ error: 'Unauthorized' });
     }
+    if (who.role !== 'admin') {
+      return res.status(403).json({ error: 'Admin role required for this endpoint.' });
+    }
+    req.auth = who;
     return next();
   });
 
@@ -146,6 +149,36 @@ function createAdminRouter({
     const entry = capture.get(req.params.id);
     if (!entry) return res.status(404).json({ error: 'Not captured (buffer holds the last 50 while capture is on)' });
     return res.json(entry);
+  });
+
+  // ── Named API keys ───────────────────────────────────────────────────────
+  // list() never returns secret values; mint returns the new secret exactly
+  // once (never retrievable afterward). Admin-role gate is enforced above.
+  router.get('/keys', (req, res) => {
+    res.json({ keys: keyStore.list() });
+  });
+
+  router.post('/keys', (req, res) => {
+    const body = req.body || {};
+    try {
+      const rec = keyStore.mint({ name: body.name, role: body.role, accountPin: body.accountPin });
+      events.emit('keys.change', { action: 'mint', name: rec.name, role: rec.role });
+      return res.json({
+        name: rec.name, role: rec.role, accountPin: rec.accountPin || null, createdAt: rec.createdAt, key: rec.key,
+      });
+    } catch (err) {
+      return res.status(400).json({ error: err.message });
+    }
+  });
+
+  router.delete('/keys/:name', (req, res) => {
+    try {
+      keyStore.revoke(req.params.name);
+      events.emit('keys.change', { action: 'revoke', name: req.params.name });
+      return res.json({ revoked: true, name: req.params.name });
+    } catch (err) {
+      return res.status(400).json({ error: err.message });
+    }
   });
 
   return router;
