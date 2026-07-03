@@ -18,6 +18,7 @@ function createTelemetry({ engines = ['claude', 'gemini'], maxRecent = 200, heal
   const recentRequests = [];
   const healthHistory = {};
   for (const e of engines) healthHistory[e] = [];
+  let toolRetries = 0; // corrective retries fired for malformed/absent tool calls
 
   function recordHealthSample(engine, ok, source) {
     const arr = healthHistory[engine];
@@ -137,6 +138,7 @@ function createTelemetry({ engines = ['claude', 'gemini'], maxRecent = 200, heal
       successRate: recentRequests.length ? Math.round((success / recentRequests.length) * 1000) / 1000 : null,
       avgLatencyMs: latencyN ? Math.round(latencySum / latencyN) : 0,
       maxConcurrent,
+      toolRetries,
       perEngine,
       tokensByEngine,
       perRoute: Object.values(perRoute)
@@ -158,6 +160,7 @@ function createTelemetry({ engines = ['claude', 'gemini'], maxRecent = 200, heal
     computePerEngineHealth,
     computeTelemetry,
     record,
+    recordToolRetry: () => { toolRetries += 1; },
     classForStatus,
   };
 }

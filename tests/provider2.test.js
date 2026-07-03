@@ -263,6 +263,50 @@ async function main() {
   assert(completion.choices[0].finish_reason === 'tool_calls' && completion.choices[0].message.tool_calls[0].function.name === 'read_file',
     'tools request parses tool_calls');
 
+  // ── §6 tool-call hardening: malformed tool JSON → one corrective retry ──
+  console.log('\n## Tool-call hardening (malformed → retry)');
+  const MALFORMED_FILE = path.join(TMP, 'tool-malformed.txt');
+  fs.writeFileSync(MALFORMED_FILE, '```json\n{"tool_calls":[{"id":"call_1","type":"function","function":{"name":"read_file","arguments":{bad not a string}}}]}\n```');
+  const TOOLGOOD_FILE = path.join(TMP, 'tool-good.txt');
+  fs.writeFileSync(TOOLGOOD_FILE, '```json\n' + JSON.stringify({ tool_calls: [{ id: 'call_1', type: 'function', function: { name: 'read_file', arguments: '{"path":"a"}' } }] }) + '\n```');
+  const THLOG = path.join(TMP, 'th.log');
+  const CLAUDE_TH = writeStub('claude-th.sh', 'claude-sim', {
+    FAKE_CLI_TEXT_FILE: TOOLGOOD_FILE, FAKE_CLI_GARBAGE_FIRST: '1', FAKE_CLI_GARBAGE_TEXT_FILE: MALFORMED_FILE, FAKE_CLI_STATE_FILE: path.join(TMP, 'state-th'), FAKE_CLI_LOG: THLOG,
+  });
+  const P20 = 19590;
+  await bootProvider(P20, { CLAUDE_PATH: CLAUDE_TH, GEMINI_PATH: AGY_STUB });
+  const thBefore = fs.existsSync(THLOG) ? fs.readFileSync(THLOG, 'utf8').trim().split('\n').filter(Boolean).length : 0;
+  r = await request(P20, {
+    path: '/v1/chat/completions', method: 'POST',
+    body: { model: 'bridge-smart', tools: [{ type: 'function', function: { name: 'read_file' } }], messages: [{ role: 'user', content: 'read a' }] },
+  });
+  completion = JSON.parse(r.body || '{}');
+  assert(r.status === 200 && completion.choices[0].finish_reason === 'tool_calls' && completion.choices[0].message.tool_calls[0].function.name === 'read_file',
+    'malformed tool JSON is corrected via one retry (non-stream)');
+  const thAfter = fs.readFileSync(THLOG, 'utf8').trim().split('\n').filter(Boolean).length;
+  assert(thAfter - thBefore === 2, `exactly one corrective retry for malformed tool (${thAfter - thBefore} invocations)`);
+  r = await request(P20, { path: '/dashboard/status' });
+  assert(JSON.parse(r.body).telemetry.toolRetries >= 1, 'toolRetries telemetry counter increments');
+
+  // Streaming: the malformed head is held pre-first-byte, so the retry emits a
+  // clean tool_calls delta and no raw JSON ever leaks as content.
+  const CLAUDE_THS = writeStub('claude-ths.sh', 'claude-sim', {
+    FAKE_CLI_TEXT_FILE: TOOLGOOD_FILE, FAKE_CLI_GARBAGE_FIRST: '1', FAKE_CLI_GARBAGE_TEXT_FILE: MALFORMED_FILE, FAKE_CLI_STATE_FILE: path.join(TMP, 'state-ths'),
+  });
+  const P21 = 19600;
+  await bootProvider(P21, { CLAUDE_PATH: CLAUDE_THS, GEMINI_PATH: AGY_STUB });
+  r = await request(P21, {
+    path: '/v1/chat/completions', method: 'POST',
+    body: { model: 'bridge-smart', stream: true, tools: [{ type: 'function', function: { name: 'read_file' } }], messages: [{ role: 'user', content: 'read a' }] },
+  });
+  {
+    const evs = parseSse(r.body);
+    const toolDelta = evs.find((e) => e.choices && e.choices[0].delta && e.choices[0].delta.tool_calls);
+    const leaked = evs.some((e) => e.choices && e.choices[0].delta && typeof e.choices[0].delta.content === 'string' && /tool_calls|```json/.test(e.choices[0].delta.content));
+    assert(toolDelta && toolDelta.choices[0].delta.tool_calls[0].function.name === 'read_file' && !leaked,
+      'streaming malformed tool JSON is retried pre-first-byte; no raw JSON leaks as content');
+  }
+
   // ── Failure taxonomy boot ─────────────────────────────────────────────
   const CLAUDE_QUOTA = writeStub('claude-quota.sh', 'claude-sim', { FAKE_CLI_STDERR: 'Claude usage limit reached. Your limit will reset at 5pm.' });
   const AGY_NOTFOUND = writeStub('agy-notfound.sh', 'agy-sim', { FAKE_CLI_STDERR: 'Requested entity was not found.' });

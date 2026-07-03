@@ -124,7 +124,14 @@ async function main() {
       const fsx = require('fs');
       if (!fsx.existsSync(process.env.FAKE_CLI_STATE_FILE)) {
         fsx.writeFileSync(process.env.FAKE_CLI_STATE_FILE, '1');
-        text = 'Sure thing! Happy to help, but there is no JSON here at all.';
+        // Let a test shape the first (bad) reply — e.g. a malformed tool_calls
+        // block — instead of the default no-JSON garbage. The _FILE form carries
+        // multiline/backtick content the shell stub's env export can't.
+        let garbage = process.env.FAKE_CLI_GARBAGE_TEXT || 'Sure thing! Happy to help, but there is no JSON here at all.';
+        if (process.env.FAKE_CLI_GARBAGE_TEXT_FILE) {
+          try { garbage = fsx.readFileSync(process.env.FAKE_CLI_GARBAGE_TEXT_FILE, 'utf8'); } catch (_) { /* keep default */ }
+        }
+        text = garbage;
       }
     }
     if (process.env.FAKE_CLI_DELAY) await delay(Number(process.env.FAKE_CLI_DELAY));

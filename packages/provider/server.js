@@ -117,6 +117,12 @@ function appIdFrom(req) {
   return cleaned && /^[A-Za-z0-9_.\- ]+$/.test(cleaned) ? cleaned : 'default';
 }
 
+// The reply tried to be a tool call (fenced json or a tool_calls payload) but
+// parseToolCallsFromText rejected it — used to trigger one corrective retry.
+function looksLikeToolAttempt(t) {
+  return /"tool_calls"|```json/i.test(String(t));
+}
+
 function sendError(res, status, message, type, param, retryAfterSec) {
   if (retryAfterSec) res.set('Retry-After', String(retryAfterSec));
   return res.status(status).json(openaiErrorBody(message, type, param));
@@ -578,7 +584,21 @@ app.post('/v1/chat/completions', async (req, res) => {
         return endStream();
       }
 
-      const detectedTools = toolsProvided ? parseToolCallsFromText(result.text) : null;
+      let detectedTools = toolsProvided ? parseToolCallsFromText(result.text) : null;
+      // §6: the buffered head looked like a tool call but didn't parse, and no
+      // content has streamed yet (hold-back kept it) → one corrective retry
+      // before we give up and deliver the raw text as content.
+      if (toolsProvided && !streamedBytes && !detectedTools && looksLikeToolAttempt(result.text)) {
+        telemetry.recordToolRetry();
+        try {
+          const retry = await adapter.invoke({
+            prompt: `${prompt}\n\n[ASSISTANT]\n${result.text}\n\n[SYSTEM]\nThe reply above looked like a tool call but its JSON could not be parsed — "arguments" must be an escaped JSON string. Respond with ONLY the \`\`\`json\`\`\` tool_calls block.`,
+            model: route.model, signal: ac.signal, env: pool.envFor(route.engine, sel.account),
+          });
+          const reparsed = parseToolCallsFromText(retry.text);
+          if (reparsed) { result = retry; detectedTools = reparsed; held = ''; }
+        } catch (_) { /* keep the original attempt; fall through to deliver held content */ }
+      }
       if (holding && held && !detectedTools) {
         pacer.push(held); // looked like JSON but wasn't a tool call — deliver it
         held = '';
@@ -638,17 +658,23 @@ app.post('/v1/chat/completions', async (req, res) => {
     breakerFeedback();
     let text = result.text;
     let detectedTools = toolsProvided ? parseToolCallsFromText(text) : null;
-    // tool_choice=required / named-function enforcement: one corrective retry.
     const satisfiesChoice = () => {
       if (toolChoice !== 'required') return true;
       if (!detectedTools) return false;
       return !forcedToolName || detectedTools.some((t) => t.function.name === forcedToolName);
     };
-    if (toolsProvided && !satisfiesChoice()) {
-      const demand = forcedToolName
-        ? `a call to the tool "${forcedToolName}"`
-        : 'a tool call';
-      const retryPrompt = `${prompt}\n\n[ASSISTANT]\n${text}\n\n[SYSTEM]\nThe reply above is not acceptable: this request requires ${demand}. Respond with ONLY the \`\`\`json\`\`\` tool_calls block — no plain text.`;
+    // §6: one corrective retry when the model must call a tool but didn't, OR
+    // it *attempted* a tool call whose JSON didn't parse (malformed — the raw
+    // JSON would otherwise leak as content). Malformed detection fires under any
+    // tool_choice; the retry budget stays at one, shared with tool_choice.
+    const malformedToolAttempt = () => toolsProvided && !detectedTools && looksLikeToolAttempt(text);
+    if (toolsProvided && (!satisfiesChoice() || malformedToolAttempt())) {
+      telemetry.recordToolRetry();
+      const demand = forcedToolName ? `a call to the tool "${forcedToolName}"` : 'a tool call';
+      const reason = malformedToolAttempt()
+        ? 'the reply looked like a tool call but its JSON could not be parsed — "arguments" must be an escaped JSON string'
+        : `this request requires ${demand}`;
+      const retryPrompt = `${prompt}\n\n[ASSISTANT]\n${text}\n\n[SYSTEM]\nThe reply above is not acceptable: ${reason}. Respond with ONLY the \`\`\`json\`\`\` tool_calls block — no plain text.`;
       let retry;
       try {
         retry = await adapter.invoke({ prompt: retryPrompt, model: route.model, signal: ac.signal, env: pool.envFor(route.engine, sel.account) });
@@ -662,7 +688,7 @@ app.post('/v1/chat/completions', async (req, res) => {
       applyUsage(retry);
       text = retry.text;
       detectedTools = parseToolCallsFromText(text);
-      if (!satisfiesChoice()) {
+      if (toolChoice === 'required' && !satisfiesChoice()) {
         capFinish(502, retry, null);
         record(502);
         return sendError(res, 502, `tool_choice could not be satisfied: the model did not produce ${demand}.`, 'upstream_error', 'tool_choice');
