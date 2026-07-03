@@ -1,5 +1,5 @@
 ---
-last-updated: '2026-07-02T09:30:00.000Z'
+last-updated: '2026-07-03T06:00:00.000Z'
 ---
 # AI CLI Bridge State
 
@@ -7,6 +7,15 @@ last-updated: '2026-07-02T09:30:00.000Z'
 
 - **v2 consolidated architecture shipped** (branch `feat/dashboard-overhaul`,
   Phases 0–5 of `docs/superpowers/specs/2026-07-02-bridge-v2-design.md`).
+- **Server Edition Phase A (multi-account pool) shipped** — Tasks 1–8 of
+  `docs/superpowers/plans/2026-07-02-server-edition-phase-a-accounts.md`.
+  `packages/provider/accounts.js` owns N named accounts per engine with
+  per-account breaker+semaphore, round-robin selection, route-level pinning,
+  one-shot transparent failover (never after first byte), `auth`/needs-login
+  handling, and hot-reloadable `accounts.json`. Zero-config: no file → one
+  implicit `default` account (verified live — single real call + status
+  snapshot). Adapters take per-invocation `env` (claude→`CLAUDE_CONFIG_DIR`,
+  agy→`HOME`); fixed a latent agy exit-0 auth bug. 364 assertions green.
 - One provider process on :9011; engines are **in-process adapters**
   (`packages/adapters`): claude via stream-json (real deltas + real token
   usage, stdin prompts), agy via guarded argv with streaming ANSI strip.
@@ -46,6 +55,10 @@ Nothing blocked.
 
 - User review of the live dashboard at http://127.0.0.1:9011/dashboard/
 - Decide merge/push of `feat/dashboard-overhaul`
+- Server Edition remaining phases (per
+  `docs/superpowers/specs/2026-07-02-server-edition-design.md`): **B** named
+  API keys v2, **C** dashboard Accounts tab (surface `pool.snapshot()` +
+  per-account probe/login UX), **D** Docker image + NAS deploy, **E** gap
+  mitigations.
 - Later (out of scope per spec): real image handoff, CLI session continuity
-  (`--resume`), consolidated-provider Docker image, deleting the legacy
-  provider-bridge once nothing depends on it.
+  (`--resume`), deleting the legacy provider-bridge once nothing depends on it.

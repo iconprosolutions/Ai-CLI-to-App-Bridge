@@ -51,14 +51,18 @@ What happens when Hermes sends
    `bridge-smart`) is looked up in `packages/provider/routes.json`, which maps
    route id → engine (`claude`) + upstream model (`claude-sonnet-4-6`). This
    file hot-reloads; the dashboard's Routes tab edits it through `/admin`.
-4. **Circuit breaker** — if this engine recently exhausted its quota (2
-   consecutive quota failures), the circuit is *open*: the request fails
-   immediately with `429 + Retry-After` and **no CLI is spawned**. After a
-   15-minute cool-down one trial request is let through (half-open); success
-   closes the circuit.
-5. **Concurrency gate** — one CLI run per engine at a time (subscription-
+4. **Account selection** — the engine's account **pool** picks a credential to
+   run under (round-robin across the configured accounts; a route may *pin* a
+   specific one). Each account has its own circuit breaker: if the chosen
+   account recently exhausted its quota (2 consecutive quota failures) its
+   circuit is *open* and it's skipped; if every account is cooling down the
+   request fails immediately with `429 + Retry-After` and **no CLI is spawned**.
+   Logged-out accounts are excluded (needs-login) until an operator re-probes
+   them. With no `accounts.json` there is one implicit `default` account and
+   this behaves exactly like a single-account bridge. See **Accounts** below.
+5. **Concurrency gate** — one CLI run per account at a time (subscription-
    friendly). A short FIFO queue (depth 4, 30 s) absorbs bursts; beyond that,
-   `429 engine_busy`.
+   `429 engine_busy`. Multiple accounts therefore give you parallel lanes.
 6. **Prompt flattening** — the OpenAI `messages` array becomes one text
    prompt with `[SYSTEM]/[USER]/[ASSISTANT]` blocks. If `tools` were sent, a
    system block teaches the model to answer with a ```json tool_calls block.
@@ -116,9 +120,64 @@ What happens when Hermes sends
     | `model_not_found` | CLI rejects the model | 400 `invalid_model` |
     | `invalid_request` | e.g. prompt too big for agy's argv | 400 |
     | `spawn_failed` / `bad_output` | binary missing / garbage output | 502 |
+    | `auth` | CLI account logged out / credentials expired | 503 `engine_auth_error` (marks the account needs-login, excludes it) |
     | `aborted` | client hung up or admin killed it | 499 (telemetry only; never counts against engine health) |
 
-    Quota and timeout failures also feed the circuit breaker.
+    Quota and timeout failures also feed the account's circuit breaker; `auth`
+    failures instead flag the account as needs-login (see **Accounts** below).
+
+## Accounts (multi-account pool)
+
+One bridge can front **N named accounts per engine** — several Claude
+subscriptions, several Antigravity sign-ins — so quota on one doesn't stop the
+others, and healthy accounts run in parallel. This is optional and
+zero-config: with no accounts file the bridge runs a single implicit `default`
+account that leaves the CLI environment untouched (identical to the old
+single-account behavior).
+
+**Config file** — `.bridge-runtime/accounts.json` (override with
+`BRIDGE_ACCOUNTS_FILE`), hot-reloaded on change and validated at boot; a bad
+edit is rejected and the last good config is kept:
+
+```json
+{
+  "claude": [
+    { "name": "work", "dir": "accounts/claude/work" },
+    { "name": "personal", "dir": "accounts/claude/personal" }
+  ],
+  "gemini": [
+    { "name": "team", "dir": "accounts/gemini/team" }
+  ]
+}
+```
+
+Each account's `dir` (resolved under `.bridge-runtime/`) is that account's
+isolated credential home. The adapter points the CLI at it per spawn:
+**claude** via `CLAUDE_CONFIG_DIR`, **agy** via `HOME` (both verified live).
+You log each account in once by running the CLI's own login flow with that env
+var set; the credentials persist in the account's `dir`.
+
+**Selection precedence** (`packages/provider/accounts.js`):
+1. A route with an `account` field is **pinned** — it always uses that account
+   and *fails loud* (503/429) rather than silently switching if it's
+   logged-out or cooling down.
+2. Otherwise **round-robin** across eligible accounts (enabled, logged-in,
+   breaker not open), advancing a per-engine cursor.
+3. If all accounts are open → `429` with the soonest `retryInSec`; if all are
+   disabled/logged-out → `503`.
+
+**One-shot transparent failover** — for un-pinned requests, a `quota`, `auth`,
+or `spawn_failed` failure on the selected account moves the **same** request to
+the next healthy account (the failed account's breaker/needs-login flag is
+recorded first). This happens **at most once** and **never after bytes have
+reached the client** — a mid-stream failure can't be silently retried onto
+another account, so partial output is never duplicated.
+
+**Needs-login recovery** — an `auth` failure marks the account `needsLogin` and
+excludes it from rotation. An operator re-logs-in that account's `dir`, then
+the per-account probe (`POST /admin/accounts/:engine/:name/probe`) clears the
+flag on a successful reply. `/dashboard/status` carries the full pool snapshot
+(`accounts.<engine>[]` with breaker state, inflight, queued, needsLogin).
 
 ## The packages
 
@@ -145,9 +204,11 @@ packages/
   provider/    @bridge/provider — the server on :9011
     server.js         wiring: auth, /v1, /dashboard/*, /admin, shutdown
     routes.js/.json   route registry: validate, hot-reload, admin mutations
+    accounts.js       multi-account pool: per-account breaker+semaphore,
+                      round-robin, pinning, needs-login, hot-reload
     translate.js      OpenAI messages ⇄ prompt, tool-call parsing
-    breaker.js        per-engine circuit breaker
-    semaphore.js      slot + bounded FIFO wait queue
+    breaker.js        per-account circuit breaker
+    semaphore.js      slot + bounded FIFO wait queue (one per account)
     telemetry.js      in-memory window + health history
     usage.js          durable JSONL ledger + pricing rollups
     pricing.json      editable API list prices ($-equivalent column)
@@ -186,6 +247,8 @@ Everything under `/admin` requires the bearer key even when `/v1` runs open;
   credentials.json    auto-generated API key (0600)
   connection.json     paste-ready client config (bridge:connect)
   usage/2026-07.jsonl usage ledger, one JSON line per request, no bodies
+  accounts.json       optional multi-account pool config (hot-reloaded)
+  accounts/<eng>/<n>/ per-account credential homes (CLAUDE_CONFIG_DIR / HOME)
   provider.log/.pid   launcher-managed process artifacts
 packages/provider/routes.json   the model catalogue (hot-reloaded)
 packages/provider/pricing.json  editable prices for the $-equivalent column
@@ -206,8 +269,9 @@ v1 `provider-bridge` for all `/v1` traffic.
 emit claude's stream-json framing (with fixed token counts), agy-style ANSI
 output, split multibyte characters across writes, flood, hang, or die with a
 quota message — and it logs its argv so tests can assert exactly how the CLI
-was invoked (or prove it *wasn't* spawned, e.g. when the breaker is open).
-Five suites, ~330 assertions: `npm test`.
+was invoked (or prove it *wasn't* spawned, e.g. when the breaker is open) and
+which credential dir each spawn ran under (account-rotation assertions).
+Five suites, ~360 assertions: `npm test`.
 
 ## Key env vars
 
@@ -224,4 +288,6 @@ Five suites, ~330 assertions: `npm test`.
 | `CLI_TIMEOUT_MS` | 300000 | per-run wall clock |
 | `MAX_PROMPT_BYTES` | 204800 | agy argv guard |
 | `BRIDGE_USAGE_DIR` / `BRIDGE_ROUTES_FILE` | runtime dir / routes.json | overridable for tests |
+| `BRIDGE_ACCOUNTS_FILE` | `.bridge-runtime/accounts.json` | multi-account pool config (absent → one implicit `default` account) |
+| `BREAKER_TIMEOUT_COOLDOWN_MS` | 120000 | breaker open time after repeated timeouts |
 | `SSE_HEARTBEAT_MS` / `HEALTH_SAMPLE_MS` | 15000 / 30000 | stream pings / health sampling |
