@@ -176,6 +176,14 @@ recorded first). This happens **at most once** and **never after bytes have
 reached the client** — a mid-stream failure can't be silently retried onto
 another account, so partial output is never duplicated.
 
+**Signed-in identity** — the dashboard shows *who* is currently logged in for
+each account, read straight from the CLI's config (claude:
+`<CLAUDE_CONFIG_DIR>/.claude.json` → `oauthAccount`; gemini:
+`<HOME>/.gemini/google_accounts.json` → `active`) — no CLI spawn, mtime-cached.
+It appears as a "Signed in" row on the Overview engine cards and each Accounts-tab
+card; a blank or expired login reads "not signed in". This makes swapping a
+terminal's claude/gemini login immediately visible.
+
 **Needs-login recovery** — an `auth` failure marks the account `needsLogin` and
 excludes it from rotation. An operator re-logs-in that account's `dir`, then
 the per-account probe (`POST /admin/accounts/:engine/:name/probe`) clears the
