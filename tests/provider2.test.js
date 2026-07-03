@@ -508,6 +508,10 @@ async function main() {
   const appRow = (usage.perApp || []).find((a) => a.appId === 'ledger-app');
   assert(appRow && appRow.requests >= 2 && appRow.usageAccuracy === 'mixed', `per-app rollup attributes usage (${appRow && appRow.usageAccuracy})`);
   assert(Array.isArray(usage.perDay) && usage.perDay.length >= 1 && usage.perDay[0].byEngine, 'per-day by-engine rollup present');
+  const acctRow = (usage.perAccount || []).find((a) => a.account === 'default');
+  assert(acctRow && acctRow.requests >= 2, 'per-account rollup groups the ledger by account (implicit default)');
+  const keyRow = (usage.perKey || []).find((k) => k.keyName === 'legacy');
+  assert(keyRow && keyRow.requests >= 2, 'per-key rollup groups the ledger by keyName (null → legacy)');
 
   console.log('\n## Dashboard static control center');
   r = await request(P1, { path: '/dashboard/' });

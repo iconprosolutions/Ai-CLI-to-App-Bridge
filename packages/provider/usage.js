@@ -102,6 +102,20 @@ function createUsageLedger({
     const perApp = new Map();
     const perRoute = new Map();
     const perDay = new Map();
+    const perAccount = new Map();
+    const perKey = new Map();
+
+    // Shared accumulator for the account/key dimensions (same shape as perApp
+    // minus the per-app-only accuracy detail).
+    const bump = (map, id, field, pt, ct, usd, success) => {
+      const row = map.get(id) || { [field]: id, requests: 0, promptTokens: 0, completionTokens: 0, usd: 0, errors: 0 };
+      row.requests += 1;
+      row.promptTokens += pt;
+      row.completionTokens += ct;
+      row.usd += usd;
+      if (!success) row.errors += 1;
+      map.set(id, row);
+    };
 
     for (const e of entries) {
       const pt = e.promptTokens || 0;
@@ -128,6 +142,9 @@ function createUsageLedger({
       if (e.usageSource === 'real') a.realCount += 1;
       a.latencySum += e.durationMs || 0;
       perApp.set(appKey, a);
+
+      bump(perAccount, e.account || 'default', 'account', pt, ct, usd, success);
+      bump(perKey, e.keyName || 'legacy', 'keyName', pt, ct, usd, success);
 
       if (e.routeId) {
         const r = perRoute.get(e.routeId) || { routeId: e.routeId, engine: e.engine, requests: 0, tokens: 0, usd: 0 };
@@ -160,6 +177,12 @@ function createUsageLedger({
       })).sort((x, y) => y.requests - x.requests),
       perRoute: [...perRoute.values()].map((r) => ({
         routeId: r.routeId, engine: r.engine, requests: r.requests, tokens: r.tokens, apiEquivalentUsd: round(r.usd),
+      })).sort((x, y) => y.requests - x.requests),
+      perAccount: [...perAccount.values()].map((a) => ({
+        account: a.account, requests: a.requests, promptTokens: a.promptTokens, completionTokens: a.completionTokens, apiEquivalentUsd: round(a.usd), errors: a.errors,
+      })).sort((x, y) => y.requests - x.requests),
+      perKey: [...perKey.values()].map((k) => ({
+        keyName: k.keyName, requests: k.requests, promptTokens: k.promptTokens, completionTokens: k.completionTokens, apiEquivalentUsd: round(k.usd), errors: k.errors,
       })).sort((x, y) => y.requests - x.requests),
       perDay: [...perDay.values()].sort((x, y) => (x.date < y.date ? -1 : 1)),
     };
