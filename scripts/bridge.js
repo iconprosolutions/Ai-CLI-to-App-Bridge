@@ -3,7 +3,6 @@
 const fs = require('fs');
 const path = require('path');
 const http = require('http');
-const crypto = require('crypto');
 const { spawn } = require('child_process');
 
 const ROOT = path.resolve(__dirname, '..');
@@ -33,17 +32,14 @@ function resolveKey() {
   if (explicit) return { key: explicit, source: 'env' };
   if (INSECURE) return { key: 'test-key', source: 'insecure (dev)' };
   ensureRuntimeDir();
-  try {
-    const saved = JSON.parse(fs.readFileSync(CRED_FILE, 'utf8'));
-    if (saved && saved.apiKey) {
-      // Tighten pre-existing files that were created world-readable.
-      try { fs.chmodSync(CRED_FILE, 0o600); } catch (_) { /* best effort */ }
-      return { key: saved.apiKey, source: 'persisted' };
-    }
-  } catch (_) { /* not generated yet */ }
-  const key = crypto.randomBytes(24).toString('hex');
-  fs.writeFileSync(CRED_FILE, `${JSON.stringify({ apiKey: key, createdAt: new Date().toISOString() }, null, 2)}\n`, { mode: 0o600 });
-  return { key, source: 'generated' };
+  // The keystore owns the file format: creates a v2 doc with one admin key on
+  // first run, and migrates a legacy v1 ({"apiKey":...}) file in place while
+  // preserving the key value (so existing consumers keep working). The admin
+  // key is what we display and pass to the provider for backward compat.
+  const { bootstrapCredentialsFile } = require('../packages/provider/keys');
+  const boot = bootstrapCredentialsFile(CRED_FILE);
+  const source = boot.created ? 'generated' : (boot.migrated ? 'persisted (migrated to v2)' : 'persisted');
+  return { key: boot.adminKey, source };
 }
 
 const cred = resolveKey();
