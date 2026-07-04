@@ -1,6 +1,8 @@
 'use strict';
 
 const express = require('express');
+const fs = require('fs');
+const path = require('path');
 
 // Control-plane endpoints backing the dashboard's buttons. ALWAYS behind an
 // admin-role key — even when /v1 auth is open — because these mutate state and
@@ -8,7 +10,7 @@ const express = require('express');
 // configured at all, admin is disabled.
 function createAdminRouter({
   keyStore, registry, pool, adapters, activeRequests, capture, events, enginesDisabled, limitGuard,
-  userStore, ledger, sessionUser,
+  userStore, ledger, sessionUser, accountsFile,
 }) {
   const router = express.Router();
 
@@ -215,6 +217,75 @@ function createAdminRouter({
       return res.json({ revoked: true, name: req.params.name });
     } catch (err) {
       return res.status(400).json({ error: err.message });
+    }
+  });
+
+  // ── Account onboarding from the dashboard (no terminal) ──────────────────
+  // claude: paste the sk-ant-oat… token that `claude setup-token` prints
+  // (run it on ANY machine with the claude CLI — the browser step happens
+  // there). gemini: paste the JSON contents of
+  // ~/.gemini/antigravity-cli/antigravity-oauth-token from a machine where agy
+  // is signed in. Files land in the runtime volume; accounts.json hot-reloads.
+  const ACCT_NAME_RE = /^[A-Za-z0-9._-]+$/;
+  function writeFileAtomic(file, data, mode) {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const tmp = `${file}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, data, { mode: mode || 0o600 });
+    fs.renameSync(tmp, file);
+  }
+
+  router.post('/accounts/:engine', (req, res) => {
+    const engine = engineOr404(req, res);
+    if (!engine || !accountsFile) return;
+    const body = req.body || {};
+    const name = String(body.name || '').trim();
+    if (!ACCT_NAME_RE.test(name)) {
+      return res.status(400).json({ error: 'Account name must be letters, digits, . _ -' });
+    }
+    const baseDir = path.dirname(accountsFile);
+    const dir = path.join(baseDir, 'accounts', engine, name);
+    try {
+      if (engine === 'claude') {
+        const token = String(body.token || '').trim();
+        if (!token.startsWith('sk-ant-')) {
+          return res.status(400).json({ error: 'Paste the sk-ant-oat… token printed by `claude setup-token`.' });
+        }
+        const expiresAt = (Math.floor(Date.now() / 1000) + 365 * 24 * 3600) * 1000; // tokens are issued for 1 year
+        writeFileAtomic(path.join(dir, '.credentials.json'), JSON.stringify({
+          claudeAiOauth: { accessToken: token, expiresAt, scopes: ['user:inference'], subscriptionType: 'external' },
+        }));
+        if (!fs.existsSync(path.join(dir, '.claude.json'))) {
+          writeFileAtomic(path.join(dir, '.claude.json'), JSON.stringify({ hasCompletedOnboarding: true }));
+        }
+      } else {
+        let tok = body.oauthToken;
+        if (typeof tok === 'string') {
+          try { tok = JSON.parse(tok); } catch (_) {
+            return res.status(400).json({ error: 'oauthToken must be the JSON contents of ~/.gemini/antigravity-cli/antigravity-oauth-token' });
+          }
+        }
+        if (!tok || typeof tok.token !== 'string') {
+          return res.status(400).json({ error: 'oauthToken is missing its "token" field — copy the whole file contents.' });
+        }
+        writeFileAtomic(path.join(dir, '.gemini', 'antigravity-cli', 'antigravity-oauth-token'), JSON.stringify(tok));
+        if (body.email) {
+          writeFileAtomic(path.join(dir, '.gemini', 'google_accounts.json'), JSON.stringify({ active: String(body.email) }));
+        }
+      }
+
+      // Register in accounts.json (created if absent) — the pool hot-reloads.
+      let doc = {};
+      try { doc = JSON.parse(fs.readFileSync(accountsFile, 'utf8')); } catch (_) { doc = {}; }
+      if (!Array.isArray(doc[engine])) doc[engine] = [];
+      const rel = `accounts/${engine}/${name}`;
+      if (!doc[engine].some((a) => a && a.name === name)) {
+        doc[engine].push({ name, dir: rel });
+        writeFileAtomic(accountsFile, `${JSON.stringify(doc, null, 2)}\n`, 0o644);
+      }
+      events.emit('account.change', { action: 'add', engine, account: name });
+      return res.json({ ok: true, engine, name, dir: rel });
+    } catch (err) {
+      return res.status(500).json({ error: err.message });
     }
   });
 

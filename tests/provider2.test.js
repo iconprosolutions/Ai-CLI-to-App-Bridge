@@ -1212,6 +1212,7 @@ async function main() {
     BRIDGE_CREDENTIALS_FILE: CREDS26,
     BRIDGE_USERS_FILE: path.join(DIR26, 'users.json'),
     BRIDGE_SESSIONS_FILE: path.join(DIR26, 'sessions.json'),
+    BRIDGE_ACCOUNTS_FILE: path.join(DIR26, 'accounts.json'),
     USAGE_FLUSH_MS: '50', DASHBOARD_AUTH: '1',
   });
 
@@ -1297,6 +1298,31 @@ async function main() {
   assert(r.status === 401, "a deleted user's key no longer authorizes");
   r = await request(P26, { path: '/admin/users/admin', method: 'DELETE', headers: { Authorization: `Bearer ${ADMIN26}` } });
   assert(r.status === 400, 'the last admin user cannot be deleted');
+
+  // Web account onboarding (the dashboard "Add account" panel).
+  r = await request(P26, {
+    path: '/admin/accounts/claude', method: 'POST', headers: { Authorization: `Bearer ${ADMIN26}` },
+    body: { name: 'webacct', token: 'sk-ant-oat01-fake-token-for-tests' },
+  });
+  assert(r.status === 200 && JSON.parse(r.body).ok, 'claude account added via the web endpoint');
+  {
+    const doc = JSON.parse(fs.readFileSync(path.join(DIR26, 'accounts.json'), 'utf8'));
+    assert(doc.claude.some((a) => a.name === 'webacct'), 'accounts.json gains the entry (pool hot-reloads)');
+    const creds = JSON.parse(fs.readFileSync(path.join(DIR26, 'accounts', 'claude', 'webacct', '.credentials.json'), 'utf8'));
+    assert(creds.claudeAiOauth.accessToken === 'sk-ant-oat01-fake-token-for-tests', 'pasted token stored as the account credentials');
+  }
+  r = await request(P26, {
+    path: '/admin/accounts/gemini', method: 'POST', headers: { Authorization: `Bearer ${ADMIN26}` },
+    body: { name: 'webgem', oauthToken: '{"token":"t1","auth_method":"oauth"}', email: 'g@example.com' },
+  });
+  assert(r.status === 200, 'gemini account added via the web endpoint');
+  assert(fs.existsSync(path.join(DIR26, 'accounts', 'gemini', 'webgem', '.gemini', 'antigravity-cli', 'antigravity-oauth-token')),
+    'gemini oauth token file written in the agy layout');
+  r = await request(P26, {
+    path: '/admin/accounts/claude', method: 'POST', headers: { Authorization: `Bearer ${ADMIN26}` },
+    body: { name: 'bad', token: 'not-a-token' },
+  });
+  assert(r.status === 400, 'a non sk-ant token is rejected with 400');
 
   console.log(`\n# Result: ${passed} passed, ${failed} failed`);
   process.exit(failed === 0 ? 0 : 1);

@@ -85,7 +85,30 @@
 <main class="wrap view" id="view-accounts">
   <div class="sec-head"><h2>Accounts</h2><span class="note">per-engine credential pool · rotation · one-shot failover · needs-login</span></div>
   <div class="engines" id="acct-cards"></div>
-  <div class="privacy" style="margin-top:16px">Accounts come from <code>.bridge-runtime/accounts.json</code> (hot-reloaded, validated). With no file, each engine runs one implicit <code>default</code> account whose spawns use the ambient environment. Enable/disable here is runtime-only — edit the file to persist. Each account gets its own circuit breaker and CLI lane, so multiple accounts run in parallel; a quota/auth failure on an un-pinned account fails the request over to the next healthy one exactly once.</div>
+  <div class="grid2" style="margin-top:26px">
+    <div class="panel">
+      <h3>Add an account (no terminal needed)</h3>
+      <div class="field"><label for="aa-engine">Engine</label><select id="aa-engine"><option value="claude">claude</option><option value="gemini">gemini</option></select></div>
+      <div class="field"><label for="aa-name">Account name</label><input id="aa-name" placeholder="personal, team2, …"></div>
+      <div class="field"><label for="aa-token">Credential</label><textarea id="aa-token" rows="3" style="width:100%;font-family:inherit;font-size:11px" placeholder="claude: paste the sk-ant-oat… token · gemini: paste the antigravity-oauth-token file contents"></textarea></div>
+      <div class="field" id="aa-email-wrap" style="display:none"><label for="aa-email">Google account email (for the display)</label><input id="aa-email" placeholder="someone@gmail.com"></div>
+      <button class="abtn primary" id="aa-add">Add account</button>
+      <span class="mono" id="aa-msg" style="font-size:11px;color:var(--faint);margin-left:10px"></span>
+    </div>
+    <div class="panel">
+      <h3>Where the credential comes from</h3>
+      <p class="mono" style="font-size:11px;color:var(--body);line-height:1.8">
+        <b>claude</b> — on any machine with the Claude CLI, run <code>claude setup-token</code>
+        signed in as the account you're adding; approve in the browser and paste the
+        printed <code>sk-ant-oat…</code> token here (valid ~1 year).<br><br>
+        <b>gemini</b> — on a machine with a browser, run <code>agy</code> under a scratch HOME
+        (<code>export HOME=/tmp/agy-x && agy</code>), sign in, quit, then paste the contents of
+        <code>/tmp/agy-x/.gemini/antigravity-cli/antigravity-oauth-token</code> here.<br><br>
+        The account joins rotation immediately — hit Probe on its card to confirm.
+      </p>
+    </div>
+  </div>
+  <div class="privacy" style="margin-top:16px">Accounts come from <code>.bridge-runtime/accounts.json</code> (hot-reloaded, validated). With no file, each engine runs one implicit <code>default</code> account whose spawns use the ambient environment. Enable/disable here is runtime-only — edit the file to persist. Each account gets its own circuit breaker and CLI lane, so multiple accounts run in parallel; a quota/auth failure on an un-pinned account fails the request over to the next healthy one exactly once. Unpinned traffic <b>round-robins</b> across accounts; pin a key to an account in the Connect tab to dedicate capacity.</div>
 </main>
 
 <!-- ═══ USAGE ═══ -->

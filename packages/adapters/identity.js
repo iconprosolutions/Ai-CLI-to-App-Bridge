@@ -29,9 +29,20 @@ function readJsonCached(file) {
 // claude: <configDir>/.claude.json → oauthAccount. configDir is CLAUDE_CONFIG_DIR
 // for a pooled account, or the home dir for the implicit default account.
 function claudeIdentity(configDir) {
-  const j = readJsonCached(path.join(configDir || os.homedir(), '.claude.json'));
+  const dir = configDir || os.homedir();
+  const j = readJsonCached(path.join(dir, '.claude.json'));
   const oa = j && j.oauthAccount;
-  if (!oa || !oa.emailAddress) return null;
+  if (!oa || !oa.emailAddress) {
+    // Token-based logins (claude setup-token) never write oauthAccount, but
+    // they DO have working credentials — show that instead of "not signed in".
+    const creds = readJsonCached(path.join(dir, '.credentials.json'));
+    const tok = creds && creds.claudeAiOauth;
+    if (tok && tok.accessToken) {
+      const exp = tok.expiresAt ? new Date(tok.expiresAt).toISOString().slice(0, 10) : null;
+      return { email: 'token login', label: exp ? `long-lived token · expires ${exp}` : 'long-lived token', org: null, plan: tok.subscriptionType || null };
+    }
+    return null;
+  }
   return {
     email: String(oa.emailAddress),
     label: oa.displayName ? String(oa.displayName) : null,

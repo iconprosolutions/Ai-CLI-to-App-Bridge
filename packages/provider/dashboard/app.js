@@ -1044,6 +1044,26 @@
     });
   });
 
+  // Add an engine account from the dashboard (web onboarding).
+  $('aa-engine').addEventListener('change', function () {
+    $('aa-email-wrap').style.display = this.value === 'gemini' ? '' : 'none';
+  });
+  $('aa-add').addEventListener('click', function () {
+    var engine = $('aa-engine').value;
+    var body = { name: $('aa-name').value.trim() };
+    if (engine === 'claude') body.token = $('aa-token').value.trim();
+    else { body.oauthToken = $('aa-token').value.trim(); if ($('aa-email').value.trim()) body.email = $('aa-email').value.trim(); }
+    $('aa-msg').textContent = 'Adding…';
+    admin('POST', '/admin/accounts/' + engine, body).then(function (d) {
+      $('aa-msg').textContent = 'Added "' + d.name + '" — probing…';
+      ['aa-name', 'aa-token', 'aa-email'].forEach(function (id) { $(id).value = ''; });
+      return admin('POST', '/admin/accounts/' + engine + '/' + encodeURIComponent(d.name) + '/probe', {}).then(function (p) {
+        $('aa-msg').textContent = p.ok ? '✓ "' + d.name + '" is signed in and answering.' : 'Added, but the probe failed: ' + (p.message || 'check the credential.');
+        fetchStatus();
+      });
+    }).catch(function (err) { if (err && err.message !== 'unauthorized') $('aa-msg').textContent = err.message; });
+  });
+
   $('user-create').addEventListener('click', function () {
     var body = {
       username: $('u-name').value.trim(),

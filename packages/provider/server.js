@@ -384,7 +384,7 @@ app.get('/dashboard/events', dashboardGate, events.handler);
 // Control plane (always key-gated; see admin.js).
 app.use('/admin', createAdminRouter({
   keyStore, registry, pool, adapters, activeRequests, capture, events, enginesDisabled, limitGuard,
-  userStore, ledger, sessionUser,
+  userStore, ledger, sessionUser, accountsFile: ACCOUNTS_FILE,
 }));
 
 // Durable usage rollups (JSONL ledger; survives restarts).
