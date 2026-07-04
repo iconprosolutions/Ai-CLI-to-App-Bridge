@@ -38,11 +38,14 @@ function claudeIdentity(configDir) {
     const creds = readJsonCached(path.join(dir, '.credentials.json'));
     const tok = creds && creds.claudeAiOauth;
     if (tok && tok.accessToken) {
+      // 'external' was this bridge's placeholder when the token flow doesn't
+      // report a plan — these are always subscription tokens, never API credit.
+      const plan = (tok.subscriptionType && tok.subscriptionType !== 'external') ? tok.subscriptionType : 'subscription';
       if (tok.refreshToken) {
-        return { email: 'oauth login', label: 'browser login · self-refreshing', org: null, plan: tok.subscriptionType || null };
+        return { email: 'oauth login', label: 'browser login · self-refreshing', org: null, plan };
       }
       const exp = tok.expiresAt ? new Date(tok.expiresAt).toISOString().slice(0, 10) : null;
-      return { email: 'token login', label: exp ? `long-lived token · expires ${exp}` : 'long-lived token', org: null, plan: tok.subscriptionType || null };
+      return { email: 'token login', label: exp ? `long-lived token · expires ${exp}` : 'long-lived token', org: null, plan };
     }
     return null;
   }
