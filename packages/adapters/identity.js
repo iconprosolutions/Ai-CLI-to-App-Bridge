@@ -38,6 +38,9 @@ function claudeIdentity(configDir) {
     const creds = readJsonCached(path.join(dir, '.credentials.json'));
     const tok = creds && creds.claudeAiOauth;
     if (tok && tok.accessToken) {
+      if (tok.refreshToken) {
+        return { email: 'oauth login', label: 'browser login · self-refreshing', org: null, plan: tok.subscriptionType || null };
+      }
       const exp = tok.expiresAt ? new Date(tok.expiresAt).toISOString().slice(0, 10) : null;
       return { email: 'token login', label: exp ? `long-lived token · expires ${exp}` : 'long-lived token', org: null, plan: tok.subscriptionType || null };
     }

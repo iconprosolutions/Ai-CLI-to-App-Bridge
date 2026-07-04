@@ -90,7 +90,17 @@
       <h3>Add an account (no terminal needed)</h3>
       <div class="field"><label for="aa-engine">Engine</label><select id="aa-engine"><option value="claude">claude</option><option value="gemini">gemini</option></select></div>
       <div class="field"><label for="aa-name">Account name</label><input id="aa-name" placeholder="personal, team2, …"></div>
-      <div class="field"><label for="aa-token">Credential</label><textarea id="aa-token" rows="3" style="width:100%;font-family:inherit;font-size:11px" placeholder="claude: paste the sk-ant-oat… token · gemini: paste the antigravity-oauth-token file contents"></textarea></div>
+      <div id="aa-guided">
+        <div class="field"><label>Browser login (recommended)</label>
+          <button class="abtn primary" id="aa-start">1 · Generate login link</button>
+          <a id="aa-link" href="#" target="_blank" rel="noopener" style="display:none;margin-left:10px;font-size:12px">Open claude.ai and approve ↗</a>
+        </div>
+        <div class="field" id="aa-guided2" style="display:none"><label for="aa-code">2 · Paste the code claude.ai shows after approving</label><input id="aa-code" placeholder="xxxxxxxx#xxxxxxxx">
+          <button class="abtn primary" id="aa-finish" style="margin-top:8px">3 · Complete login</button>
+        </div>
+        <p class="mono" style="font-size:10px;color:var(--faint);margin:4px 0 10px">Sign in to claude.ai as the account you're adding before clicking the link. Or paste a <code>claude setup-token</code> below instead.</p>
+      </div>
+      <div class="field"><label for="aa-token">Credential (paste instead of browser login)</label><textarea id="aa-token" rows="3" style="width:100%;font-family:inherit;font-size:11px" placeholder="claude: paste the sk-ant-oat… token · gemini: paste the antigravity-oauth-token file contents"></textarea></div>
       <div class="field" id="aa-email-wrap" style="display:none"><label for="aa-email">Google account email (for the display)</label><input id="aa-email" placeholder="someone@gmail.com"></div>
       <button class="abtn primary" id="aa-add">Add account</button>
       <span class="mono" id="aa-msg" style="font-size:11px;color:var(--faint);margin-left:10px"></span>

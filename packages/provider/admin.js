@@ -3,6 +3,7 @@
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 
 // Control-plane endpoints backing the dashboard's buttons. ALWAYS behind an
 // admin-role key — even when /v1 auth is open — because these mutate state and
@@ -273,20 +274,108 @@ function createAdminRouter({
         }
       }
 
-      // Register in accounts.json (created if absent) — the pool hot-reloads.
-      let doc = {};
-      try { doc = JSON.parse(fs.readFileSync(accountsFile, 'utf8')); } catch (_) { doc = {}; }
-      if (!Array.isArray(doc[engine])) doc[engine] = [];
-      const rel = `accounts/${engine}/${name}`;
-      if (!doc[engine].some((a) => a && a.name === name)) {
-        doc[engine].push({ name, dir: rel });
-        writeFileAtomic(accountsFile, `${JSON.stringify(doc, null, 2)}\n`, 0o644);
-      }
-      events.emit('account.change', { action: 'add', engine, account: name });
-      pool.reload(); // deterministic — don't depend on the file watcher
+      const rel = registerAccount(engine, name);
       return res.json({ ok: true, engine, name, dir: rel });
     } catch (err) {
       return res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Register an onboarded account dir in accounts.json + hot-reload the pool.
+  function registerAccount(engine, name) {
+    let doc = {};
+    try { doc = JSON.parse(fs.readFileSync(accountsFile, 'utf8')); } catch (_) { doc = {}; }
+    if (!Array.isArray(doc[engine])) doc[engine] = [];
+    const rel = `accounts/${engine}/${name}`;
+    if (!doc[engine].some((a) => a && a.name === name)) {
+      doc[engine].push({ name, dir: rel });
+      writeFileAtomic(accountsFile, `${JSON.stringify(doc, null, 2)}\n`, 0o644);
+    }
+    pool.reload();
+    events.emit('account.change', { action: 'add', engine, account: name });
+    return rel;
+  }
+
+  // ── Guided claude browser login (OAuth PKCE) ─────────────────────────────
+  // The same authorization-code + PKCE flow `claude setup-token` drives, using
+  // Claude Code's public client id — but the dashboard is the terminal: we
+  // hand the operator the authorize link, they approve at claude.ai and paste
+  // the code back, we exchange it and the account joins the pool. If Anthropic
+  // ever changes the flow, the paste-a-token path still works.
+  const CLAUDE_OAUTH = {
+    clientId: '9d1c250a-e61b-44d9-88ed-5944d1962f5e',
+    authorize: 'https://claude.ai/oauth/authorize',
+    token: 'https://console.anthropic.com/v1/oauth/token',
+    redirect: 'https://console.anthropic.com/oauth/code/callback',
+    scope: 'org:create_api_key user:profile user:inference',
+  };
+  const oauthPending = new Map(); // state → { verifier, name, at }
+
+  router.post('/oauth/claude/start', (req, res) => {
+    const name = String((req.body || {}).name || '').trim();
+    if (!ACCT_NAME_RE.test(name)) {
+      return res.status(400).json({ error: 'Account name must be letters, digits, . _ -' });
+    }
+    for (const [k, v] of oauthPending) { if (Date.now() - v.at > 10 * 60e3) oauthPending.delete(k); }
+    const verifier = crypto.randomBytes(32).toString('base64url');
+    const challenge = crypto.createHash('sha256').update(verifier).digest('base64url');
+    const state = crypto.randomBytes(16).toString('base64url');
+    oauthPending.set(state, { verifier, name, at: Date.now() });
+    const url = `${CLAUDE_OAUTH.authorize}?${new URLSearchParams({
+      code: 'true',
+      client_id: CLAUDE_OAUTH.clientId,
+      response_type: 'code',
+      redirect_uri: CLAUDE_OAUTH.redirect,
+      scope: CLAUDE_OAUTH.scope,
+      code_challenge: challenge,
+      code_challenge_method: 'S256',
+      state,
+    })}`;
+    res.json({ url, state, expiresInSec: 600 });
+  });
+
+  router.post('/oauth/claude/finish', async (req, res) => {
+    let { code, state } = req.body || {};
+    code = String(code || '').trim();
+    if (code.includes('#')) { const [c, s] = code.split('#'); code = c; state = state || s; }
+    const pending = oauthPending.get(String(state || ''));
+    if (!pending) return res.status(400).json({ error: 'Unknown or expired login attempt — generate a new link.' });
+    try {
+      const resp = await fetch(CLAUDE_OAUTH.token, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          grant_type: 'authorization_code',
+          code,
+          state,
+          client_id: CLAUDE_OAUTH.clientId,
+          redirect_uri: CLAUDE_OAUTH.redirect,
+          code_verifier: pending.verifier,
+        }),
+      });
+      if (!resp.ok) {
+        const detail = await resp.text();
+        return res.status(502).json({ error: `Token exchange failed (${resp.status}): ${detail.slice(0, 200)}` });
+      }
+      const tok = await resp.json();
+      oauthPending.delete(state);
+      const dir = path.join(path.dirname(accountsFile), 'accounts', 'claude', pending.name);
+      writeFileAtomic(path.join(dir, '.credentials.json'), JSON.stringify({
+        claudeAiOauth: {
+          accessToken: tok.access_token,
+          refreshToken: tok.refresh_token,
+          expiresAt: Date.now() + (Number(tok.expires_in) || 3600) * 1000,
+          scopes: String(tok.scope || CLAUDE_OAUTH.scope).split(' '),
+          subscriptionType: (tok.account && tok.account.subscription_type) || 'external',
+        },
+      }));
+      if (!fs.existsSync(path.join(dir, '.claude.json'))) {
+        writeFileAtomic(path.join(dir, '.claude.json'), JSON.stringify({ hasCompletedOnboarding: true }));
+      }
+      registerAccount('claude', pending.name);
+      return res.json({ ok: true, engine: 'claude', name: pending.name });
+    } catch (err) {
+      return res.status(502).json({ error: `Could not reach the token endpoint: ${err.message}` });
     }
   });
 

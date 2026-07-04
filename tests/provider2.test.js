@@ -1410,6 +1410,29 @@ async function main() {
   });
   assert(r.status === 400, 'invalid pinMode rejected with 400');
 
+  // Guided claude browser login: start hands out a claude.ai PKCE link; finish
+  // rejects unknown/expired attempts (the happy path needs a human + browser).
+  r = await request(P27, {
+    path: '/admin/oauth/claude/start', method: 'POST', headers: { Authorization: `Bearer ${ADMIN27}` },
+    body: { name: 'browser1' },
+  });
+  {
+    const d = JSON.parse(r.body);
+    assert(r.status === 200 && d.url.startsWith('https://claude.ai/oauth/authorize?')
+      && d.url.includes('code_challenge=') && /^[A-Za-z0-9_-]{10,}$/.test(d.state),
+      'oauth start returns a claude.ai authorize link + state');
+  }
+  r = await request(P27, {
+    path: '/admin/oauth/claude/start', method: 'POST', headers: { Authorization: `Bearer ${ADMIN27}` },
+    body: { name: 'bad name!' },
+  });
+  assert(r.status === 400, 'oauth start rejects invalid account names');
+  r = await request(P27, {
+    path: '/admin/oauth/claude/finish', method: 'POST', headers: { Authorization: `Bearer ${ADMIN27}` },
+    body: { code: 'whatever#not-a-real-state' },
+  });
+  assert(r.status === 400, 'oauth finish rejects an unknown state');
+
   console.log(`\n# Result: ${passed} passed, ${failed} failed`);
   process.exit(failed === 0 ? 0 : 1);
 }

@@ -1058,6 +1058,34 @@
   // Add an engine account from the dashboard (web onboarding).
   $('aa-engine').addEventListener('change', function () {
     $('aa-email-wrap').style.display = this.value === 'gemini' ? '' : 'none';
+    $('aa-guided').style.display = this.value === 'claude' ? '' : 'none';
+  });
+
+  // Guided claude browser login: link → approve → paste code → done.
+  var aaOauthState = null;
+  $('aa-start').addEventListener('click', function () {
+    var name = $('aa-name').value.trim();
+    if (!name) { $('aa-msg').textContent = 'Account name first.'; return; }
+    admin('POST', '/admin/oauth/claude/start', { name: name }).then(function (d) {
+      aaOauthState = d.state;
+      $('aa-link').href = d.url;
+      $('aa-link').style.display = '';
+      $('aa-guided2').style.display = '';
+      $('aa-msg').textContent = 'Link ready — open it, approve, then paste the code (valid 10 min).';
+    }).catch(function (err) { if (err && err.message !== 'unauthorized') $('aa-msg').textContent = err.message; });
+  });
+  $('aa-finish').addEventListener('click', function () {
+    $('aa-msg').textContent = 'Exchanging code…';
+    admin('POST', '/admin/oauth/claude/finish', { code: $('aa-code').value.trim(), state: aaOauthState }).then(function (d) {
+      $('aa-code').value = '';
+      $('aa-link').style.display = 'none';
+      $('aa-guided2').style.display = 'none';
+      $('aa-msg').textContent = '✓ "' + d.name + '" signed in — probing…';
+      return admin('POST', '/admin/accounts/claude/' + encodeURIComponent(d.name) + '/probe', {}).then(function (p) {
+        $('aa-msg').textContent = p.ok ? '✓ "' + d.name + '" is signed in and answering.' : 'Signed in, but the probe failed: ' + (p.message || '');
+        fetchStatus();
+      });
+    }).catch(function (err) { if (err && err.message !== 'unauthorized') $('aa-msg').textContent = err.message; });
   });
   $('aa-add').addEventListener('click', function () {
     var engine = $('aa-engine').value;
