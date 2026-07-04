@@ -1062,9 +1062,11 @@ async function main() {
   }
   r = await request(P18, { path: '/admin/keys', method: 'POST', headers: { Authorization: `Bearer ${ADMIN18}` }, body: { name: 'ci', role: 'app' } });
   const minted = JSON.parse(r.body);
-  assert(r.status === 200 && /^[0-9a-f]{48}$/.test(minted.key), 'mint returns a 48-hex secret once');
+  assert(r.status === 200 && /^sk-bridge-[0-9a-f]{48}$/.test(minted.key), 'mint returns an sk-bridge-prefixed secret once');
   r = await chat18(minted.key, 'bridge-claude-haiku-4.5-spark');
-  assert(r.status === 200, 'freshly minted key authorizes /v1');
+  assert(r.status === 200, 'freshly minted (prefixed) key authorizes /v1');
+  r = await chat18(minted.key.replace('sk-bridge-', ''), 'bridge-claude-haiku-4.5-spark');
+  assert(r.status === 200, 'the bare secret (no prefix) also authorizes — legacy keys keep working');
   r = await request(P18, { path: '/admin/keys/ci', method: 'DELETE', headers: { Authorization: `Bearer ${ADMIN18}` } });
   assert(r.status === 200, 'admin can revoke a key');
   r = await chat18(minted.key, 'bridge-claude-haiku-4.5-spark');

@@ -605,9 +605,14 @@
   function renderKeys() {
     var el = $('keys-table');
     if (!el) return;
-    if (!key()) { el.innerHTML = '<div class="empty">Set your admin API key (left) to manage keys.</div>'; return; }
-    fetch('/admin/keys', { headers: { Authorization: 'Bearer ' + key() } }).then(function (r) {
-      if (r.status === 401) { el.innerHTML = '<div class="empty">Key not recognized.</div>'; return null; }
+    // An admin session authorizes on its own (cookie); the pasted key is the
+    // fallback for key-only / open-mode setups.
+    if (!key() && !(state.user && state.user.role === 'admin')) {
+      el.innerHTML = '<div class="empty">Sign in as an admin — or set the admin API key (left) — to manage keys.</div>';
+      return;
+    }
+    fetch('/admin/keys', { headers: key() ? { Authorization: 'Bearer ' + key() } : {} }).then(function (r) {
+      if (r.status === 401) { el.innerHTML = '<div class="empty">' + (key() ? 'Key not recognized.' : 'Session expired — sign in again.') + '</div>'; return null; }
       if (r.status === 403) { el.innerHTML = '<div class="empty">This key is app-role — an admin key is required to manage keys.</div>'; return null; }
       if (r.status === 503) { el.innerHTML = '<div class="empty">Auth is disabled — no keys to manage.</div>'; return null; }
       return r.json();

@@ -28,6 +28,15 @@ function newSecret() {
   return crypto.randomBytes(24).toString('hex'); // 48 hex chars
 }
 
+// Keys are presented OpenRouter/OpenAI-style as "sk-bridge-<secret>" so they
+// read as API keys in any tool. Stored and verified as the bare secret — the
+// prefix is optional on the wire, so pre-prefix keys keep working.
+const KEY_PREFIX = 'sk-bridge-';
+function presentKey(secret) { return KEY_PREFIX + secret; }
+function bareToken(token) {
+  return String(token || '').startsWith(KEY_PREFIX) ? String(token).slice(KEY_PREFIX.length) : token;
+}
+
 function validateAccountPin(pin) {
   if (pin === undefined || pin === null) return undefined;
   if (typeof pin !== 'object' || Array.isArray(pin)) {
@@ -139,7 +148,7 @@ function createKeyStore({ file, envKey = '' } = {}) {
 
   function verify(token) {
     if (typeof token !== 'string' || !token) return null;
-    const a = Buffer.from(token);
+    const a = Buffer.from(bareToken(token));
     let match = null;
     // Compare against every record (constant work per key) so a hit vs. miss
     // isn't distinguishable by timing.
@@ -195,7 +204,7 @@ function createKeyStore({ file, envKey = '' } = {}) {
     if (lim) rec.limits = lim;
     data.keys.push(rec);
     writeAtomic(file, { version: 2, keys: data.keys });
-    return { ...rec };
+    return { ...rec, key: presentKey(rec.key) };
   }
 
   // Update a key's limits in place (pass null/{} to clear). The secret and
@@ -252,4 +261,4 @@ function bootstrapCredentialsFile(file) {
   return { adminKey: rec.key, created: existedRaw === null, migrated: wasV1 };
 }
 
-module.exports = { createKeyStore, loadAndMigrate, bootstrapCredentialsFile, validateAccountPin, validateLimits };
+module.exports = { createKeyStore, loadAndMigrate, bootstrapCredentialsFile, validateAccountPin, validateLimits, presentKey };

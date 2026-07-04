@@ -92,7 +92,7 @@ function run() {
     fs.writeFileSync(file, JSON.stringify({ apiKey: 'admin-key-value' }));
     const store = createKeyStore({ file });
     const rec = store.mint({ name: 'hermes', role: 'app', accountPin: { gemini: 'main' } });
-    assert(HEX48.test(rec.key), 'mint returns a 48-hex secret');
+    assert(/^sk-bridge-[0-9a-f]{48}$/.test(rec.key), 'mint returns an sk-bridge-prefixed 48-hex secret');
     assert(rec.name === 'hermes' && rec.role === 'app', 'mint echoes name/role');
     const reloaded = createKeyStore({ file });
     assert(reloaded.verify(rec.key) && reloaded.verify(rec.key).role === 'app', 'minted key persists and verifies after reload');
