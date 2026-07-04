@@ -233,6 +233,16 @@ function createKeyStore({ file, envKey = '' } = {}) {
     return { name: rec.name, role: rec.role, accountPin: rec.accountPin ? { ...rec.accountPin } : undefined, limits: rec.limits ? { ...rec.limits } : undefined };
   }
 
+  // Repoint a key's account pin (used when an account is renamed).
+  function setAccountPin(name, pin) {
+    const rec = data.keys.find((k) => k.name === name);
+    if (!rec) throw new Error(`Unknown key "${name}"`);
+    const p = validateAccountPin(pin);
+    if (p) rec.accountPin = p; else delete rec.accountPin;
+    writeAtomic(file, { version: 2, keys: data.keys });
+    return publicKey(rec);
+  }
+
   function revoke(name) {
     const i = data.keys.findIndex((k) => k.name === name);
     if (i === -1) throw new Error(`Unknown key "${name}"`);
@@ -253,6 +263,7 @@ function createKeyStore({ file, envKey = '' } = {}) {
     mint,
     revoke,
     setLimits,
+    setAccountPin,
     get authEnabled() { return data.keys.length > 0 || Boolean(envRecord); },
     file,
   };

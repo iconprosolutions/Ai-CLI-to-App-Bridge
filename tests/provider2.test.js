@@ -1433,6 +1433,42 @@ async function main() {
   });
   assert(r.status === 400, 'oauth finish rejects an unknown state');
 
+  // Account rename: dir moves, accounts.json updates, key pins repoint.
+  r = await request(P27, {
+    path: '/admin/keys', method: 'POST', headers: { Authorization: `Bearer ${ADMIN27}` },
+    body: { name: 'pinme', role: 'app', accountPin: { claude: 'w2' } },
+  });
+  assert(r.status === 200, 'minted a key pinned to w2');
+  r = await request(P27, {
+    path: '/admin/accounts/claude/w2/rename', method: 'POST', headers: { Authorization: `Bearer ${ADMIN27}` },
+    body: { to: 'team-b' },
+  });
+  assert(r.status === 200 && JSON.parse(r.body).to === 'team-b', 'rename w2 → team-b succeeds');
+  {
+    const doc = JSON.parse(fs.readFileSync(ACCTS27, 'utf8'));
+    assert(doc.claude.some((a) => a.name === 'team-b') && !doc.claude.some((a) => a.name === 'w2'),
+      'accounts.json reflects the rename');
+  }
+  r = await request(P27, { path: '/admin/keys', headers: { Authorization: `Bearer ${ADMIN27}` } });
+  {
+    const pinme = (JSON.parse(r.body).keys || []).find((k) => k.name === 'pinme');
+    assert(pinme && pinme.accountPin.claude === 'team-b', 'key pin repointed to the new account name');
+  }
+
+  // CSRF guard: a cross-origin cookie-authed mutation is refused; header-auth
+  // (API key) and non-browser (no Origin) requests pass through.
+  r = await request(P27, {
+    path: '/admin/keys', method: 'POST',
+    headers: { Authorization: `Bearer ${ADMIN27}`, Origin: 'https://evil.example.com' },
+    body: { name: 'x-origin', role: 'app' },
+  });
+  assert(r.status === 200, 'header-auth (API key) is exempt from the Origin check');
+  r = await request(P27, {
+    path: '/admin/keys/x-origin', method: 'DELETE',
+    headers: { Cookie: 'bridge_session=deadbeef', Origin: 'https://evil.example.com', Host: `127.0.0.1:${P27}` },
+  });
+  assert(r.status === 403, 'cross-origin cookie-authed mutation is refused (CSRF guard)');
+
   console.log(`\n# Result: ${passed} passed, ${failed} failed`);
   process.exit(failed === 0 ? 0 : 1);
 }

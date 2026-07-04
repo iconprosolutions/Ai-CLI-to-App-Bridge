@@ -329,6 +329,7 @@
           + (a.implicit ? '' : (a.primary
             ? '<button class="abtn" data-act="acct-primary" data-engine="' + esc(e) + '" data-name="' + esc(a.name) + '" data-unset="1">Unset primary</button>'
             : '<button class="abtn" data-act="acct-primary" data-engine="' + esc(e) + '" data-name="' + esc(a.name) + '">Make primary</button>'))
+          + (a.implicit ? '' : '<button class="abtn" data-act="acct-rename" data-engine="' + esc(e) + '" data-name="' + esc(a.name) + '">Rename</button>')
           + '</div></div>';
       }).join('');
     }).join('');
@@ -727,6 +728,13 @@
     'acct-primary': function (el) {
       return admin('POST', '/admin/accounts/' + el.getAttribute('data-engine') + '/' + el.getAttribute('data-name') + '/primary',
         el.getAttribute('data-unset') ? { unset: true } : {}).then(fetchStatus);
+    },
+    'acct-rename': function (el) {
+      var from = el.getAttribute('data-name');
+      var to = prompt('Rename account "' + from + '" to:', from);
+      if (!to || to === from) return Promise.resolve();
+      return admin('POST', '/admin/accounts/' + el.getAttribute('data-engine') + '/' + encodeURIComponent(from) + '/rename', { to: to })
+        .then(fetchStatus).catch(function (err) { if (err && err.message !== 'unauthorized') alert(err.message); });
     },
     'acct-disable': function (el) {
       var e = el.getAttribute('data-engine');

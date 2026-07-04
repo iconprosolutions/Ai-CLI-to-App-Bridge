@@ -35,6 +35,40 @@ const corsOptions = CORS_ORIGINS.length
   ? { origin: (origin, cb) => cb(null, !origin || CORS_ORIGINS.includes(origin)) }
   : {};
 app.use(cors(corsOptions));
+
+// ── Security headers + CSRF guard (matters once internet-exposed) ───────
+// The tunnel/proxy terminates TLS and forwards over HTTP, so trust
+// X-Forwarded-Proto to decide the Secure cookie flag and HSTS.
+app.set('trust proxy', true);
+function requestIsHttps(req) {
+  return req.secure || String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim() === 'https';
+}
+app.use((req, res, next) => {
+  res.set('X-Content-Type-Options', 'nosniff');
+  res.set('X-Frame-Options', 'DENY');
+  res.set('Referrer-Policy', 'same-origin');
+  res.set('Cross-Origin-Opener-Policy', 'same-origin');
+  if (requestIsHttps(req)) res.set('Strict-Transport-Security', 'max-age=15552000; includeSubDomains');
+  next();
+});
+
+// CSRF defense-in-depth: cookie-authed state changes must originate from our
+// own site. Browsers always send Origin on cross-site POST/PATCH/DELETE, so a
+// mismatched Origin is a forged request. API-key callers (Authorization
+// header, no cookie) and same-origin requests pass. SameSite=Lax already
+// blocks most of this; this is the belt to that suspenders.
+const MUTATING = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+app.use((req, res, next) => {
+  if (!MUTATING.has(req.method)) return next();
+  if (req.headers.authorization) return next(); // token auth isn't cookie-riding
+  const origin = req.headers.origin;
+  if (!origin) return next(); // non-browser client (curl/SDK) — no ambient cookie risk
+  let host = null;
+  try { host = new URL(origin).host; } catch (_) { host = null; }
+  const expected = req.headers['x-forwarded-host'] || req.headers.host;
+  if (host && expected && host === expected) return next();
+  return res.status(403).json({ error: 'Cross-origin request refused.' });
+});
 app.use(express.json({ limit: '10mb' }));
 
 const PORT = intEnv('PROVIDER_PORT', 9011);
@@ -77,8 +111,11 @@ function sessionToken(req) {
   const m = new RegExp(`(?:^|;\\s*)${SESSION_COOKIE}=([0-9a-f]{48})`).exec(String(req.headers.cookie || ''));
   return m ? m[1] : null;
 }
-function setSessionCookie(res, token, maxAgeSec) {
-  res.append('Set-Cookie', `${SESSION_COOKIE}=${token}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${maxAgeSec}`);
+function setSessionCookie(req, res, token, maxAgeSec) {
+  // Secure flag when the browser reached us over HTTPS (tunnel/proxy edge),
+  // so the session cookie never rides a plaintext hop.
+  const secure = requestIsHttps(req) ? ' Secure;' : '';
+  res.append('Set-Cookie', `${SESSION_COOKIE}=${token}; HttpOnly;${secure} Path=/; SameSite=Lax; Max-Age=${maxAgeSec}`);
 }
 
 // Engines are in-process adapters — no HTTP hop, and every control-plane
@@ -202,14 +239,14 @@ app.post('/auth/login', (req, res) => {
   const { username, password } = req.body || {};
   const out = userStore.login(username, password);
   if (!out.ok) return res.status(out.status).json({ error: out.error });
-  setSessionCookie(res, out.token, 7 * 24 * 3600);
+  setSessionCookie(req, res, out.token, 7 * 24 * 3600);
   return res.json({ user: out.user });
 });
 
 app.post('/auth/logout', (req, res) => {
   const tok = sessionToken(req);
   if (tok) userStore.logout(tok);
-  setSessionCookie(res, 'x', 0);
+  setSessionCookie(req, res, 'x', 0);
   res.json({ ok: true });
 });
 

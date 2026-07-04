@@ -369,13 +369,69 @@ function createAdminRouter({
           subscriptionType: (tok.account && tok.account.subscription_type) || 'external',
         },
       }));
-      if (!fs.existsSync(path.join(dir, '.claude.json'))) {
-        writeFileAtomic(path.join(dir, '.claude.json'), JSON.stringify({ hasCompletedOnboarding: true }));
+      // Persist the signed-in identity so the Accounts card shows the real
+      // email/org, not "oauth login". The token response carries an account
+      // object; fall back to a profile fetch if it doesn't.
+      let acct = tok.account || null;
+      if (!acct || !(acct.email_address || acct.email)) {
+        try {
+          const pr = await fetch('https://api.anthropic.com/api/oauth/profile', {
+            headers: { Authorization: `Bearer ${tok.access_token}`, 'anthropic-beta': 'oauth-2025-04-20' },
+          });
+          if (pr.ok) { const pj = await pr.json(); acct = pj.account || pj || acct; }
+        } catch (_) { /* identity is best-effort */ }
       }
+      const oauthAccount = acct ? {
+        emailAddress: acct.email_address || acct.email || undefined,
+        organizationName: (acct.organization && acct.organization.name) || acct.organization_name || undefined,
+        organizationType: acct.subscription_type || (acct.organization && acct.organization.organization_type) || undefined,
+      } : {};
+      writeFileAtomic(path.join(dir, '.claude.json'), JSON.stringify({ hasCompletedOnboarding: true, oauthAccount }));
       registerAccount('claude', pending.name);
-      return res.json({ ok: true, engine: 'claude', name: pending.name });
+      return res.json({ ok: true, engine: 'claude', name: pending.name, email: oauthAccount.emailAddress || null });
     } catch (err) {
       return res.status(502).json({ error: `Could not reach the token endpoint: ${err.message}` });
+    }
+  });
+
+  // Rename an account: move its credential dir, update accounts.json, and
+  // repoint any key pins that referenced the old name so nothing breaks.
+  router.post('/accounts/:engine/:name/rename', (req, res) => {
+    const engine = engineOr404(req, res);
+    if (!engine || !accountsFile) return;
+    const from = req.params.name;
+    const to = String((req.body || {}).to || '').trim();
+    if (!ACCT_NAME_RE.test(to)) return res.status(400).json({ error: 'New name must be letters, digits, . _ -' });
+    try {
+      let doc = {};
+      try { doc = JSON.parse(fs.readFileSync(accountsFile, 'utf8')); } catch (_) {
+        return res.status(400).json({ error: 'No accounts.json to rename in.' });
+      }
+      const list = Array.isArray(doc[engine]) ? doc[engine] : [];
+      const target = list.find((a) => a && a.name === from);
+      if (!target) return res.status(404).json({ error: `Unknown ${engine} account "${from}"` });
+      if (list.some((a) => a && a.name === to)) return res.status(400).json({ error: `An account named "${to}" already exists` });
+      const baseDir = path.dirname(accountsFile);
+      const oldDir = path.join(baseDir, 'accounts', engine, from);
+      const newRel = `accounts/${engine}/${to}`;
+      const newDir = path.join(baseDir, newRel);
+      if (fs.existsSync(oldDir)) fs.renameSync(oldDir, newDir);
+      target.name = to;
+      target.dir = newRel;
+      writeFileAtomic(accountsFile, `${JSON.stringify(doc, null, 2)}\n`, 0o644);
+      // Repoint key pins (accountPin[engine] === from → to).
+      let repinned = 0;
+      for (const k of keyStore.list()) {
+        if (k.accountPin && k.accountPin[engine] === from) {
+          const pin = { ...k.accountPin, [engine]: to };
+          if (keyStore.setAccountPin) { keyStore.setAccountPin(k.name, pin); repinned += 1; }
+        }
+      }
+      pool.reload();
+      events.emit('account.change', { action: 'rename', engine, from, to });
+      return res.json({ ok: true, engine, from, to, repinnedKeys: repinned });
+    } catch (err) {
+      return res.status(500).json({ error: err.message });
     }
   });
 
