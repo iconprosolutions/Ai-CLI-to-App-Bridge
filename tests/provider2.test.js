@@ -1194,6 +1194,108 @@ async function main() {
   r = await request(P25, { path: '/dashboard/' });
   assert(r.status === 200 && /html/i.test(String(r.headers['content-type'])), 'static dashboard UI stays public');
 
+  // ── Users, sessions, and the profile API (SaaS login) ───────────────────
+  console.log('\n## Users, sessions, and the profile API (SaaS login)');
+  const P26 = 19650;
+  const DIR26 = path.join(TMP, 'p26');
+  fs.mkdirSync(DIR26, { recursive: true });
+  const CREDS26 = path.join(DIR26, 'creds26.json');
+  const ADMIN26 = 'E'.repeat(48);
+  fs.writeFileSync(CREDS26, JSON.stringify({
+    version: 2,
+    keys: [{ name: 'admin', role: 'admin', key: ADMIN26, createdAt: '2026-01-01T00:00:00Z' }],
+  }));
+  await bootProvider(P26, {
+    CLAUDE_PATH: CLAUDE_KEYS, GEMINI_PATH: AGY_ACCT,
+    BRIDGE_CREDENTIALS_FILE: CREDS26,
+    BRIDGE_USERS_FILE: path.join(DIR26, 'users.json'),
+    BRIDGE_SESSIONS_FILE: path.join(DIR26, 'sessions.json'),
+    USAGE_FLUSH_MS: '50', DASHBOARD_AUTH: '1',
+  });
+
+  const users26 = JSON.parse(fs.readFileSync(path.join(DIR26, 'users.json'), 'utf8'));
+  assert(users26.users.length === 1 && users26.users[0].role === 'admin' && /^scrypt\$/.test(users26.users[0].passwordHash),
+    'first boot bootstraps a scrypt-hashed admin user');
+
+  r = await request(P26, {
+    path: '/admin/users', method: 'POST', headers: { Authorization: `Bearer ${ADMIN26}` },
+    body: { username: 'alice', password: 'wonderland1', role: 'user', defaultLimits: { rpm: 3 } },
+  });
+  assert(r.status === 200 && JSON.parse(r.body).username === 'alice', 'admin creates a user via /admin/users');
+
+  r = await request(P26, { path: '/auth/login', method: 'POST', body: { username: 'alice', password: 'nope-nope' } });
+  assert(r.status === 401, 'wrong password → 401');
+  r = await request(P26, { path: '/auth/login', method: 'POST', body: { username: 'alice', password: 'wonderland1' } });
+  assert(r.status === 200, 'correct password logs in');
+  const cookie = String(r.headers['set-cookie'] || '').split(';')[0];
+  assert(/^bridge_session=[0-9a-f]{48}$/.test(cookie), 'login sets a session cookie');
+  assert(/HttpOnly/i.test(String(r.headers['set-cookie'])), 'session cookie is HttpOnly');
+
+  r = await request(P26, { path: '/auth/me', headers: { Cookie: cookie } });
+  assert(r.status === 200 && JSON.parse(r.body).user.username === 'alice', '/auth/me resolves the session');
+
+  r = await request(P26, { path: '/me/keys', method: 'POST', headers: { Cookie: cookie }, body: { app: 'chatbot' } });
+  const aliceKey = JSON.parse(r.body);
+  assert(r.status === 200 && aliceKey.name === 'alice.chatbot' && aliceKey.limits.rpm === 3,
+    'user mints a namespaced key inheriting their default limits');
+
+  r = await request(P26, {
+    path: '/v1/chat/completions', method: 'POST', headers: { Authorization: `Bearer ${aliceKey.key}` },
+    body: { model: 'bridge-claude-haiku-4.5-spark', messages: [{ role: 'user', content: 'x' }] },
+  });
+  assert(r.status === 200, "the user's key authorizes /v1");
+
+  await new Promise((res) => setTimeout(res, 150));
+  r = await request(P26, { path: '/me/usage?range=today', headers: { Cookie: cookie } });
+  {
+    const u = JSON.parse(r.body);
+    assert(u.totals.requests === 1 && u.perKey[0].keyName === 'alice.chatbot', '/me/usage sees only own keys');
+  }
+
+  r = await request(P26, { path: '/me/keys/admin', method: 'DELETE', headers: { Cookie: cookie } });
+  assert(r.status === 403, "a user can't revoke a key they don't own");
+  r = await request(P26, { path: '/admin/users', headers: { Cookie: cookie } });
+  assert(r.status === 401, "a user session can't reach /admin");
+
+  r = await request(P26, {
+    path: '/admin/users/admin', method: 'PATCH', headers: { Authorization: `Bearer ${ADMIN26}` },
+    body: { password: 'supersecret9' },
+  });
+  assert(r.status === 200, 'admin key can reset a login password');
+  r = await request(P26, { path: '/auth/login', method: 'POST', body: { username: 'admin', password: 'supersecret9' } });
+  assert(r.status === 200, 'admin logs in with the reset password');
+  const adminCookie = String(r.headers['set-cookie'] || '').split(';')[0];
+  r = await request(P26, { path: '/dashboard/status', headers: { Cookie: adminCookie } });
+  assert(r.status === 200, 'admin session unlocks the gated dashboard (no key paste)');
+  r = await request(P26, { path: '/admin/users', headers: { Cookie: adminCookie } });
+  {
+    const d = JSON.parse(r.body);
+    const alice = (d.users || []).find((u) => u.username === 'alice');
+    assert(alice && alice.keys.includes('alice.chatbot') && alice.usageToday.requests === 1,
+      '/admin/users rolls up keys + per-user usage');
+  }
+  r = await request(P26, { path: '/dashboard/usage?range=today', headers: { Cookie: adminCookie } });
+  assert(((JSON.parse(r.body).perUser) || []).some((x) => x.user === 'alice'), 'dashboard usage has a per-user dimension');
+
+  r = await request(P26, {
+    path: '/admin/users/alice', method: 'PATCH', headers: { Authorization: `Bearer ${ADMIN26}` }, body: { disabled: true },
+  });
+  assert(r.status === 200, 'admin disables a user');
+  r = await request(P26, { path: '/auth/me', headers: { Cookie: cookie } });
+  assert(r.status === 401, "a disabled user's session stops resolving");
+  r = await request(P26, { path: '/admin/users/alice', method: 'DELETE', headers: { Authorization: `Bearer ${ADMIN26}` } });
+  {
+    const d = JSON.parse(r.body);
+    assert(r.status === 200 && d.revokedKeys.includes('alice.chatbot'), 'deleting a user revokes their keys');
+  }
+  r = await request(P26, {
+    path: '/v1/chat/completions', method: 'POST', headers: { Authorization: `Bearer ${aliceKey.key}` },
+    body: { model: 'bridge-claude-haiku-4.5-spark', messages: [{ role: 'user', content: 'x' }] },
+  });
+  assert(r.status === 401, "a deleted user's key no longer authorizes");
+  r = await request(P26, { path: '/admin/users/admin', method: 'DELETE', headers: { Authorization: `Bearer ${ADMIN26}` } });
+  assert(r.status === 400, 'the last admin user cannot be deleted');
+
   console.log(`\n# Result: ${passed} passed, ${failed} failed`);
   process.exit(failed === 0 ? 0 : 1);
 }

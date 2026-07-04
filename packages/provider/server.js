@@ -12,8 +12,9 @@ const {
 const { createClaudeAdapter, createAgyAdapter } = require('@bridge/adapters');
 const { createRouteRegistry } = require('./routes');
 const { createAccountPool } = require('./accounts');
-const { createKeyStore } = require('./keys');
+const { createKeyStore, validateLimits } = require('./keys');
 const { createLimitGuard } = require('./limits');
+const { createUserStore } = require('./users');
 const { createContinuityStore } = require('./continuity');
 const { createTelemetry } = require('./telemetry');
 const { createUsageLedger } = require('./usage');
@@ -51,6 +52,34 @@ const keyStore = createKeyStore({ file: CREDENTIALS_FILE, envKey: API_KEY });
 // Per-key limits (rpm / tokens-per-day / $-per-month) — enforced on /v1,
 // counters seeded from the ledger after boot so restarts keep budgets intact.
 const limitGuard = createLimitGuard();
+
+// Dashboard users + sessions (SaaS login layer). First boot with no users
+// creates the admin login and prints its password exactly once.
+const RUNTIME_DIR = path.dirname(CREDENTIALS_FILE);
+const userStore = createUserStore({
+  file: process.env.BRIDGE_USERS_FILE || path.join(RUNTIME_DIR, 'users.json'),
+  sessionsFile: process.env.BRIDGE_SESSIONS_FILE || path.join(RUNTIME_DIR, 'sessions.json'),
+  validateLimits,
+});
+{
+  const boot = userStore.bootstrap();
+  if (boot) console.log(`[bridge] dashboard login created — user "${boot.username}" password (change it in the dashboard): ${boot.password}`);
+}
+
+// Session cookie helpers. HttpOnly; SameSite=Lax; no Secure flag because the
+// origin speaks plain HTTP (TLS terminates at the tunnel/proxy edge).
+const SESSION_COOKIE = 'bridge_session';
+function sessionUser(req) {
+  const m = new RegExp(`(?:^|;\\s*)${SESSION_COOKIE}=([0-9a-f]{48})`).exec(String(req.headers.cookie || ''));
+  return m ? userStore.resolve(m[1]) : null;
+}
+function sessionToken(req) {
+  const m = new RegExp(`(?:^|;\\s*)${SESSION_COOKIE}=([0-9a-f]{48})`).exec(String(req.headers.cookie || ''));
+  return m ? m[1] : null;
+}
+function setSessionCookie(res, token, maxAgeSec) {
+  res.append('Set-Cookie', `${SESSION_COOKIE}=${token}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${maxAgeSec}`);
+}
 
 // Engines are in-process adapters — no HTTP hop, and every control-plane
 // action operates on state this process owns.
@@ -160,6 +189,103 @@ app.use('/v1', (req, res, next) => {
   return next();
 });
 
+// ── Login / sessions (SaaS mode) ────────────────────────────────────────
+app.post('/auth/login', (req, res) => {
+  const { username, password } = req.body || {};
+  const out = userStore.login(username, password);
+  if (!out.ok) return res.status(out.status).json({ error: out.error });
+  setSessionCookie(res, out.token, 7 * 24 * 3600);
+  return res.json({ user: out.user });
+});
+
+app.post('/auth/logout', (req, res) => {
+  const tok = sessionToken(req);
+  if (tok) userStore.logout(tok);
+  setSessionCookie(res, 'x', 0);
+  res.json({ ok: true });
+});
+
+app.get('/auth/me', (req, res) => {
+  const user = sessionUser(req);
+  if (!user) return res.status(401).json({ error: 'Not signed in.' });
+  res.json({ user });
+});
+
+app.post('/auth/password', (req, res) => {
+  const user = sessionUser(req);
+  if (!user) return res.status(401).json({ error: 'Not signed in.' });
+  const { currentPassword, newPassword } = req.body || {};
+  if (!userStore.checkPassword(user.username, currentPassword)) {
+    return res.status(403).json({ error: 'Current password is incorrect.' });
+  }
+  try {
+    userStore.update(user.username, { password: newPassword });
+    return res.json({ ok: true, note: 'Password changed — sign in again.' });
+  } catch (err) {
+    return res.status(400).json({ error: err.message });
+  }
+});
+
+// ── Per-user self-service (session required; admin or user role) ────────
+// A user's keys are namespaced "<username>.<app>": one key per application,
+// inheriting the admin-set default limits for that user.
+function requireSession(req, res) {
+  const user = sessionUser(req);
+  if (!user) { res.status(401).json({ error: 'Sign in first.' }); return null; }
+  return user;
+}
+
+app.get('/me/keys', (req, res) => {
+  const user = requireSession(req, res);
+  if (!user) return;
+  const keys = keyStore.listByOwner(user.username).map((k) => ({ ...k, usage: limitGuard.snapshot(k.name) }));
+  res.json({ keys, defaultLimits: user.defaultLimits || null });
+});
+
+app.post('/me/keys', (req, res) => {
+  const user = requireSession(req, res);
+  if (!user) return;
+  const app_ = String((req.body || {}).app || '').trim();
+  if (!/^[A-Za-z0-9._-]{1,40}$/.test(app_)) {
+    return res.status(400).json({ error: 'App name must be 1-40 chars of letters, digits, . _ -' });
+  }
+  try {
+    const rec = keyStore.mint({
+      name: `${user.username}.${app_}`,
+      role: 'app',
+      owner: user.username,
+      limits: user.defaultLimits,
+    });
+    events.emit('keys.change', { action: 'mint', name: rec.name });
+    return res.json({ name: rec.name, limits: rec.limits || null, createdAt: rec.createdAt, key: rec.key });
+  } catch (err) {
+    return res.status(400).json({ error: err.message });
+  }
+});
+
+app.delete('/me/keys/:name', (req, res) => {
+  const user = requireSession(req, res);
+  if (!user) return;
+  if (keyStore.ownerOf(req.params.name) !== user.username) {
+    return res.status(403).json({ error: 'That key is not yours.' });
+  }
+  try {
+    keyStore.revoke(req.params.name);
+    events.emit('keys.change', { action: 'revoke', name: req.params.name });
+    return res.json({ revoked: true, name: req.params.name });
+  } catch (err) {
+    return res.status(400).json({ error: err.message });
+  }
+});
+
+app.get('/me/usage', async (req, res) => {
+  const user = requireSession(req, res);
+  if (!user) return;
+  const range = ['today', 'month', '7d', '30d', 'all'].includes(String(req.query.range)) ? String(req.query.range) : '7d';
+  const own = new Set(keyStore.listByOwner(user.username).map((k) => k.name));
+  res.json(await ledger.aggregate(range, { keyFilter: own }));
+});
+
 // ── Dashboard auth (optional; for tunnel/public exposure) ──────────────
 // DASHBOARD_AUTH=1 gates the dashboard DATA endpoints (status/usage/events)
 // behind an admin key — Bearer header or ?key= (EventSource can't set
@@ -168,10 +294,12 @@ app.use('/v1', (req, res, next) => {
 const DASHBOARD_AUTH = process.env.DASHBOARD_AUTH === '1';
 function dashboardGate(req, res, next) {
   if (!DASHBOARD_AUTH || !keyStore.authEnabled) return next();
+  const su = sessionUser(req);
+  if (su && su.role === 'admin') return next(); // logged-in admin
   const token = (req.headers.authorization || '').replace(/^Bearer\s+/i, '') || String(req.query.key || '');
   const who = keyStore.verify(token);
   if (!who || who.role !== 'admin') {
-    return res.status(401).json({ error: 'Dashboard auth is enabled — pass an admin key (Authorization: Bearer <key> or ?key=<key>).' });
+    return res.status(401).json({ error: 'Dashboard auth is enabled — sign in as an admin, or pass an admin key (Authorization: Bearer <key> or ?key=<key>).' });
   }
   return next();
 }
@@ -256,12 +384,13 @@ app.get('/dashboard/events', dashboardGate, events.handler);
 // Control plane (always key-gated; see admin.js).
 app.use('/admin', createAdminRouter({
   keyStore, registry, pool, adapters, activeRequests, capture, events, enginesDisabled, limitGuard,
+  userStore, ledger, sessionUser,
 }));
 
 // Durable usage rollups (JSONL ledger; survives restarts).
 app.get('/dashboard/usage', dashboardGate, async (req, res) => {
   const range = ['today', 'month', '7d', '30d', 'all'].includes(String(req.query.range)) ? String(req.query.range) : '7d';
-  res.json(await ledger.aggregate(range));
+  res.json(await ledger.aggregate(range, { ownerOf: keyStore.ownerOf }));
 });
 
 // ── /v1/models ──────────────────────────────────────────────────────────

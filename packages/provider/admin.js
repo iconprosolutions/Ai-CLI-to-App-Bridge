@@ -8,10 +8,18 @@ const express = require('express');
 // configured at all, admin is disabled.
 function createAdminRouter({
   keyStore, registry, pool, adapters, activeRequests, capture, events, enginesDisabled, limitGuard,
+  userStore, ledger, sessionUser,
 }) {
   const router = express.Router();
 
   router.use((req, res, next) => {
+    // A signed-in admin session authorizes exactly like an admin key, so the
+    // dashboard works after login without pasting the key.
+    const su = sessionUser ? sessionUser(req) : null;
+    if (su && su.role === 'admin') {
+      req.auth = { name: `user:${su.username}`, role: 'admin' };
+      return next();
+    }
     if (!keyStore.authEnabled) {
       return res.status(503).json({ error: 'Admin API disabled: no API key configured.' });
     }
@@ -205,6 +213,57 @@ function createAdminRouter({
       keyStore.revoke(req.params.name);
       events.emit('keys.change', { action: 'revoke', name: req.params.name });
       return res.json({ revoked: true, name: req.params.name });
+    } catch (err) {
+      return res.status(400).json({ error: err.message });
+    }
+  });
+
+  // ── User management (SaaS mode) ──────────────────────────────────────────
+  // Users own API keys; deleting a user revokes their keys and sessions.
+  router.get('/users', async (req, res) => {
+    const [today, month] = await Promise.all([
+      ledger.aggregate('today', { ownerOf: keyStore.ownerOf }),
+      ledger.aggregate('month', { ownerOf: keyStore.ownerOf }),
+    ]);
+    const rollup = (list, name) => (list || []).find((u) => u.user === name) || {};
+    const users = userStore.list().map((u) => ({
+      ...u,
+      keys: keyStore.listByOwner(u.username).map((k) => k.name),
+      usageToday: rollup(today.perUser, u.username),
+      usageMonth: rollup(month.perUser, u.username),
+    }));
+    res.json({ users });
+  });
+
+  router.post('/users', (req, res) => {
+    try {
+      const rec = userStore.create(req.body || {});
+      events.emit('users.change', { action: 'create', username: rec.username });
+      return res.json(rec);
+    } catch (err) {
+      return res.status(400).json({ error: err.message });
+    }
+  });
+
+  router.patch('/users/:username', (req, res) => {
+    try {
+      const rec = userStore.update(req.params.username, req.body || {});
+      events.emit('users.change', { action: 'update', username: rec.username });
+      return res.json(rec);
+    } catch (err) {
+      return res.status(400).json({ error: err.message });
+    }
+  });
+
+  router.delete('/users/:username', (req, res) => {
+    try {
+      const owned = keyStore.listByOwner(req.params.username);
+      userStore.remove(req.params.username); // throws first if unknown / last admin
+      for (const k of owned) {
+        try { keyStore.revoke(k.name); } catch (_) { /* last-admin-key guard */ }
+      }
+      events.emit('users.change', { action: 'delete', username: req.params.username });
+      return res.json({ deleted: true, username: req.params.username, revokedKeys: owned.map((k) => k.name) });
     } catch (err) {
       return res.status(400).json({ error: err.message });
     }

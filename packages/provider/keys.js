@@ -78,6 +78,9 @@ function validateKeyRecord(k) {
   }
   validateAccountPin(k.accountPin);
   validateLimits(k.limits);
+  if (k.owner !== undefined && (typeof k.owner !== 'string' || !k.owner)) {
+    throw new Error(`credentials.json: key "${k.name}" has an invalid owner`);
+  }
   return k;
 }
 
@@ -148,24 +151,36 @@ function createKeyStore({ file, envKey = '' } = {}) {
     return {
       name: match.name,
       role: match.role,
+      owner: match.owner || undefined,
       accountPin: match.accountPin ? { ...match.accountPin } : undefined,
       limits: match.limits ? { ...match.limits } : undefined,
     };
   }
 
+  const publicKey = (k) => ({
+    name: k.name,
+    role: k.role,
+    owner: k.owner || undefined,
+    accountPin: k.accountPin ? { ...k.accountPin } : undefined,
+    limits: k.limits ? { ...k.limits } : undefined,
+    createdAt: k.createdAt,
+  });
+
   function list() {
-    return data.keys
-      .map((k) => ({
-        name: k.name,
-        role: k.role,
-        accountPin: k.accountPin ? { ...k.accountPin } : undefined,
-        limits: k.limits ? { ...k.limits } : undefined,
-        createdAt: k.createdAt,
-      }))
+    return data.keys.map(publicKey)
       .sort((x, y) => String(x.createdAt).localeCompare(String(y.createdAt)));
   }
 
-  function mint({ name, role = 'app', accountPin, limits } = {}) {
+  function listByOwner(owner) {
+    return list().filter((k) => k.owner === owner);
+  }
+
+  function ownerOf(name) {
+    const rec = data.keys.find((k) => k.name === name);
+    return rec ? (rec.owner || null) : null;
+  }
+
+  function mint({ name, role = 'app', accountPin, limits, owner } = {}) {
     if (typeof name !== 'string' || !NAME_RE.test(name)) {
       throw new Error(`Key name must match ${NAME_RE}`);
     }
@@ -175,6 +190,7 @@ function createKeyStore({ file, envKey = '' } = {}) {
     const pin = validateAccountPin(accountPin);
     const lim = validateLimits(limits);
     const rec = { name, role, key: newSecret(), createdAt: nowIso() };
+    if (owner) rec.owner = String(owner);
     if (pin) rec.accountPin = pin;
     if (lim) rec.limits = lim;
     data.keys.push(rec);
@@ -209,6 +225,8 @@ function createKeyStore({ file, envKey = '' } = {}) {
   return {
     verify,
     list,
+    listByOwner,
+    ownerOf,
     mint,
     revoke,
     setLimits,
@@ -234,4 +252,4 @@ function bootstrapCredentialsFile(file) {
   return { adminKey: rec.key, created: existedRaw === null, migrated: wasV1 };
 }
 
-module.exports = { createKeyStore, loadAndMigrate, bootstrapCredentialsFile, validateAccountPin };
+module.exports = { createKeyStore, loadAndMigrate, bootstrapCredentialsFile, validateAccountPin, validateLimits };

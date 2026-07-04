@@ -15,6 +15,8 @@
       <span class="spacer"></span>
       <span id="verdicts"></span>
       <span class="verdict"><span class="vk">Inflight</span><span class="vv num" id="v-inflight" style="color:var(--on-dark)">—</span></span>
+      <span id="whoami" class="verdict" style="display:none"><span class="vk" id="whoami-name">—</span><button class="livebtn" id="logoutbtn" title="Sign out">Sign out</button></span>
+      <button class="livebtn" id="loginbtn" style="display:none" title="Sign in to your profile">Sign in</button>
       <button class="livebtn" id="livebtn" title="Live updates over SSE"><span class="pl" id="livedot"></span><span id="livelabel">Live</span></button>
     </div>
     <nav class="tabs" id="tabs">
@@ -24,6 +26,7 @@
       <button class="tab" data-view="usage">Usage</button>
       <button class="tab" data-view="tester">Tester</button>
       <button class="tab" data-view="requests">Requests<span class="cnt" id="cnt-capture"></span></button>
+      <button class="tab" data-view="users">Users<span class="cnt" id="cnt-users"></span></button>
       <button class="tab" data-view="connect">Connect</button>
       <a class="tab" href="guide.html" style="text-decoration:none" target="_blank" rel="noopener">Guide ↗</a>
     </nav>
@@ -101,7 +104,7 @@
   <div class="grid2" style="margin-top:26px">
     <div>
       <div class="sec-head" style="margin-top:0"><h2 style="font-size:17px">Attribution</h2>
-        <div class="seg" id="us-dim"><button data-dim="app" class="active">By app</button><button data-dim="account">By account</button><button data-dim="key">By key</button></div>
+        <div class="seg" id="us-dim"><button data-dim="app" class="active">By app</button><button data-dim="account">By account</button><button data-dim="key">By key</button><button data-dim="user">By user</button></div>
       </div>
       <div class="table scrollx"><div style="min-width:560px">
         <div class="thead" style="grid-template-columns:1.2fr 70px 90px 90px 95px 70px 70px">
@@ -226,6 +229,88 @@
     </div>
   </div>
 </main>
+
+<!-- ═══ USERS (admin) ═══ -->
+<main class="wrap view" id="view-users">
+  <div class="sec-head"><h2>Users</h2><span class="note">each user signs in, owns API keys, and is metered separately</span></div>
+  <div class="table scrollx"><div style="min-width:860px">
+    <div class="thead" style="grid-template-columns:1.1fr 70px 1.2fr 1fr 1fr 190px">
+      <span>User</span><span>Role</span><span>Keys</span><span>Today</span><span>This month</span><span>Actions</span>
+    </div>
+    <div id="users-table"><div class="empty">Loading…</div></div>
+  </div></div>
+  <div class="grid2" style="margin-top:26px">
+    <div class="panel">
+      <h3>Create user</h3>
+      <div class="field"><label for="u-name">Username</label><input id="u-name" placeholder="alice"></div>
+      <div class="field"><label for="u-display">Display name (optional)</label><input id="u-display" placeholder="Alice Smith"></div>
+      <div class="field"><label for="u-pass">Password (min 8 chars)</label><input id="u-pass" type="password" placeholder="they can change it after login"></div>
+      <div class="field"><label for="u-role">Role</label><select id="u-role"><option value="user">user — own keys + own usage</option><option value="admin">admin — full control</option></select></div>
+      <div class="field"><label for="u-rpm">Default requests / minute (optional)</label><input id="u-rpm" type="number" min="1" placeholder="applied to keys they mint"></div>
+      <div class="field"><label for="u-tpd">Default tokens / day (optional)</label><input id="u-tpd" type="number" min="1" placeholder="e.g. 200000"></div>
+      <div class="field"><label for="u-usd">Default $ / month (optional)</label><input id="u-usd" type="number" min="0.01" step="0.01" placeholder="e.g. 25"></div>
+      <button class="abtn primary" id="user-create">Create user</button>
+      <span class="mono" id="user-msg" style="font-size:11px;color:var(--faint);margin-left:10px"></span>
+    </div>
+    <div class="panel">
+      <h3>How SaaS mode works</h3>
+      <p class="mono" style="font-size:11px;color:var(--body);line-height:1.8">
+        1 · Create a user here and tell them their password (they can change it).<br>
+        2 · They sign in at this same URL and see only their own profile.<br>
+        3 · They mint one API key per app — named <code>username.app</code>, inheriting the default limits you set.<br>
+        4 · Over a limit → their key gets 429 + Retry-After; everyone else is unaffected.<br>
+        5 · Usage tab "By user" shows who used what; this table shows today/month per user.
+      </p>
+    </div>
+  </div>
+</main>
+
+<!-- ═══ PROFILE (user role) ═══ -->
+<main class="wrap view" id="view-profile">
+  <div class="sec-head"><h2 id="pf-hello">My profile</h2><span class="note">your API keys and usage</span></div>
+  <div class="tiles" id="pf-tiles"></div>
+  <div class="sec-head" style="margin-top:26px"><h2>My API keys</h2><span class="note">one per app · your limits apply to each key</span></div>
+  <div class="grid2">
+    <div>
+      <div class="table scrollx"><div style="min-width:520px">
+        <div class="thead" style="grid-template-columns:1.4fr 1.6fr 90px"><span>Key</span><span>Limits · used</span><span>Actions</span></div>
+        <div id="pf-keys"><div class="empty">No keys yet — mint one for your app.</div></div>
+      </div></div>
+      <div class="table scrollx" style="margin-top:20px"><div style="min-width:520px">
+        <div class="thead" style="grid-template-columns:1.2fr 70px 90px 90px 95px"><span>Key</span><span>Calls</span><span>Prompt</span><span>Completion</span><span>$ equiv</span></div>
+        <div id="pf-usage-rows"><div class="empty">No usage yet.</div></div>
+      </div></div>
+    </div>
+    <div class="panel">
+      <h3>Mint a key for an app</h3>
+      <div class="field"><label for="pf-app">App name</label><input id="pf-app" placeholder="my-chatbot"></div>
+      <button class="abtn primary" id="pf-mint">Mint key</button>
+      <span class="mono" id="pf-msg" style="font-size:11px;color:var(--faint);margin-left:10px"></span>
+      <div id="pf-minted" style="display:none;margin-top:14px">
+        <div class="console" style="min-height:0"><div class="cbar"><span class="ctag" style="color:var(--warn-d)">new secret · copy now — not retrievable</span><button class="abtn" data-copy="pf-secret" style="color:var(--on-dark);background:var(--dark-soft);border-color:var(--dark-fill)">Copy</button></div><pre class="code" id="pf-secret"></pre></div>
+        <p class="mono" style="font-size:11px;color:var(--body);margin-top:8px">Base URL: <code id="pf-base"></code> · send <code>Authorization: Bearer &lt;key&gt;</code></p>
+      </div>
+      <h3 style="margin-top:26px">Change password</h3>
+      <div class="field"><label for="pf-cur">Current password</label><input id="pf-cur" type="password"></div>
+      <div class="field"><label for="pf-new">New password (min 8 chars)</label><input id="pf-new" type="password"></div>
+      <button class="abtn" id="pf-passbtn">Change password</button>
+      <span class="mono" id="pf-passmsg" style="font-size:11px;color:var(--faint);margin-left:10px"></span>
+    </div>
+  </div>
+</main>
+
+<!-- ═══ LOGIN OVERLAY ═══ -->
+<div id="login-overlay" style="display:none;position:fixed;inset:0;background:rgba(20,18,14,.55);backdrop-filter:blur(3px);z-index:50;align-items:center;justify-content:center">
+  <div class="panel" style="width:340px;background:var(--card,#fff);box-shadow:0 18px 60px rgba(0,0,0,.35)">
+    <h3>Sign in</h3>
+    <p class="mono" style="font-size:11px;color:var(--body);margin-bottom:12px">AI CLI Bridge · use your dashboard account</p>
+    <div class="field"><label for="li-user">Username</label><input id="li-user" autocomplete="username"></div>
+    <div class="field"><label for="li-pass">Password</label><input id="li-pass" type="password" autocomplete="current-password"></div>
+    <button class="abtn primary" id="li-btn" style="width:100%">Sign in</button>
+    <div class="mono" id="li-msg" style="font-size:11px;color:var(--warn-d,#b00);margin-top:10px;min-height:14px"></div>
+    <p class="mono" style="font-size:10px;color:var(--faint);margin-top:10px">Admins can also unlock with an admin API key via the Connect tab.</p>
+  </div>
+</div>
 
 <footer>
   <div class="foot"><span>AI CLI Bridge · Control Center</span><span id="foot-note">local only</span></div>

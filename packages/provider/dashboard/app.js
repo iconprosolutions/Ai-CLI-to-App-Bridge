@@ -55,14 +55,10 @@
   // endpoints require an admin key — sent as a Bearer header here and as
   // ?key= on the EventSource (which can't set headers).
   function authHeaders() { return key() ? { 'Authorization': 'Bearer ' + key() } : {}; }
-  var lockedWarned = false;
   function showLocked() {
     setLive(false);
     $('livelabel').textContent = 'Locked';
-    if (!lockedWarned) {
-      lockedWarned = true;
-      alert('Dashboard auth is enabled on this server. Open the Connect tab, paste an admin API key, and the dashboard will unlock.');
-    }
+    $('login-overlay').style.display = 'flex';
   }
   function fetchStatus() {
     return fetch('/dashboard/status', { headers: authHeaders() }).then(function (r) {
@@ -105,7 +101,7 @@
   function connectEvents() {
     try {
       es = new EventSource('/dashboard/events' + (key() ? '?key=' + encodeURIComponent(key()) : ''));
-      ['request.start', 'request.end', 'breaker.change', 'engine.health', 'capture.change', 'account.change', 'keys.change'].forEach(function (t) {
+      ['request.start', 'request.end', 'breaker.change', 'engine.health', 'capture.change', 'account.change', 'keys.change', 'users.change'].forEach(function (t) {
         es.addEventListener(t, throttledRefresh);
       });
       es.onopen = function () { setLive(true); if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } };
@@ -348,10 +344,10 @@
       + '<div class="tile peach"><div class="tl">Top app</div><div class="big">' + esc(topApp ? topApp.appId : '—') + '</div><div class="sub">' + (topApp ? fmt(topApp.requests) + ' calls' : 'no traffic in range') + '</div></div>'
       + '<div class="tile plain"><div class="tl">Requests / errors</div><div class="big num">' + fmt(t.requests) + '</div><div class="sub">' + fmt(t.errors) + ' errors in range</div></div>';
     var dim = state.usageDim || 'app';
-    var dimRows = dim === 'account' ? (u.perAccount || []) : dim === 'key' ? (u.perKey || []) : (u.perApp || []);
-    $('us-dim-label').textContent = dim === 'account' ? 'Account' : dim === 'key' ? 'Key' : 'App';
+    var dimRows = dim === 'account' ? (u.perAccount || []) : dim === 'key' ? (u.perKey || []) : dim === 'user' ? (u.perUser || []) : (u.perApp || []);
+    $('us-dim-label').textContent = dim === 'account' ? 'Account' : dim === 'key' ? 'Key' : dim === 'user' ? 'User' : 'App';
     $('us-apps').innerHTML = dimRows.map(function (a) {
-      var name = dim === 'account' ? a.account : dim === 'key' ? a.keyName : a.appId;
+      var name = dim === 'account' ? a.account : dim === 'key' ? a.keyName : dim === 'user' ? a.user : a.appId;
       var acc = dim === 'app'
         ? (a.usageAccuracy === 'real' ? '<span class="estb real">real</span>' : a.usageAccuracy === 'mixed' ? '<span class="estb real">mixed</span>' : '<span class="estb est">~est</span>')
         : '';
@@ -646,7 +642,39 @@
     if (state.view === 'accounts') renderAccounts();
     if (state.view === 'tester') renderTesterRoutes();
     if (state.view === 'requests') renderCapture();
+    if (state.view === 'users') renderUsers();
     if (state.view === 'connect') renderConnect();
+  }
+
+  // ── Users (admin) ─────────────────────────────────────────────────────
+  function renderUsers() {
+    var el = $('users-table');
+    if (!el) return;
+    admin('GET', '/admin/users').then(function (d) {
+      var users = d.users || [];
+      $('cnt-users').textContent = users.length || '';
+      el.innerHTML = users.map(function (u) {
+        var lim = u.defaultLimits || {};
+        var limParts = [];
+        if (lim.rpm) limParts.push(lim.rpm + '/min');
+        if (lim.tokensPerDay) limParts.push(ftok(lim.tokensPerDay) + ' tok/day');
+        if (lim.usdPerMonth) limParts.push('$' + lim.usdPerMonth + '/mo');
+        var t = u.usageToday || {}; var m = u.usageMonth || {};
+        return '<div class="trow" style="grid-template-columns:1.1fr 70px 1.2fr 1fr 1fr 190px">'
+          + '<span>' + esc(u.displayName) + '<div class="sub2">' + esc(u.username) + (u.disabled ? ' · <span style="color:var(--warn-d)">disabled</span>' : '') + '</div></span>'
+          + '<span><span class="nbadge">' + esc(u.role) + '</span></span>'
+          + '<span class="sub2">' + ((u.keys || []).map(function (k) { return esc(k.split('.').slice(1).join('.') || k); }).join(', ') || '—')
+          + (limParts.length ? '<div class="sub2">' + limParts.join(' · ') + '</div>' : '') + '</span>'
+          + '<span class="sub2 num">' + fmt(t.requests || 0) + ' req · ' + ftok((t.promptTokens || 0) + (t.completionTokens || 0)) + '</span>'
+          + '<span class="sub2 num">' + fmt(m.requests || 0) + ' req · $' + (m.apiEquivalentUsd || 0).toFixed(2) + '</span>'
+          + '<span>'
+          + '<button class="abtn" data-act="user-limits" data-name="' + esc(u.username) + '" data-limits="' + esc(JSON.stringify(lim)) + '">Limits</button> '
+          + '<button class="abtn" data-act="user-password" data-name="' + esc(u.username) + '">Pass</button> '
+          + '<button class="abtn" data-act="user-toggle" data-name="' + esc(u.username) + '" data-disabled="' + (u.disabled ? '1' : '') + '">' + (u.disabled ? 'Enable' : 'Disable') + '</button> '
+          + '<button class="abtn danger" data-act="user-delete" data-name="' + esc(u.username) + '">Delete</button>'
+          + '</span></div>';
+      }).join('') || '<div class="empty">No users yet.</div>';
+    }).catch(function () { el.innerHTML = '<div class="empty">Sign in as an admin (or set the admin key in Connect) to manage users.</div>'; });
   }
 
   // ── Actions ───────────────────────────────────────────────────────────
@@ -694,6 +722,51 @@
       var n = el.getAttribute('data-name');
       if (!confirm('Revoke key "' + n + '"? Any app using it stops working immediately.')) return Promise.resolve();
       return admin('DELETE', '/admin/keys/' + encodeURIComponent(n)).then(function () { renderKeys(); });
+    },
+    'user-toggle': function (el) {
+      var n = el.getAttribute('data-name');
+      var dis = el.getAttribute('data-disabled') === '1';
+      return admin('PATCH', '/admin/users/' + encodeURIComponent(n), { disabled: !dis })
+        .then(renderUsers).catch(function (err) { if (err && err.message !== 'unauthorized') alert(err.message); });
+    },
+    'user-delete': function (el) {
+      var n = el.getAttribute('data-name');
+      if (!confirm('Delete user "' + n + '"? Their API keys are revoked and their sessions killed.')) return Promise.resolve();
+      return admin('DELETE', '/admin/users/' + encodeURIComponent(n))
+        .then(renderUsers).catch(function (err) { if (err && err.message !== 'unauthorized') alert(err.message); });
+    },
+    'user-password': function (el) {
+      var n = el.getAttribute('data-name');
+      var p = prompt('New password for "' + n + '" (min 8 chars) — they are signed out everywhere:');
+      if (p === null) return Promise.resolve();
+      return admin('PATCH', '/admin/users/' + encodeURIComponent(n), { password: p })
+        .then(function () { alert('Password updated.'); }).catch(function (err) { if (err && err.message !== 'unauthorized') alert(err.message); });
+    },
+    'user-limits': function (el) {
+      var n = el.getAttribute('data-name');
+      var cur = {};
+      try { cur = JSON.parse(el.getAttribute('data-limits') || '{}'); } catch (_) { cur = {}; }
+      var ask = function (label, curVal) {
+        var v = prompt(label + ' — default for keys "' + n + '" mints (blank = unlimited):', curVal == null ? '' : String(curVal));
+        if (v === null) return undefined;
+        return v.trim() === '' ? null : Number(v);
+      };
+      var rpm = ask('Requests / minute', cur.rpm); if (rpm === undefined) return Promise.resolve();
+      var tpd = ask('Tokens / day', cur.tokensPerDay); if (tpd === undefined) return Promise.resolve();
+      var usd = ask('$ / month (API-equivalent)', cur.usdPerMonth); if (usd === undefined) return Promise.resolve();
+      var limits = {};
+      if (rpm !== null) limits.rpm = rpm;
+      if (tpd !== null) limits.tokensPerDay = tpd;
+      if (usd !== null) limits.usdPerMonth = usd;
+      return admin('PATCH', '/admin/users/' + encodeURIComponent(n), { defaultLimits: limits })
+        .then(renderUsers).catch(function (err) { if (err && err.message !== 'unauthorized') alert(err.message); });
+    },
+    'pf-revoke': function (el) {
+      var n = el.getAttribute('data-name');
+      if (!confirm('Revoke your key "' + n + '"? Apps using it stop working immediately.')) return Promise.resolve();
+      return fetch('/me/keys/' + encodeURIComponent(n), { method: 'DELETE' })
+        .then(function (r) { return r.json(); })
+        .then(function () { loadProfile(); });
     },
     'key-limits': function (el) {
       var n = el.getAttribute('data-name');
@@ -846,7 +919,7 @@
   $('c-key').addEventListener('change', function () {
     localStorage.setItem('providerApiKey', this.value);
     renderKeys();
-    lockedWarned = false;
+    $('login-overlay').style.display = 'none';
     if (es) { es.close(); es = null; }
     connectEvents();
     fetchStatus().then(fetchUsage);
@@ -881,8 +954,137 @@
     else { connectEvents(); fetchStatus(); }
   });
 
-  // Boot
-  fetchStatus().then(fetchUsage);
-  connectEvents();
-  setInterval(function () { if (state.view === 'overview' || state.view === 'usage') fetchUsage(); }, 30000);
+  // ── Login / profile (SaaS mode) ───────────────────────────────────────
+  function doLogin() {
+    $('li-msg').textContent = '';
+    fetch('/auth/login', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: $('li-user').value.trim(), password: $('li-pass').value }),
+    }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); }).then(function (out) {
+      if (!out.ok) { $('li-msg').textContent = out.j.error || 'Login failed.'; return; }
+      location.reload();
+    }).catch(function () { $('li-msg').textContent = 'Network error.'; });
+  }
+  $('li-btn').addEventListener('click', doLogin);
+  $('li-pass').addEventListener('keydown', function (e) { if (e.key === 'Enter') doLogin(); });
+  $('logoutbtn').addEventListener('click', function () {
+    fetch('/auth/logout', { method: 'POST' }).then(function () { location.reload(); });
+  });
+
+  function showWhoami() {
+    $('whoami').style.display = '';
+    $('whoami-name').textContent = state.user.displayName + ' (' + state.user.role + ')';
+  }
+
+  function loadProfile() {
+    fetch('/me/keys').then(function (r) { return r.json(); }).then(function (d) {
+      var lim = d.defaultLimits || {};
+      $('pf-keys').innerHTML = (d.keys || []).map(function (k) {
+        var use = k.usage || {};
+        var kl = k.limits || {};
+        var parts = [];
+        if (kl.rpm) parts.push(kl.rpm + '/min');
+        if (kl.tokensPerDay) parts.push(ftok(use.tokensToday || 0) + ' of ' + ftok(kl.tokensPerDay) + ' tok/day');
+        if (kl.usdPerMonth) parts.push('$' + (use.usdThisMonth || 0).toFixed(2) + ' of $' + kl.usdPerMonth + '/mo');
+        return '<div class="trow" style="grid-template-columns:1.4fr 1.6fr 90px">'
+          + '<span>' + esc(k.name.split('.').slice(1).join('.') || k.name) + '<div class="sub2">' + esc(k.name) + '</div></span>'
+          + '<span>' + (parts.length ? parts.map(function (p) { return '<span class="chip">' + esc(p) + '</span>'; }).join(' ') : '<span class="sub2">unlimited</span>') + '</span>'
+          + '<span><button class="abtn danger" data-act="pf-revoke" data-name="' + esc(k.name) + '">Revoke</button></span></div>';
+      }).join('') || '<div class="empty">No keys yet — mint one for your app.</div>';
+      var limNote = [];
+      if (lim.rpm) limNote.push(lim.rpm + ' req/min');
+      if (lim.tokensPerDay) limNote.push(ftok(lim.tokensPerDay) + ' tok/day');
+      if (lim.usdPerMonth) limNote.push('$' + lim.usdPerMonth + '/mo');
+      $('pf-msg').textContent = limNote.length ? 'New keys get: ' + limNote.join(' · ') : '';
+    });
+    fetch('/me/usage?range=7d').then(function (r) { return r.json(); }).then(function (u) {
+      var t = u.totals || {};
+      $('pf-tiles').innerHTML =
+        '<div class="tile peri"><div class="tl">Tokens (7d)</div><div class="big num">' + ftok((t.promptTokens || 0) + (t.completionTokens || 0)) + '</div><div class="sub">' + ftok(t.promptTokens || 0) + ' prompt · ' + ftok(t.completionTokens || 0) + ' completion</div></div>'
+        + '<div class="tile mint"><div class="tl">API-equivalent value</div><div class="big num">$' + (t.apiEquivalentUsd || 0).toFixed(2) + '</div><div class="sub">7 days</div></div>'
+        + '<div class="tile plain"><div class="tl">Requests / errors</div><div class="big num">' + fmt(t.requests || 0) + '</div><div class="sub">' + fmt(t.errors || 0) + ' errors</div></div>';
+      $('pf-usage-rows').innerHTML = (u.perKey || []).map(function (k) {
+        return '<div class="trow" style="grid-template-columns:1.2fr 70px 90px 90px 95px">'
+          + '<span class="sub2">' + esc(k.keyName) + '</span>'
+          + '<span class="sub2 num">' + fmt(k.requests) + '</span>'
+          + '<span class="sub2 num">' + ftok(k.promptTokens) + '</span>'
+          + '<span class="sub2 num">' + ftok(k.completionTokens) + '</span>'
+          + '<span class="sub2 num">$' + (k.apiEquivalentUsd || 0).toFixed(2) + '</span></div>';
+      }).join('') || '<div class="empty">No usage yet.</div>';
+    });
+  }
+
+  $('pf-mint').addEventListener('click', function () {
+    var app = $('pf-app').value.trim();
+    if (!app) { $('pf-msg').textContent = 'App name required.'; return; }
+    fetch('/me/keys', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ app: app }),
+    }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); }).then(function (out) {
+      if (!out.ok) { $('pf-msg').textContent = out.j.error || 'Mint failed.'; return; }
+      $('pf-app').value = '';
+      $('pf-minted').style.display = '';
+      $('pf-secret').textContent = out.j.key;
+      $('pf-base').textContent = location.origin + '/v1';
+      loadProfile();
+    });
+  });
+
+  $('pf-passbtn').addEventListener('click', function () {
+    fetch('/auth/password', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ currentPassword: $('pf-cur').value, newPassword: $('pf-new').value }),
+    }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); }).then(function (out) {
+      $('pf-passmsg').textContent = out.ok ? 'Changed — sign in again.' : (out.j.error || 'Failed.');
+      if (out.ok) setTimeout(function () { location.reload(); }, 1200);
+    });
+  });
+
+  $('user-create').addEventListener('click', function () {
+    var body = {
+      username: $('u-name').value.trim(),
+      displayName: $('u-display').value.trim() || undefined,
+      password: $('u-pass').value,
+      role: $('u-role').value,
+    };
+    var lim = {};
+    if ($('u-rpm').value) lim.rpm = Number($('u-rpm').value);
+    if ($('u-tpd').value) lim.tokensPerDay = Number($('u-tpd').value);
+    if ($('u-usd').value) lim.usdPerMonth = Number($('u-usd').value);
+    if (Object.keys(lim).length) body.defaultLimits = lim;
+    admin('POST', '/admin/users', body).then(function (d) {
+      $('user-msg').textContent = 'Created "' + d.username + '".';
+      ['u-name', 'u-display', 'u-pass', 'u-rpm', 'u-tpd', 'u-usd'].forEach(function (id) { $(id).value = ''; });
+      renderUsers();
+    }).catch(function (err) { if (err && err.message !== 'unauthorized') $('user-msg').textContent = err.message; });
+  });
+
+  function enterUserMode() {
+    // Regular users get their profile only — the ops tabs are admin territory.
+    $('tabs').style.display = 'none';
+    $('livebtn').style.display = 'none';
+    [].forEach.call(document.querySelectorAll('.view'), function (v) { v.classList.toggle('active', v.id === 'view-profile'); });
+    $('pf-hello').textContent = 'Hi, ' + state.user.displayName;
+    loadProfile();
+    setInterval(loadProfile, 30000);
+  }
+
+  function bootAdmin() {
+    fetchStatus().then(fetchUsage);
+    connectEvents();
+    setInterval(function () { if (state.view === 'overview' || state.view === 'usage') fetchUsage(); }, 30000);
+  }
+
+  // Boot: who am I? user role → profile; admin/none → full dashboard (data
+  // fetches 401 into the login overlay when DASHBOARD_AUTH is on).
+  $('loginbtn').addEventListener('click', function () { $('login-overlay').style.display = 'flex'; });
+  fetch('/auth/me').then(function (r) { return r.ok ? r.json() : null; }).then(function (d) {
+    if (d && d.user) {
+      state.user = d.user;
+      showWhoami();
+      if (d.user.role === 'user') return enterUserMode();
+    } else {
+      $('loginbtn').style.display = '';
+    }
+    bootAdmin();
+  }).catch(bootAdmin);
 }());

@@ -5,6 +5,19 @@ last-updated: '2026-07-04T18:45:00.000Z'
 
 ## Current Status
 
+- **SaaS user management shipped + live (2026-07-04 eve).** Real dashboard
+  logins (`users.js`: scrypt passwords, 7-day sessions persisted in the
+  runtime volume, login rate-limit; first boot prints the `admin` password
+  once). Admins: full dashboard + **Users tab** (create/disable/delete users,
+  default limits, password resets, per-user today/month usage), Usage **By
+  user** dimension, admin *session* now authorizes `/admin` and the gated
+  dashboard (no key paste). `user`-role logins get a profile-only view:
+  self-mint one key per app (`<username>.<app>`, inherits admin-set default
+  limits), revoke own keys, own usage, change password — 401 on everything
+  else. Keys carry `owner`; deleting a user revokes their keys + sessions.
+  Verified live on the NAS end-to-end (admin session → create `testuser` →
+  user login → self-mint `testuser.myapp` (rpm 5 inherited) → USER-KEY-OK on
+  /v1 → own-usage view → /admin 401). 220 assertions green (22 new in P26).
 - **SaaS hardening shipped + live (2026-07-04 pm).** Per-user keys now carry
   optional `limits` (`rpm` sliding window, `tokensPerDay` calendar-day,
   `usdPerMonth` API-equivalent calendar-month) enforced on `/v1` with

@@ -103,8 +103,11 @@ function createUsageLedger({
     return out;
   }
 
-  async function aggregate(range = '7d') {
-    const entries = await readEntries(range);
+  // opts.ownerOf: keyName → username resolver (keys.js) for the per-user
+  // rollup; opts.keyFilter: restrict to a set of key names (a user's own view).
+  async function aggregate(range = '7d', opts = {}) {
+    let entries = await readEntries(range);
+    if (opts.keyFilter) entries = entries.filter((e) => opts.keyFilter.has(e.keyName));
     const round = (n) => Math.round(n * 100) / 100;
     const totals = { requests: 0, promptTokens: 0, completionTokens: 0, apiEquivalentUsd: 0, errors: 0 };
     const perApp = new Map();
@@ -112,6 +115,7 @@ function createUsageLedger({
     const perDay = new Map();
     const perAccount = new Map();
     const perKey = new Map();
+    const perUser = new Map();
 
     // Shared accumulator for the account/key dimensions (same shape as perApp
     // minus the per-app-only accuracy detail).
@@ -152,6 +156,9 @@ function createUsageLedger({
 
       bump(perAccount, e.account || 'default', 'account', pt, ct, usd, success);
       bump(perKey, e.keyName || 'legacy', 'keyName', pt, ct, usd, success);
+      if (opts.ownerOf) {
+        bump(perUser, (e.keyName && opts.ownerOf(e.keyName)) || 'unowned', 'user', pt, ct, usd, success);
+      }
 
       if (e.routeId) {
         const r = perRoute.get(e.routeId) || { routeId: e.routeId, engine: e.engine, requests: 0, tokens: 0, usd: 0 };
@@ -191,6 +198,9 @@ function createUsageLedger({
       perKey: [...perKey.values()].map((k) => ({
         keyName: k.keyName, requests: k.requests, promptTokens: k.promptTokens, completionTokens: k.completionTokens, apiEquivalentUsd: round(k.usd), errors: k.errors,
       })).sort((x, y) => y.requests - x.requests),
+      perUser: opts.ownerOf ? [...perUser.values()].map((u) => ({
+        user: u.user, requests: u.requests, promptTokens: u.promptTokens, completionTokens: u.completionTokens, apiEquivalentUsd: round(u.usd), errors: u.errors,
+      })).sort((x, y) => y.requests - x.requests) : undefined,
       perDay: [...perDay.values()].sort((x, y) => (x.date < y.date ? -1 : 1)),
     };
   }

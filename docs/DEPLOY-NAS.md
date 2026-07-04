@@ -140,7 +140,23 @@ providers:
 Send `X-App-Id: <app>` to attribute usage per app; use a per-app named key
 (minted in the Connect tab) to attribute per teammate and scope it to `/v1` only.
 
-## 8. Per-user keys with limits (SaaS mode)
+## 8. Users, login, and per-user keys (SaaS mode)
+
+The dashboard has real logins. First boot creates the `admin` user and prints
+its password once (`docker logs ai-cli-bridge | grep 'dashboard login'`) —
+sign in and change it. Admins see the full dashboard plus a **Users** tab:
+create users (role `user` or `admin`), set their **default limits**, reset
+passwords, disable, delete (revokes their keys). The Usage tab gains a
+**By user** dimension.
+
+A `user`-role login sees only their own profile: mint one API key per app
+(named `<username>.<app>`, inheriting their default limits), revoke them,
+watch their own usage, change their password. They cannot see engines,
+accounts, other users, or anyone else's usage. Endpoints, for scripting:
+`POST /auth/login`, `GET/POST/DELETE /me/keys`, `GET /me/usage`,
+`GET/POST/PATCH/DELETE /admin/users[...]` (admin key or admin session).
+
+## 8b. Key limits reference
 
 Every user gets their own `app`-role key, optionally with limits — enforced on
 `/v1` with `429 + Retry-After` when exceeded:
