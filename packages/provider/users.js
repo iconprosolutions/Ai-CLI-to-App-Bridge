@@ -82,12 +82,16 @@ function createUserStore({ file, sessionsFile, validateLimits } = {}) {
     data = parsed;
   }
 
-  // sessions: token → { username, createdAt, expiresAt }
+  // sessions: sha256(token) → { username, createdAt, expiresAt }. Tokens are
+  // hashed at rest so sessions.json never contains a live browser credential;
+  // the cookie carries the raw 48-hex token. Legacy raw entries (48 hex) are
+  // hashed on load, so existing sessions survive the upgrade.
+  const hashToken = (t) => crypto.createHash('sha256').update(String(t)).digest('hex');
   const sessions = new Map();
   try {
     const persisted = JSON.parse(fs.readFileSync(sessionsFile, 'utf8'));
     for (const [tok, s] of Object.entries(persisted || {})) {
-      if (s && s.expiresAt > Date.now()) sessions.set(tok, s);
+      if (s && s.expiresAt > Date.now()) sessions.set(tok.length === 48 ? hashToken(tok) : tok, s);
     }
   } catch (_) { /* no sessions yet */ }
 
@@ -167,13 +171,13 @@ function createUserStore({ file, sessionsFile, validateLimits } = {}) {
       return { ok: false, status: 401, error: 'Invalid username or password.' };
     }
     const token = crypto.randomBytes(24).toString('hex');
-    sessions.set(token, { username: user.username, createdAt: Date.now(), expiresAt: Date.now() + SESSION_TTL_MS });
+    sessions.set(hashToken(token), { username: user.username, createdAt: Date.now(), expiresAt: Date.now() + SESSION_TTL_MS });
     persistSessions();
     return { ok: true, token, user: publicUser(user) };
   }
 
   function logout(token) {
-    if (sessions.delete(token)) persistSessions();
+    if (sessions.delete(hashToken(token))) persistSessions();
   }
 
   // Password check without creating a session (change-password flow). Rides
@@ -190,9 +194,10 @@ function createUserStore({ file, sessionsFile, validateLimits } = {}) {
   // Resolve a session token to its (live, enabled) user.
   function resolve(token) {
     if (!token) return null;
-    const s = sessions.get(token);
+    const key = hashToken(token);
+    const s = sessions.get(key);
     if (!s) return null;
-    if (s.expiresAt < Date.now()) { sessions.delete(token); persistSessions(); return null; }
+    if (s.expiresAt < Date.now()) { sessions.delete(key); persistSessions(); return null; }
     const user = findUser(s.username);
     if (!user || user.disabled) return null;
     return publicUser(user);

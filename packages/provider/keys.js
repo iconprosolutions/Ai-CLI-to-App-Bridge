@@ -4,21 +4,26 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-// Named API keys, v2 credentials.json. One store owns the file: load,
-// migrate v1 in place, verify (constant-time), mint, revoke, list. Same
+// Named API keys, v3 credentials.json. One store owns the file: load,
+// migrate v1/v2 in place, verify (constant-time), mint, revoke, list. Same
 // philosophy as routes.json / accounts.json — validate precisely, keep 0600.
 //
-// v2 shape:
-//   { "version": 2, "keys": [
-//       { "key": "<48 hex>", "name": "admin", "role": "admin", "createdAt": "…" },
-//       { "key": "<48 hex>", "name": "hermes", "role": "app",
+// v3 shape — secrets are hashed at rest (sha256 of the bare token), so a
+// leaked credentials.json / backup exposes no usable keys. A secret is only
+// known at mint time; it can never be re-displayed, only rotated.
+//   { "version": 3, "keys": [
+//       { "keyHash": "<64 hex>", "name": "admin", "role": "admin", "createdAt": "…" },
+//       { "keyHash": "<64 hex>", "name": "hermes", "role": "app",
 //         "accountPin": { "gemini": "main" }, "createdAt": "…" } ] }
 //
-// v1 shape (auto-migrated, key value preserved so existing callers keep working):
-//   { "apiKey": "<hex>", "createdAt": "…" }
+// Auto-migrated legacy shapes (key VALUES keep verifying — only their storage
+// changes):
+//   v2: { "version": 2, "keys": [{ "key": "<48 hex>", ... }] }
+//   v1: { "apiKey": "<hex>", "createdAt": "…" }
 
 const NAME_RE = /^[A-Za-z0-9._-]+$/;
 const ROLES = new Set(['admin', 'app']);
+const HASH_RE = /^[0-9a-f]{64}$/;
 
 function nowIso() {
   return new Date().toISOString();
@@ -26,6 +31,10 @@ function nowIso() {
 
 function newSecret() {
   return crypto.randomBytes(24).toString('hex'); // 48 hex chars
+}
+
+function hashSecret(secret) {
+  return crypto.createHash('sha256').update(String(secret)).digest('hex');
 }
 
 // Keys are presented OpenRouter/OpenAI-style as "sk-bridge-<secret>" so they
@@ -82,8 +91,8 @@ function validateKeyRecord(k) {
   if (!ROLES.has(k.role)) {
     throw new Error(`credentials.json: key "${k.name}" has an invalid role (expected admin|app)`);
   }
-  if (typeof k.key !== 'string' || !k.key) {
-    throw new Error(`credentials.json: key "${k.name}" is missing its secret`);
+  if (typeof k.keyHash !== 'string' || !HASH_RE.test(k.keyHash)) {
+    throw new Error(`credentials.json: key "${k.name}" is missing its keyHash (64 hex)`);
   }
   validateAccountPin(k.accountPin);
   validateLimits(k.limits);
@@ -111,24 +120,26 @@ function writeAtomic(file, data) {
   try { fs.chmodSync(file, 0o600); } catch (_) { /* best effort on odd filesystems */ }
 }
 
-// Read the file, migrating a v1 payload to v2 (and persisting the migration).
-// Absent file → an empty v2 doc that is NOT written (callers decide whether to
-// bootstrap). Throws on a malformed v2 doc so a bad edit fails loud at boot.
+// Read the file, migrating a v1/v2 payload to v3 (and persisting the
+// migration — plaintext secrets are hashed in place; their values keep
+// verifying). Absent file → an empty v3 doc that is NOT written (callers
+// decide whether to bootstrap). Throws on a malformed doc so a bad edit
+// fails loud at boot.
 function loadAndMigrate(file) {
   let raw;
-  try { raw = fs.readFileSync(file, 'utf8'); } catch (_) { return { version: 2, keys: [] }; }
+  try { raw = fs.readFileSync(file, 'utf8'); } catch (_) { return { version: 3, keys: [] }; }
 
   let parsed;
   try { parsed = JSON.parse(raw); } catch (err) { throw new Error(`credentials.json: invalid JSON (${err.message})`); }
 
-  // v1 → v2 migration, preserving the existing key value.
+  // v1 → v3 migration, hashing the existing key value.
   if (parsed && typeof parsed.apiKey === 'string' && parsed.version === undefined) {
     const migrated = {
-      version: 2,
+      version: 3,
       keys: [{
         name: 'admin',
         role: 'admin',
-        key: parsed.apiKey,
+        keyHash: hashSecret(parsed.apiKey),
         createdAt: parsed.createdAt || nowIso(),
       }],
     };
@@ -136,8 +147,25 @@ function loadAndMigrate(file) {
     return migrated;
   }
 
-  if (!parsed || parsed.version !== 2 || !Array.isArray(parsed.keys)) {
-    throw new Error('credentials.json: expected { version: 2, keys: [...] }');
+  // v2 → v3 migration: hash each plaintext secret in place.
+  if (parsed && parsed.version === 2 && Array.isArray(parsed.keys)) {
+    const migrated = {
+      version: 3,
+      keys: parsed.keys.map((k) => {
+        if (typeof k.key !== 'string' || !k.key) {
+          throw new Error(`credentials.json: key "${k.name}" is missing its secret`);
+        }
+        const { key, ...rest } = k;
+        return { ...rest, keyHash: hashSecret(key) };
+      }),
+    };
+    for (const k of migrated.keys) validateKeyRecord(k);
+    writeAtomic(file, migrated);
+    return migrated;
+  }
+
+  if (!parsed || parsed.version !== 3 || !Array.isArray(parsed.keys)) {
+    throw new Error('credentials.json: expected { version: 3, keys: [...] }');
   }
   const seen = new Set();
   for (const k of parsed.keys) {
@@ -145,25 +173,25 @@ function loadAndMigrate(file) {
     if (seen.has(k.name)) throw new Error(`credentials.json: duplicate key name "${k.name}"`);
     seen.add(k.name);
   }
-  return { version: 2, keys: parsed.keys };
+  return { version: 3, keys: parsed.keys };
 }
 
 function createKeyStore({ file, envKey = '' } = {}) {
   const data = loadAndMigrate(file);
   // The env-provided key (launcher / tests) is an ephemeral admin key: valid
   // for verification, never persisted, never listed.
-  const envRecord = envKey ? { name: 'env', role: 'admin', key: String(envKey) } : null;
+  const envRecord = envKey ? { name: 'env', role: 'admin', keyHash: hashSecret(bareToken(String(envKey))) } : null;
 
   const allRecords = () => (envRecord ? [envRecord, ...data.keys] : data.keys);
 
   function verify(token) {
     if (typeof token !== 'string' || !token) return null;
-    const a = Buffer.from(bareToken(token));
+    const a = Buffer.from(hashSecret(bareToken(token)), 'hex');
     let match = null;
     // Compare against every record (constant work per key) so a hit vs. miss
     // isn't distinguishable by timing.
     for (const rec of allRecords()) {
-      const b = Buffer.from(rec.key);
+      const b = Buffer.from(rec.keyHash, 'hex');
       if (a.length === b.length && crypto.timingSafeEqual(a, b)) match = rec;
     }
     if (!match) return null;
@@ -211,14 +239,16 @@ function createKeyStore({ file, envKey = '' } = {}) {
     const pin = validateAccountPin(accountPin);
     const lim = validateLimits(limits);
     const mode = validatePinMode(pinMode);
-    const rec = { name, role, key: newSecret(), createdAt: nowIso() };
+    const secret = newSecret();
+    const rec = { name, role, keyHash: hashSecret(secret), createdAt: nowIso() };
     if (owner) rec.owner = String(owner);
     if (pin) rec.accountPin = pin;
     if (pin && mode) rec.pinMode = mode;
     if (lim) rec.limits = lim;
     data.keys.push(rec);
-    writeAtomic(file, { version: 2, keys: data.keys });
-    return { ...rec, key: presentKey(rec.key) };
+    writeAtomic(file, { version: 3, keys: data.keys });
+    // The one and only time the secret exists in the clear.
+    return { ...publicKey(rec), key: presentKey(secret) };
   }
 
   // Update a key's limits in place (pass null/{} to clear). The secret and
@@ -229,7 +259,7 @@ function createKeyStore({ file, envKey = '' } = {}) {
     const lim = validateLimits(limits);
     if (lim) rec.limits = lim;
     else delete rec.limits;
-    writeAtomic(file, { version: 2, keys: data.keys });
+    writeAtomic(file, { version: 3, keys: data.keys });
     return { name: rec.name, role: rec.role, accountPin: rec.accountPin ? { ...rec.accountPin } : undefined, limits: rec.limits ? { ...rec.limits } : undefined };
   }
 
@@ -239,7 +269,7 @@ function createKeyStore({ file, envKey = '' } = {}) {
     if (!rec) throw new Error(`Unknown key "${name}"`);
     const p = validateAccountPin(pin);
     if (p) rec.accountPin = p; else delete rec.accountPin;
-    writeAtomic(file, { version: 2, keys: data.keys });
+    writeAtomic(file, { version: 3, keys: data.keys });
     return publicKey(rec);
   }
 
@@ -251,7 +281,7 @@ function createKeyStore({ file, envKey = '' } = {}) {
       throw new Error('Cannot revoke the last admin key — mint another admin first');
     }
     data.keys.splice(i, 1);
-    writeAtomic(file, { version: 2, keys: data.keys });
+    writeAtomic(file, { version: 3, keys: data.keys });
     return true;
   }
 
@@ -269,21 +299,25 @@ function createKeyStore({ file, envKey = '' } = {}) {
   };
 }
 
-// Launcher helper: ensure the file exists as v2 with at least one admin key.
-// Returns the admin key value to display and whether it was created/migrated.
+// Boot helper: ensure the file exists as v3 with at least one admin key.
+// Secrets are hashed at rest, so the admin key value is only known — and
+// returned — at creation time. An existing store returns adminKey: null;
+// the operator already has the key (or rotates via the dashboard).
 function bootstrapCredentialsFile(file) {
   const existedRaw = (() => { try { return fs.readFileSync(file, 'utf8'); } catch (_) { return null; } })();
-  const wasV1 = Boolean(existedRaw && (() => { try { const p = JSON.parse(existedRaw); return typeof p.apiKey === 'string' && p.version === undefined; } catch (_) { return false; } })());
+  const wasLegacy = Boolean(existedRaw && (() => {
+    try { const p = JSON.parse(existedRaw); return (typeof p.apiKey === 'string' && p.version === undefined) || p.version === 2; } catch (_) { return false; }
+  })());
 
-  const data = loadAndMigrate(file); // migrates v1 in place if needed
+  const data = loadAndMigrate(file); // migrates v1/v2 → v3 in place if needed
   const existingAdmin = data.keys.find((k) => k.role === 'admin');
   if (existingAdmin) {
-    return { adminKey: existingAdmin.key, created: false, migrated: wasV1 };
+    return { adminKey: null, created: false, migrated: wasLegacy };
   }
-  const rec = { name: 'admin', role: 'admin', key: newSecret(), createdAt: nowIso() };
-  data.keys.push(rec);
-  writeAtomic(file, { version: 2, keys: data.keys });
-  return { adminKey: rec.key, created: existedRaw === null, migrated: wasV1 };
+  const secret = newSecret();
+  data.keys.push({ name: 'admin', role: 'admin', keyHash: hashSecret(secret), createdAt: nowIso() });
+  writeAtomic(file, { version: 3, keys: data.keys });
+  return { adminKey: presentKey(secret), created: existedRaw === null, migrated: wasLegacy };
 }
 
 module.exports = { createKeyStore, loadAndMigrate, bootstrapCredentialsFile, validateAccountPin, validateLimits, presentKey };

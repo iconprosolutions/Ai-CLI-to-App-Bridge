@@ -1,13 +1,16 @@
 // Unit tests for the named-API-key store (packages/provider/keys.js).
-// v1→v2 migration, multi-key verify, mint/revoke/list, roles, account pins.
-// Run: node tests/keys.test.js  — no network, no quota.
+// v1/v2→v3 migration (hashed at rest), multi-key verify, mint/revoke/list,
+// roles, account pins. Run: node tests/keys.test.js — no network, no quota.
 'use strict';
 
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const crypto = require('crypto');
 
 const { createKeyStore, loadAndMigrate, bootstrapCredentialsFile } = require('../packages/provider/keys');
+
+const sha256 = (s) => crypto.createHash('sha256').update(s).digest('hex');
 
 let passed = 0;
 let failed = 0;
@@ -27,18 +30,20 @@ const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'keys-'));
 const HEX48 = /^[0-9a-f]{48}$/;
 
 function run() {
-  // (1) v1 → v2 migration in place, key value preserved, 0600.
+  // (1) v1 → v3 migration in place: key VALUE keeps verifying, storage is
+  // hashed, 0600.
   {
     const dir = tmp();
     const file = path.join(dir, 'credentials.json');
     fs.writeFileSync(file, JSON.stringify({ apiKey: 'deadbeef', createdAt: '2026-01-01T00:00:00Z' }));
     const store = createKeyStore({ file });
     const onDisk = JSON.parse(fs.readFileSync(file, 'utf8'));
-    assert(onDisk.version === 2 && Array.isArray(onDisk.keys), 'v1 file rewritten to version:2');
-    assert(onDisk.keys.length === 1 && onDisk.keys[0].key === 'deadbeef', 'migration preserves the key value');
+    assert(onDisk.version === 3 && Array.isArray(onDisk.keys), 'v1 file rewritten to version:3');
+    assert(onDisk.keys.length === 1 && onDisk.keys[0].keyHash === sha256('deadbeef'), 'migration stores sha256(key), not the key');
+    assert(!('key' in onDisk.keys[0]) && !fs.readFileSync(file, 'utf8').includes('deadbeef'), 'no plaintext secret remains on disk');
     assert(onDisk.keys[0].name === 'admin' && onDisk.keys[0].role === 'admin', 'migrated key is the admin key');
     const who = store.verify('deadbeef');
-    assert(who && who.name === 'admin' && who.role === 'admin', 'migrated key verifies as admin');
+    assert(who && who.name === 'admin' && who.role === 'admin', 'migrated key still verifies as admin');
     if (process.platform !== 'win32') {
       assert((fs.statSync(file).mode & 0o777) === 0o600, 'migrated file is 0600');
     }
@@ -63,6 +68,9 @@ function run() {
     assert(store.verify('c'.repeat(48)) === null, 'unknown token → null');
     assert(store.verify('short') === null, 'wrong-length token → null (no throw)');
     assert(store.authEnabled === true, 'authEnabled true when keys exist');
+    const onDisk = JSON.parse(fs.readFileSync(file, 'utf8'));
+    assert(onDisk.version === 3 && onDisk.keys.every((k) => k.keyHash && !('key' in k)),
+      'v2 file migrated to v3 — plaintext secrets hashed in place');
   }
 
   // (3) env key with no file → implicit admin.
@@ -94,6 +102,8 @@ function run() {
     const rec = store.mint({ name: 'hermes', role: 'app', accountPin: { gemini: 'main' } });
     assert(/^sk-bridge-[0-9a-f]{48}$/.test(rec.key), 'mint returns an sk-bridge-prefixed 48-hex secret');
     assert(rec.name === 'hermes' && rec.role === 'app', 'mint echoes name/role');
+    assert(!fs.readFileSync(file, 'utf8').includes(rec.key.slice('sk-bridge-'.length)),
+      'the minted secret never lands on disk (hash only)');
     const reloaded = createKeyStore({ file });
     assert(reloaded.verify(rec.key) && reloaded.verify(rec.key).role === 'app', 'minted key persists and verifies after reload');
     const listed = store.list();
@@ -144,12 +154,14 @@ function run() {
     const dir = tmp();
     const file = path.join(dir, 'credentials.json');
     const boot = bootstrapCredentialsFile(file);
-    assert(HEX48.test(boot.adminKey) && boot.created === true, 'bootstrap creates a fresh admin key when absent');
+    assert(/^sk-bridge-[0-9a-f]{48}$/.test(boot.adminKey) && boot.created === true,
+      'bootstrap creates a fresh admin key when absent (shown once, prefixed)');
     const data = loadAndMigrate(file);
-    assert(data.version === 2 && data.keys.some((k) => k.role === 'admin'), 'bootstrapped file loads as v2 with an admin key');
-    // Idempotent: second bootstrap does not create, returns existing admin key.
+    assert(data.version === 3 && data.keys.some((k) => k.role === 'admin'), 'bootstrapped file loads as v3 with an admin key');
+    assert(createKeyStore({ file }).verify(boot.adminKey), 'the created admin key verifies');
+    // Hashed at rest: a second bootstrap cannot (and does not) reveal the key.
     const boot2 = bootstrapCredentialsFile(file);
-    assert(boot2.created === false && boot2.adminKey === boot.adminKey, 'bootstrap is idempotent');
+    assert(boot2.created === false && boot2.adminKey === null, 'bootstrap is idempotent and never re-reveals the key');
   }
 
   console.log(`\n# Result: ${passed} passed, ${failed} failed`);

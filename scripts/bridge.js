@@ -21,10 +21,9 @@ function ensureRuntimeDir() {
 // Priority: explicit env (PROVIDER_API_KEY / BRIDGE_API_KEY) >
 // --insecure / BRIDGE_DEV_KEY escape hatch (restores the old
 // 'test-key' for dev/tests) > a persisted auto-generated key under
-// .bridge-runtime/credentials.json (gitignored). No shipped default
+// .bridge-runtime/launcher.key (gitignored). No shipped default
 // secret on a reachable port.
 // ─────────────────────────────────────────────────────────────
-const CRED_FILE = path.join(RUNTIME_DIR, 'credentials.json');
 const INSECURE = process.argv.includes('--insecure') || process.env.BRIDGE_DEV_KEY === '1';
 
 function resolveKey() {
@@ -32,14 +31,18 @@ function resolveKey() {
   if (explicit) return { key: explicit, source: 'env' };
   if (INSECURE) return { key: 'test-key', source: 'insecure (dev)' };
   ensureRuntimeDir();
-  // The keystore owns the file format: creates a v2 doc with one admin key on
-  // first run, and migrates a legacy v1 ({"apiKey":...}) file in place while
-  // preserving the key value (so existing consumers keep working). The admin
-  // key is what we display and pass to the provider for backward compat.
-  const { bootstrapCredentialsFile } = require('../packages/provider/keys');
-  const boot = bootstrapCredentialsFile(CRED_FILE);
-  const source = boot.created ? 'generated' : (boot.migrated ? 'persisted (migrated to v2)' : 'persisted');
-  return { key: boot.adminKey, source };
+  // credentials.json stores only hashes (v3) — the launcher can't read a key
+  // back from it. Instead it keeps its own dev admin key in launcher.key
+  // (0600, gitignored) and hands it to the provider via PROVIDER_API_KEY,
+  // which the keystore treats as an ephemeral, never-persisted admin key.
+  const keyFile = path.join(RUNTIME_DIR, 'launcher.key');
+  try {
+    const k = fs.readFileSync(keyFile, 'utf8').trim();
+    if (/^[0-9a-f]{48}$/.test(k)) return { key: k, source: 'persisted (launcher.key)' };
+  } catch (_) { /* first run */ }
+  const k = require('crypto').randomBytes(24).toString('hex');
+  fs.writeFileSync(keyFile, `${k}\n`, { mode: 0o600 });
+  return { key: k, source: 'generated (launcher.key)' };
 }
 
 const cred = resolveKey();

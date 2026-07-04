@@ -1094,8 +1094,9 @@ async function main() {
   assert(ledger18.some((e) => e.keyName === 'hermes' && e.account === 'w1'), 'ledger records keyName + account for pinned app-key traffic');
   assert(ledger18.some((e) => e.keyName === 'admin'), 'ledger records keyName for admin-key traffic');
 
-  // v1 → v2 migration on a real boot: legacy file still authorizes, file upgraded.
-  console.log('\n## Credentials v1 → v2 migration');
+  // v1 → v3 migration on a real boot: legacy file still authorizes, file
+  // upgraded with the secret hashed at rest.
+  console.log('\n## Credentials v1 → v3 migration');
   const P19 = 19580;
   const CREDS19 = path.join(TMP, 'creds19.json');
   const LEGACY = 'legacy'.padEnd(48, '0');
@@ -1107,8 +1108,9 @@ async function main() {
   assert(r.status === 401, 'auth is enforced after migration (no token → 401)');
   {
     const onDisk = JSON.parse(fs.readFileSync(CREDS19, 'utf8'));
-    assert(onDisk.version === 2 && onDisk.keys[0].key === LEGACY && onDisk.keys[0].role === 'admin',
-      'v1 file migrated to v2 in place, key value preserved as admin');
+    assert(onDisk.version === 3 && onDisk.keys[0].keyHash && !('key' in onDisk.keys[0]) && onDisk.keys[0].role === 'admin'
+      && !fs.readFileSync(CREDS19, 'utf8').includes(LEGACY),
+      'v1 file migrated to v3 in place — key value verifies but is hashed at rest');
   }
 
   // ── Per-key limits + dashboard auth (the SaaS boundary) ─────────────────
@@ -1501,6 +1503,11 @@ async function main() {
   assert(r.status === 200 && JSON.parse(r.body).user.mustChangePassword === true,
     'bootstrap-password login reports mustChangePassword');
   const mcCookie = String(r.headers['set-cookie'] || '').split(';')[0];
+  {
+    const rawTok = mcCookie.split('=')[1];
+    const sessRaw = fs.readFileSync(path.join(DIR28, 'sessions.json'), 'utf8');
+    assert(!sessRaw.includes(rawTok), 'sessions.json stores hashed tokens, not the live cookie value');
+  }
   r = await request(P28, { path: '/dashboard/status', headers: { Cookie: mcCookie } });
   assert(r.status === 403 && JSON.parse(r.body).mustChangePassword === true,
     'must-change session is refused dashboard data');
