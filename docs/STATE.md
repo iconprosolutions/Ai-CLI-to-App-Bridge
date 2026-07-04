@@ -5,6 +5,25 @@ last-updated: '2026-07-04T18:45:00.000Z'
 
 ## Current Status
 
+- **SaaS polish round shipped + live (2026-07-04 night).** (1) Keys are
+  presented OpenRouter-style as `sk-bridge-<48hex>` (verify strips the prefix;
+  bare legacy keys keep working). (2) Signed-in sessions authorize `/v1`
+  directly — the Tester needs no key paste; calls attribute as `user:<name>`
+  with the user's default limits. (3) **Web account onboarding**: Accounts tab
+  "Add an account" panel → paste a `claude setup-token` value or agy's
+  `antigravity-oauth-token` contents; files land in the volume, accounts.json
+  registers + `pool.reload()` (explicit — post-boot files had no fs.watch),
+  auto-probe. `account-login.sh` now stores the printed token itself (it never
+  persisted!) with a `token` re-entry mode. Token logins display
+  "token login · expires <date>" instead of "not signed in". (4) **Primary
+  account + soft pins**: `primary: true` in accounts.json (one per engine,
+  Make/Unset primary buttons) — unpinned traffic prefers it while healthy with
+  a free slot; key `accountPin` gains `pinMode` `soft` (mint UI default:
+  per-app assigned account that fails over when exhausted, selection-time and
+  mid-dispatch) vs `hard` (fail loud; route pins stay hard). Live: `claude:main`
+  (Team) is primary; `claude:personal` (1-yr token) is failover capacity.
+  Perf: Dockerfile layers reordered — code-only NAS rebuilds ~2.4s (was
+  minutes). 238 assertions green (P27 covers primary/soft-pin semantics).
 - **SaaS user management shipped + live (2026-07-04 eve).** Real dashboard
   logins (`users.js`: scrypt passwords, 7-day sessions persisted in the
   runtime volume, login rate-limit; first boot prints the `admin` password
