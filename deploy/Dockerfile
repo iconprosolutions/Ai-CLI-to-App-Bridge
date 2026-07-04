@@ -25,11 +25,17 @@ RUN curl -fsSL https://antigravity.google/cli/install.sh | bash -s -- --dir /usr
 
 WORKDIR /app
 
-# Dependencies (workspaces). Copied before source so this layer caches across
-# code-only changes. .dockerignore keeps node_modules/.git/runtime out.
+# Dependencies (workspaces). Only the manifests come before npm install, so
+# code-only changes reuse the cached install layer — a NAS redeploy of source
+# edits takes seconds, not minutes. .dockerignore keeps node_modules/.git out.
 COPY package.json package-lock.json* ./
-COPY packages ./packages
+COPY packages/core/package.json ./packages/core/
+COPY packages/adapters/package.json ./packages/adapters/
+COPY packages/provider/package.json ./packages/provider/
 RUN npm install --omit=dev
+
+# Now the actual source (workspace symlinks from the install layer still hold).
+COPY packages ./packages
 
 # Remaining app files the runtime needs.
 COPY scripts ./scripts
