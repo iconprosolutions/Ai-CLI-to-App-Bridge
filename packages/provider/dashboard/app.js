@@ -1146,6 +1146,24 @@
     setInterval(function () { if (state.view === 'overview' || state.view === 'usage') fetchUsage(); }, 30000);
   }
 
+  // Forced password change: the server refuses everything but /auth/* while
+  // the bootstrap (log-printed) password is still in use, so park the user in
+  // this overlay until it's replaced.
+  function enterMustChange() {
+    $('mustchange-overlay').style.display = 'flex';
+    $('mc-btn').addEventListener('click', function () {
+      $('mc-msg').textContent = '';
+      fetch('/auth/password', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ currentPassword: $('mc-cur').value, newPassword: $('mc-new').value }),
+      }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); }).then(function (out) {
+        if (!out.ok) { $('mc-msg').textContent = out.j.error || 'Failed.'; return; }
+        $('mc-msg').textContent = 'Changed — sign in with your new password.';
+        setTimeout(function () { location.reload(); }, 1200);
+      }).catch(function () { $('mc-msg').textContent = 'Network error.'; });
+    });
+  }
+
   // Boot: who am I? user role → profile; admin/none → full dashboard (data
   // fetches 401 into the login overlay when DASHBOARD_AUTH is on).
   $('loginbtn').addEventListener('click', function () { $('login-overlay').style.display = 'flex'; });
@@ -1153,6 +1171,7 @@
     if (d && d.user) {
       state.user = d.user;
       showWhoami();
+      if (d.user.mustChangePassword) return enterMustChange();
       if (d.user.role === 'user') return enterUserMode();
     } else {
       $('loginbtn').style.display = '';

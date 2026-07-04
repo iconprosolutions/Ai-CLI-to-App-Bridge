@@ -1469,6 +1469,81 @@ async function main() {
   });
   assert(r.status === 403, 'cross-origin cookie-authed mutation is refused (CSRF guard)');
 
+  // ── Login hardening: forced bootstrap password change + rate limits ─────
+  console.log('\n## Login hardening — forced password change + rate limits');
+  const P28 = 19670;
+  const DIR28 = path.join(TMP, 'p28');
+  fs.mkdirSync(DIR28, { recursive: true });
+  const CREDS28 = path.join(DIR28, 'creds.json');
+  const ADMIN28 = 'F'.repeat(48);
+  fs.writeFileSync(CREDS28, JSON.stringify({
+    version: 2,
+    keys: [{ name: 'admin', role: 'admin', key: ADMIN28, createdAt: '2026-01-01T00:00:00Z' }],
+  }));
+  const { hashPassword } = require(path.join(REPO, 'packages', 'provider', 'users.js'));
+  fs.writeFileSync(path.join(DIR28, 'users.json'), JSON.stringify({
+    version: 1,
+    users: [
+      { username: 'admin', role: 'admin', passwordHash: hashPassword('bootpass123'), mustChangePassword: true, createdAt: '2026-01-01T00:00:00Z' },
+      { username: 'bob', role: 'user', passwordHash: hashPassword('bobpassword1'), createdAt: '2026-01-01T00:00:00Z' },
+    ],
+  }));
+  await bootProvider(P28, {
+    CLAUDE_PATH: CLAUDE_KEYS, GEMINI_PATH: AGY_ACCT,
+    BRIDGE_CREDENTIALS_FILE: CREDS28,
+    BRIDGE_USERS_FILE: path.join(DIR28, 'users.json'),
+    BRIDGE_SESSIONS_FILE: path.join(DIR28, 'sessions.json'),
+    BRIDGE_ACCOUNTS_FILE: path.join(DIR28, 'accounts.json'),
+    DASHBOARD_AUTH: '1',
+  });
+
+  r = await request(P28, { path: '/auth/login', method: 'POST', body: { username: 'admin', password: 'bootpass123' } });
+  assert(r.status === 200 && JSON.parse(r.body).user.mustChangePassword === true,
+    'bootstrap-password login reports mustChangePassword');
+  const mcCookie = String(r.headers['set-cookie'] || '').split(';')[0];
+  r = await request(P28, { path: '/dashboard/status', headers: { Cookie: mcCookie } });
+  assert(r.status === 403 && JSON.parse(r.body).mustChangePassword === true,
+    'must-change session is refused dashboard data');
+  r = await request(P28, { path: '/me/keys', headers: { Cookie: mcCookie } });
+  assert(r.status === 403, 'must-change session is refused /me');
+  r = await request(P28, { path: '/dashboard/', headers: { Cookie: mcCookie } });
+  assert(r.status === 200, 'static dashboard shell still loads (hosts the change dialog)');
+  r = await request(P28, { path: '/auth/me', headers: { Cookie: mcCookie } });
+  assert(r.status === 200, '/auth/me still resolves for the gated session');
+  r = await request(P28, { path: '/dashboard/status', headers: { Cookie: mcCookie, Authorization: `Bearer ${ADMIN28}` } });
+  assert(r.status === 200, 'a valid API key still authorizes despite a gated cookie');
+  r = await request(P28, {
+    path: '/auth/password', method: 'POST', headers: { Cookie: mcCookie },
+    body: { currentPassword: 'WRONG-guess-1', newPassword: 'mynewpass99' },
+  });
+  assert(r.status === 403, 'wrong current password refused');
+  r = await request(P28, {
+    path: '/auth/password', method: 'POST', headers: { Cookie: mcCookie },
+    body: { currentPassword: 'bootpass123', newPassword: 'mynewpass99' },
+  });
+  assert(r.status === 200, 'password change succeeds with the correct current password');
+  r = await request(P28, { path: '/auth/login', method: 'POST', body: { username: 'admin', password: 'mynewpass99' } });
+  {
+    const u = (JSON.parse(r.body) || {}).user || {};
+    assert(r.status === 200 && !u.mustChangePassword, 'mustChangePassword clears once the password is replaced');
+    const c2 = String(r.headers['set-cookie'] || '').split(';')[0];
+    r = await request(P28, { path: '/dashboard/status', headers: { Cookie: c2 } });
+    assert(r.status === 200, 'the refreshed session has full access');
+  }
+
+  // Rate limits: per-username (5/min), then per-IP across fresh usernames.
+  let last = null;
+  for (let i = 0; i < 6; i += 1) {
+    last = await request(P28, { path: '/auth/login', method: 'POST', body: { username: 'bob', password: 'wrong-pass' } });
+  }
+  assert(last.status === 429, `6th bad attempt for one username → 429 (got ${last.status})`);
+  let ipLimited = null;
+  for (let i = 0; i < 25 && !ipLimited; i += 1) {
+    const rr = await request(P28, { path: '/auth/login', method: 'POST', body: { username: `ghost${i}`, password: 'wrong-pass' } });
+    if (rr.status === 429) ipLimited = rr;
+  }
+  assert(Boolean(ipLimited), 'sustained cross-username spraying from one IP is rate limited');
+
   console.log(`\n# Result: ${passed} passed, ${failed} failed`);
   process.exit(failed === 0 ? 0 : 1);
 }

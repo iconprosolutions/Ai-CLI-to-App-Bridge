@@ -237,7 +237,7 @@ app.use('/v1', (req, res, next) => {
 // ── Login / sessions (SaaS mode) ────────────────────────────────────────
 app.post('/auth/login', (req, res) => {
   const { username, password } = req.body || {};
-  const out = userStore.login(username, password);
+  const out = userStore.login(username, password, req.ip);
   if (!out.ok) return res.status(out.status).json({ error: out.error });
   setSessionCookie(req, res, out.token, 7 * 24 * 3600);
   return res.json({ user: out.user });
@@ -260,15 +260,35 @@ app.post('/auth/password', (req, res) => {
   const user = sessionUser(req);
   if (!user) return res.status(401).json({ error: 'Not signed in.' });
   const { currentPassword, newPassword } = req.body || {};
-  if (!userStore.checkPassword(user.username, currentPassword)) {
-    return res.status(403).json({ error: 'Current password is incorrect.' });
-  }
+  const gate = userStore.checkPassword(user.username, currentPassword, req.ip);
+  if (!gate.ok) return res.status(gate.status).json({ error: gate.error });
   try {
     userStore.update(user.username, { password: newPassword });
     return res.json({ ok: true, note: 'Password changed — sign in again.' });
   } catch (err) {
     return res.status(400).json({ error: err.message });
   }
+});
+
+// A session still on its bootstrap (log-printed) password can do exactly
+// three things — see itself, change the password, sign out — until it is
+// replaced. Requests carrying a *valid* API key are not session-authed and
+// pass through; the login/logout/me/password routes above already ran.
+app.use((req, res, next) => {
+  // The static dashboard shell (and health probes) stay reachable — they are
+  // public by design and the change-password dialog lives in that UI. The
+  // /dashboard data endpoints (status/usage/events) are NOT exempt.
+  if (req.method === 'GET' && ['/', '/healthz', '/health'].includes(req.path)) return next();
+  if (req.method === 'GET' && req.path.startsWith('/dashboard')
+    && !/^\/dashboard\/(status|usage|events)/.test(req.path)) return next();
+  const su = sessionUser(req);
+  if (!su || !su.mustChangePassword) return next();
+  const token = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+  if (token && keyStore.verify(token)) return next();
+  return res.status(403).json({
+    error: 'Your password was auto-generated at first boot — change it before doing anything else.',
+    mustChangePassword: true,
+  });
 });
 
 // ── Per-user self-service (session required; admin or user role) ────────

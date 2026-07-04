@@ -22,7 +22,10 @@ const USERNAME_RE = /^[a-z0-9][a-z0-9._-]{1,30}$/;
 const ROLES = new Set(['admin', 'user']);
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 const LOGIN_WINDOW_MS = 60 * 1000;
-const LOGIN_MAX_ATTEMPTS = 5;
+const LOGIN_MAX_ATTEMPTS = 5; // per username
+const LOGIN_MAX_PER_IP = 20; // per source IP — bounds username spraying
+const LOGIN_MAX_GLOBAL = 60; // across everyone — bounds scrypt event-loop load
+                             // even when the client IP is spoofed/forwarded
 
 function nowIso() { return new Date().toISOString(); }
 
@@ -39,6 +42,10 @@ function verifyPassword(password, stored) {
   const actual = crypto.scryptSync(String(password), parts[1], 32);
   return expected.length === actual.length && crypto.timingSafeEqual(expected, actual);
 }
+
+// Burned on login attempts against unknown/disabled usernames so a fast 401
+// can't confirm whether an account exists (scrypt dominates the timing).
+const DUMMY_HASH = hashPassword('timing-equalizer');
 
 function writeAtomic(file, data) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -94,32 +101,69 @@ function createUserStore({ file, sessionsFile, validateLimits } = {}) {
 
   // One-time bootstrap: no users → create the admin login and hand back the
   // generated password to print exactly once (never stored in the clear).
+  // The printed password lives in the container log, so the account is born
+  // with mustChangePassword — sessions are gated until it is replaced.
   function bootstrap() {
     if (data.users.length) return null;
     const password = crypto.randomBytes(9).toString('base64url'); // 12 chars
     data.users.push({
-      username: 'admin', role: 'admin', passwordHash: hashPassword(password), createdAt: nowIso(),
+      username: 'admin', role: 'admin', passwordHash: hashPassword(password), mustChangePassword: true, createdAt: nowIso(),
     });
     save();
     return { username: 'admin', password };
   }
 
-  // ── Login rate limiting (per username, in-memory) ─────────────────────
+  // ── Login rate limiting (in-memory sliding windows) ────────────────────
+  // Three layers: per-username (targeted guessing), per-IP (username
+  // spraying), global (event-loop protection — scrypt is deliberately slow,
+  // and the IP can be spoofed via forwarded headers, so a spray from "many"
+  // IPs still hits this ceiling).
   const attempts = new Map(); // username → [ts...]
-  function throttled(username) {
+  const attemptsByIp = new Map(); // ip → [ts...]
+  let globalWindow = []; // [ts...]
+
+  const pruneWindow = (arr, now) => arr.filter((t) => now - t < LOGIN_WINDOW_MS);
+
+  function throttled(username, ip) {
     const now = Date.now();
-    const arr = (attempts.get(username) || []).filter((t) => now - t < LOGIN_WINDOW_MS);
-    attempts.set(username, arr);
-    return arr.length >= LOGIN_MAX_ATTEMPTS;
+    globalWindow = pruneWindow(globalWindow, now);
+    if (globalWindow.length >= LOGIN_MAX_GLOBAL) return true;
+    const byName = pruneWindow(attempts.get(username) || [], now);
+    if (byName.length) attempts.set(username, byName); else attempts.delete(username);
+    if (byName.length >= LOGIN_MAX_ATTEMPTS) return true;
+    if (ip) {
+      const byIp = pruneWindow(attemptsByIp.get(ip) || [], now);
+      if (byIp.length) attemptsByIp.set(ip, byIp); else attemptsByIp.delete(ip);
+      if (byIp.length >= LOGIN_MAX_PER_IP) return true;
+    }
+    return false;
   }
 
-  function login(username, password) {
+  function recordFailure(username, ip) {
+    const now = Date.now();
+    attempts.set(username, pruneWindow(attempts.get(username) || [], now).concat(now));
+    globalWindow.push(now);
+    if (!ip) return;
+    attemptsByIp.set(ip, pruneWindow(attemptsByIp.get(ip) || [], now).concat(now));
+    // A spray of fabricated forwarded IPs must not grow this map without bound.
+    if (attemptsByIp.size > 1000) {
+      for (const [k, v] of attemptsByIp) {
+        if (!pruneWindow(v, now).length) attemptsByIp.delete(k);
+      }
+    }
+  }
+
+  function login(username, password, ip) {
     const name = String(username || '').toLowerCase();
-    if (throttled(name)) return { ok: false, status: 429, error: 'Too many login attempts — wait a minute.' };
+    if (throttled(name, ip)) return { ok: false, status: 429, error: 'Too many login attempts — wait a minute.' };
     const user = findUser(name);
-    const good = user && !user.disabled && verifyPassword(password, user.passwordHash);
+    // Unknown/disabled usernames still burn one scrypt so response timing
+    // doesn't reveal which accounts exist.
+    const good = user && !user.disabled
+      ? verifyPassword(password, user.passwordHash)
+      : (verifyPassword(password, DUMMY_HASH) && false);
     if (!good) {
-      attempts.get(name).push(Date.now());
+      recordFailure(name, ip);
       return { ok: false, status: 401, error: 'Invalid username or password.' };
     }
     const token = crypto.randomBytes(24).toString('hex');
@@ -132,10 +176,15 @@ function createUserStore({ file, sessionsFile, validateLimits } = {}) {
     if (sessions.delete(token)) persistSessions();
   }
 
-  // Password check without creating a session (change-password flow).
-  function checkPassword(username, password) {
-    const user = findUser(username);
-    return Boolean(user && !user.disabled && verifyPassword(password, user.passwordHash));
+  // Password check without creating a session (change-password flow). Rides
+  // the same throttle windows as login — this path verifies passwords too.
+  function checkPassword(username, password, ip) {
+    const name = String(username || '');
+    if (throttled(name, ip)) return { ok: false, status: 429, error: 'Too many attempts — wait a minute.' };
+    const user = findUser(name);
+    const good = Boolean(user && !user.disabled && verifyPassword(password, user.passwordHash));
+    if (!good) recordFailure(name, ip);
+    return good ? { ok: true } : { ok: false, status: 403, error: 'Current password is incorrect.' };
   }
 
   // Resolve a session token to its (live, enabled) user.
@@ -164,6 +213,7 @@ function createUserStore({ file, sessionsFile, validateLimits } = {}) {
       displayName: u.displayName || u.username,
       defaultLimits: u.defaultLimits ? { ...u.defaultLimits } : undefined,
       disabled: Boolean(u.disabled),
+      mustChangePassword: u.mustChangePassword ? true : undefined,
       createdAt: u.createdAt,
     };
   }
@@ -199,6 +249,7 @@ function createUserStore({ file, sessionsFile, validateLimits } = {}) {
     if (password !== undefined) {
       if (typeof password !== 'string' || password.length < 8) throw new Error('Password must be at least 8 characters');
       user.passwordHash = hashPassword(password);
+      delete user.mustChangePassword; // the logged bootstrap password is gone
       killSessions(username); // force re-login everywhere
     }
     if (displayName !== undefined) user.displayName = String(displayName).slice(0, 60) || undefined;

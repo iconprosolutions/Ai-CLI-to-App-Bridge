@@ -346,6 +346,18 @@
   </div>
 </div>
 
+<!-- ═══ FORCED PASSWORD CHANGE OVERLAY (bootstrap password still in use) ═══ -->
+<div id="mustchange-overlay" style="display:none;position:fixed;inset:0;background:rgba(20,18,14,.55);backdrop-filter:blur(3px);z-index:60;align-items:center;justify-content:center">
+  <div class="panel" style="width:360px;background:var(--card,#fff);box-shadow:0 18px 60px rgba(0,0,0,.35)">
+    <h3>Set a new password</h3>
+    <p class="mono" style="font-size:11px;color:var(--body);margin-bottom:12px">Your password was auto-generated at first boot (and printed to the server log). Choose your own before continuing.</p>
+    <div class="field"><label for="mc-cur">Current password</label><input id="mc-cur" type="password" autocomplete="current-password"></div>
+    <div class="field"><label for="mc-new">New password (min 8 chars)</label><input id="mc-new" type="password" autocomplete="new-password"></div>
+    <button class="abtn primary" id="mc-btn" style="width:100%">Change password</button>
+    <div class="mono" id="mc-msg" style="font-size:11px;color:var(--warn-d,#b00);margin-top:10px;min-height:14px"></div>
+  </div>
+</div>
+
 <footer>
   <div class="foot"><span>AI CLI Bridge · Control Center</span><span id="foot-note">local only</span></div>
   <div class="stencil">ai-cli-bridge</div>
