@@ -31,8 +31,25 @@ case "$ENGINE" in
   claude)
     echo "Onboarding Claude account '${NAME}' → ${DIR}"
     # 'claude setup-token' prints a URL; open it, approve, paste the code back.
-    # The long-lived token lands in CLAUDE_CONFIG_DIR and self-refreshes.
-    docker exec -it -e CLAUDE_CONFIG_DIR="$DIR" "$CONTAINER" claude setup-token
+    # It PRINTS a 1-year token but does not persist it — we store it below so
+    # the pool's spawns (CLAUDE_CONFIG_DIR=$DIR) can authenticate.
+    # Re-run as `account-login.sh claude ${NAME} token` to store an
+    # already-issued token without doing the browser dance again.
+    if [ "${3:-}" != "token" ]; then
+      docker exec -it -e CLAUDE_CONFIG_DIR="$DIR" "$CONTAINER" claude setup-token
+    fi
+    echo
+    printf 'Paste the sk-ant-oat… token that was printed above (input hidden): '
+    IFS= read -rs TOKEN
+    echo
+    if [ -z "$TOKEN" ]; then
+      echo "No token entered — the account will show 'needs login' until one is stored." >&2
+      exit 1
+    fi
+    EXP=$(( ( $(date +%s) + 31536000 ) * 1000 ))  # ~1 year, matching the token
+    printf '{"claudeAiOauth":{"accessToken":"%s","expiresAt":%s,"scopes":["user:inference"],"subscriptionType":"external"}}' "$TOKEN" "$EXP" \
+      | docker exec -i -u root "$CONTAINER" sh -c "umask 077; cat > ${DIR}/.credentials.json && chown 10001:10001 ${DIR}/.credentials.json"
+    echo "✓ token stored in ${DIR}/.credentials.json"
     ;;
   gemini)
     HOSTDIR="./data/runtime/${REL}"
