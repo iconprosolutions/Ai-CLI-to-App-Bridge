@@ -101,6 +101,16 @@ async function main() {
   if (mode === 'claude-sim') {
     logInvocation();
     if (simArgs[0] === '--version') { process.stdout.write('fake-claude 0.0.0\n'); return; }
+    // Newer CLIs (≥2.1.201) hard-fail when --disallowedTools names a tool that
+    // no longer exists. FAKE_CLI_UNKNOWN_DENY=<name> emulates that.
+    if (process.env.FAKE_CLI_UNKNOWN_DENY) {
+      const di = simArgs.indexOf('--disallowedTools');
+      const list = di !== -1 ? String(simArgs[di + 1] || '') : '';
+      if (list.split(',').includes(process.env.FAKE_CLI_UNKNOWN_DENY)) {
+        process.stderr.write(`Permission deny rule "${process.env.FAKE_CLI_UNKNOWN_DENY}" matches no known tool — check for typos.`);
+        process.exit(1);
+      }
+    }
     // Logged-out account: mirrors the real CLI (verified 2026-07-02) — a
     // result line with is_error:true and exit 0.
     if (process.env.FAKE_CLI_AUTH_FAIL) {

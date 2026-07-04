@@ -26,11 +26,18 @@ From your Mac (rsync keeps `./data` and excludes junk):
 
 ```bash
 rsync -avz --delete \
-  --exclude node_modules --exclude .git --exclude .bridge-runtime --exclude deploy/data \
+  --exclude node_modules --exclude .git --exclude .bridge-runtime --exclude data \
   ~/Projects/experiments/ai-cli-bridge/ waqar@192.168.1.10:~/ai-cli-bridge/
 ```
 
 Or clone/pull on the NAS if it has repo access.
+
+> **Ugreen path quirk (hit live 2026-07-04):** the NAS's rsync/SFTP subsystem
+> remaps `~` and even absolute `/home/waqar/...` destinations into the
+> `/home/waqar/waqar/` share. After the first rsync, check where the files
+> landed and `mv` them to `/home/waqar/ai-cli-bridge` if needed — or push
+> individual files with `ssh waqar@192.168.1.10 'cat > /home/waqar/ai-cli-bridge/<path>' < <path>`,
+> which is not remapped.
 
 ## 3. Build and start
 
@@ -70,13 +77,18 @@ the creds in). Run `./scripts/account-login.sh gemini team` for the exact steps;
 in short:
 
 ```bash
-# On your Mac (or any machine with a browser + agy):
-export HOME=/tmp/agy-team && mkdir -p "$HOME" && agy   # complete Google login, then quit
-rsync -a /tmp/agy-team/.gemini/ waqar@192.168.1.10:~/ai-cli-bridge/data/runtime/accounts/gemini/team/.gemini/
+# On your Mac (or any machine with a browser + agy): log in once, then copy the
+# three files agy actually reads (verified live 2026-07-04 — oauth_creds.json
+# alone is NOT enough; the real credential is antigravity-cli/antigravity-oauth-token):
+for f in antigravity-cli/antigravity-oauth-token antigravity-cli/installation_id google_accounts.json; do
+  ssh waqar@192.168.1.10 "docker exec -i -u root ai-cli-bridge sh -c 'mkdir -p /app/.bridge-runtime/accounts/gemini/team/.gemini/antigravity-cli && cat > /app/.bridge-runtime/accounts/gemini/team/.gemini/$f'" < ~/.gemini/$f
+done
+ssh waqar@192.168.1.10 "docker exec -u root ai-cli-bridge chown -R 10001:10001 /app/.bridge-runtime/accounts/gemini"
 ```
 
-agy reads `<account dir>/.gemini/oauth_creds.json` (via the account's `HOME`); the
-refresh token keeps it alive. Then append the accounts to
+agy reads `<account dir>/.gemini/antigravity-cli/antigravity-oauth-token` (via the
+account's `HOME`); `google_accounts.json` supplies the dashboard identity display.
+Then append the accounts to
 `./data/runtime/accounts.json` (create it if absent):
 
 ```json
@@ -134,8 +146,9 @@ Supported. The image installs Antigravity's official **linux-amd64** `agy` build
 (`curl -fsSL https://antigravity.google/cli/install.sh | bash`, which detects the
 platform). The one wrinkle is auth: `agy` logs in through a browser and can't do
 that headless, so you copy credentials in rather than logging in on the NAS —
-see [§5 onboarding](#5-onboard-accounts). Once `<account>/.gemini/oauth_creds.json`
-is in place, `agy` runs non-interactively and the refresh token self-renews.
+see [§5 onboarding](#5-onboard-accounts). Once
+`<account>/.gemini/antigravity-cli/antigravity-oauth-token` (+ `installation_id`)
+is in place, `agy` runs non-interactively and the token self-renews.
 
 - **First-deploy check:** confirm `docker exec ai-cli-bridge agy --version` prints
   a version (proves the linux binary installed). Then, after copying a gemini

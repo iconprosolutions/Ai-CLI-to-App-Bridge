@@ -42,13 +42,24 @@ function classifyError(stderr, stdout) {
 // them; this lockdown prevents execution, which is the safety boundary.
 const LOCKDOWN_TOOLS = 'Task,Bash,Glob,Grep,Read,Edit,Write,NotebookEdit,WebFetch,WebSearch,TodoWrite,SlashCommand,Skill';
 
+// Newer CLIs hard-fail when a deny rule names a tool that no longer exists
+// (e.g. 2.1.201 dropped SlashCommand). Detect that error, prune the name, retry.
+const UNKNOWN_DENY_RULE_RE = /deny rule "([^"]+)" matches no known tool/i;
+
 function createClaudeAdapter(opts = {}) {
   const bin = opts.bin || process.env.CLAUDE_PATH || 'claude';
   const timeoutMs = opts.timeoutMs || Number(process.env.CLI_TIMEOUT_MS) || 5 * 60 * 1000;
   const maxBytes = opts.maxBytes || Number(process.env.MAX_CLI_OUTPUT_BYTES) || 10 * 1024 * 1024;
   const defaultModel = opts.defaultModel || process.env.CLAUDE_MODEL || null;
   const allowLocalTools = opts.allowLocalTools || process.env.CLAUDE_LOCAL_TOOLS === '1';
-  const lockdownArgs = allowLocalTools ? [] : ['--disallowedTools', LOCKDOWN_TOOLS, '--strict-mcp-config'];
+  // Mutable: names the installed CLI rejects as unknown are pruned at runtime.
+  let lockdownTools = allowLocalTools ? [] : LOCKDOWN_TOOLS.split(',');
+  const lockdownArgs = () => {
+    if (allowLocalTools) return [];
+    return lockdownTools.length
+      ? ['--disallowedTools', lockdownTools.join(','), '--strict-mcp-config']
+      : ['--strict-mcp-config'];
+  };
 
   // Once the installed CLI rejects stream-json flags, stop trying (log once).
   let streamJsonBroken = false;
@@ -61,7 +72,7 @@ function createClaudeAdapter(opts = {}) {
 
   async function invokeStreamJson({ prompt, model, signal, onDelta, env, resumeId }) {
     // --verbose is mandatory with -p + stream-json (verified live 2026-07-02).
-    const args = ['-p', '--output-format', 'stream-json', '--include-partial-messages', '--verbose', ...lockdownArgs];
+    const args = ['-p', '--output-format', 'stream-json', '--include-partial-messages', '--verbose', ...lockdownArgs()];
     // Session continuity: resume the CLI's conversation and send only the new
     // turn (verified live: --resume carries prior context). Account-specific.
     if (resumeId) args.push('--resume', resumeId);
@@ -129,7 +140,7 @@ function createClaudeAdapter(opts = {}) {
   }
 
   async function invokeText({ prompt, model, signal, onDelta, env, resumeId }) {
-    const args = ['-p', ...lockdownArgs];
+    const args = ['-p', ...lockdownArgs()];
     if (resumeId) args.push('--resume', resumeId);
     if (model) args.push('--model', model);
     const run = await runCli(bin, args, {
@@ -145,20 +156,34 @@ function createClaudeAdapter(opts = {}) {
 
     async invoke({ prompt, model, signal, onDelta, env, resumeId } = {}) {
       const selected = normalizeModel(model);
-      if (!streamJsonBroken) {
+      // Bounded by the lockdown list length: each pass either succeeds, prunes
+      // one unknown deny-rule name and retries, or throws.
+      for (;;) {
         try {
-          return await invokeStreamJson({ prompt, model: selected, signal, onDelta, env, resumeId });
-        } catch (err) {
-          const msg = String(err.message || '');
-          if (err.kind === 'bad_output' && /unknown option|output-format|stream-json|--verbose|--include-partial-messages/i.test(msg)) {
-            streamJsonBroken = true;
-            console.warn('[claude-adapter] installed CLI rejects stream-json; falling back to text mode (estimated usage)');
-          } else {
-            throw err;
+          if (!streamJsonBroken) {
+            try {
+              return await invokeStreamJson({ prompt, model: selected, signal, onDelta, env, resumeId });
+            } catch (err) {
+              const msg = String(err.message || '');
+              if (err.kind === 'bad_output' && /unknown option|output-format|stream-json|--verbose|--include-partial-messages/i.test(msg)) {
+                streamJsonBroken = true;
+                console.warn('[claude-adapter] installed CLI rejects stream-json; falling back to text mode (estimated usage)');
+              } else {
+                throw err;
+              }
+            }
           }
+          return await invokeText({ prompt, model: selected, signal, onDelta, env, resumeId });
+        } catch (err) {
+          const m = UNKNOWN_DENY_RULE_RE.exec(`${err.message || ''} ${(err.data && err.data.detail) || ''}`);
+          if (m && lockdownTools.includes(m[1])) {
+            lockdownTools = lockdownTools.filter((t) => t !== m[1]);
+            console.warn(`[claude-adapter] installed CLI does not know tool "${m[1]}"; pruned from the lockdown deny list`);
+            continue;
+          }
+          throw err;
         }
       }
-      return invokeText({ prompt, model: selected, signal, onDelta, env, resumeId });
     },
 
     async listModels() {

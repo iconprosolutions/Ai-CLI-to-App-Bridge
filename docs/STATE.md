@@ -1,9 +1,25 @@
 ---
-last-updated: '2026-07-03T08:00:00.000Z'
+last-updated: '2026-07-04T18:45:00.000Z'
 ---
 # AI CLI Bridge State
 
 ## Current Status
+
+- **LIVE ON THE NAS (2026-07-04).** The Server Edition runs in Docker on the
+  Ugreen NAS (`ai-cli-bridge` container, `http://192.168.1.10:9011`). Both
+  engines verified with real completions (claude 2.1.201 via copied
+  keychain-extracted `.credentials.json`; agy 1.0.16 via copied
+  `antigravity-cli/antigravity-oauth-token` — NOT `oauth_creds.json`, docs
+  corrected). Auth enforced (named keys; startup banner fixed to read
+  `keyStore.authEnabled`, it previously lied "DISABLED" when only file keys
+  existed). Streaming verified over the LAN. **Hermes cut over** to
+  `http://192.168.1.10:9011/v1` with a minted app-role key `hermes`
+  (`~/.hermes/config.yaml` + `.env`; backup `config.yaml.bak-nas-cutover-20260704`).
+  Usage ledger attributes the `hermes` app/key. Deploy fixes this session:
+  runtime volume standardized to repo-root `data/` (compose `../data/runtime`),
+  Ugreen rsync `~`-remap quirk documented, and the claude adapter now
+  self-heals when a newer CLI rejects a `--disallowedTools` name as unknown
+  (2.1.201 dropped `SlashCommand`) — pruned + retried, regression-tested.
 
 - **v2 consolidated architecture shipped** (branch `feat/dashboard-overhaul`,
   Phases 0–5 of `docs/superpowers/specs/2026-07-02-bridge-v2-design.md`).
@@ -96,11 +112,12 @@ Nothing blocked.
 
 ## Up Next
 
-- **The whole Server Edition (Phases A–E) is implemented on `feat/dashboard-overhaul`.**
-  Decide push/PR/merge. Nothing is pushed yet.
-- **Operator-gated:** run the NAS deploy (`docs/DEPLOY-NAS.md`) — `docker build`,
-  onboard claude + gemini accounts, point Hermes at `http://192.168.1.10:9011/v1`.
-  First deploy should confirm `agy --version` in-container and one gemini creds-copy
-  round-trip (headless auth is the only unverified link, per DEPLOY-NAS.md).
-- Later (out of scope per spec): real image handoff, CLI session continuity
-  (`--resume`), deleting the legacy provider-bridge once nothing depends on it.
+- **Deployed and live** — the NAS deploy, account onboarding, and Hermes cutover
+  all completed 2026-07-04 (see Current Status). Remaining: decide PR/merge of
+  `feat/dashboard-overhaul` into main.
+- Watch item: the claude account on the NAS shares the Mac's OAuth
+  refresh token (keychain copy). If Anthropic rotates it on refresh, one side
+  may need a re-login; the durable alternative is `claude setup-token`
+  in-container (`scripts/account-login.sh claude main`, needs the operator).
+- Later (out of scope per spec): real image handoff, deleting the legacy
+  provider-bridge once nothing depends on it.

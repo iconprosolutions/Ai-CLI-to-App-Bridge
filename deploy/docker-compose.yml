@@ -23,7 +23,7 @@ services:
       # ledger, and connection.json. Back this one directory up and you have
       # everything. routes.json + pricing.json ship baked into the image; mount
       # them here too only if you customize them.
-      - ./data/runtime:/app/.bridge-runtime
+      - ../data/runtime:/app/.bridge-runtime
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9011/dashboard/status"]
       interval: 30s

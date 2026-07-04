@@ -836,11 +836,11 @@ app.use((err, req, res, next) => {
 
 const server = app.listen(PORT, BIND_HOST, () => {
   console.log(`Provider (consolidated) running on ${BIND_HOST}:${PORT}`);
-  console.log(`Auth: ${API_KEY ? 'ENABLED (Bearer token required)' : 'DISABLED (open)'}`);
+  console.log(`Auth: ${keyStore.authEnabled ? 'ENABLED (Bearer token required)' : 'DISABLED (open)'}`);
   console.log(`Engines: ${ENGINE_NAMES.map((e) => `${e} (in-process)`).join(', ')}`);
   console.log(`Max concurrent per engine: ${MAX_CONCURRENT_PER_ENGINE}`);
   console.log(`Routes: ${registry.list().map((r) => r.id).join(', ')}`);
-  if (!API_KEY && BIND_HOST !== '127.0.0.1' && BIND_HOST !== 'localhost') {
+  if (!keyStore.authEnabled && BIND_HOST !== '127.0.0.1' && BIND_HOST !== 'localhost') {
     console.warn(`WARNING: provider bound to ${BIND_HOST} with no API key set — anyone who can reach this port can spend your Claude/Gemini quota. Set PROVIDER_API_KEY or bind to 127.0.0.1.`);
   }
 });

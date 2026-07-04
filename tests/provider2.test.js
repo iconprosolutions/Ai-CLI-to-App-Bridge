@@ -534,6 +534,21 @@ async function main() {
   const lockArgs = claudeCalls[claudeCalls.length - 1] || [];
   assert(lockArgs.includes('--disallowedTools') && lockArgs.includes('--strict-mcp-config'),
     'claude invocations carry local-tool lockdown flags');
+  // A CLI that rejects a deny-rule name as unknown (claude ≥2.1.201 dropped
+  // SlashCommand): the adapter must prune the name and retry, not fail the request.
+  const PRUNE_LOG = path.join(TMP, 'prune-argv.log');
+  const CLAUDE_PRUNE = writeStub('claude-prune.sh', 'claude-sim', { FAKE_CLI_UNKNOWN_DENY: 'SlashCommand', FAKE_CLI_LOG: PRUNE_LOG });
+  const { createClaudeAdapter } = require(path.join(REPO, 'packages', 'adapters', 'claude.js'));
+  const pruneAdapter = createClaudeAdapter({ bin: CLAUDE_PRUNE });
+  const pruneRes = await pruneAdapter.invoke({ prompt: 'hello prune' });
+  assert(pruneRes.text.includes('replied to'), 'invoke succeeds after pruning an unknown deny-rule name');
+  const pruneCalls = fs.readFileSync(PRUNE_LOG, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  const pruneLast = pruneCalls[pruneCalls.length - 1];
+  const pruneDi = pruneLast.indexOf('--disallowedTools');
+  const pruneList = pruneDi !== -1 ? String(pruneLast[pruneDi + 1]).split(',') : [];
+  assert(!pruneList.includes('SlashCommand') && pruneList.includes('Bash'),
+    'retry keeps the lockdown list minus the unknown tool');
+
   // Prompt instruction shaping (unit level).
   const { messagesToPrompt } = require(path.join(REPO, 'packages', 'provider', 'translate.js'));
   const toolsFixture = [{ type: 'function', function: { name: 'read_file' } }];

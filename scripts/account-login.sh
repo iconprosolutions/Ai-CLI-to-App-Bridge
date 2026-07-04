@@ -46,14 +46,25 @@ copy the resulting credentials into this account's dir. On that machine:
   export HOME=/tmp/agy-${NAME}
   mkdir -p "\$HOME"
   agy            # complete the Google login in the browser it opens, then quit
-  # this writes \$HOME/.gemini/{oauth_creds.json,google_accounts.json}
 
-Then copy that .gemini dir onto the NAS account dir (agy reads it via HOME; the
-refresh token keeps it alive):
+The files agy actually reads back (verified live 2026-07-04 — oauth_creds.json
+alone is NOT enough) are:
 
-  rsync -a /tmp/agy-${NAME}/.gemini/ waqar@192.168.1.10:~/ai-cli-bridge/${HOSTDIR}/.gemini/
+  .gemini/antigravity-cli/antigravity-oauth-token   # the credential
+  .gemini/antigravity-cli/installation_id
+  .gemini/google_accounts.json                      # dashboard identity display
 
-(If logging in on the NAS host directly, just point HOME at ${HOSTDIR} and run agy there.)
+Copy them into the account dir in-container — run these from the machine you
+logged in on (the NAS rsync/SFTP subsystem remaps home paths, so pipe through
+ssh+docker instead of rsync):
+
+  docker exec -u root ${CONTAINER} mkdir -p ${DIR}/.gemini/antigravity-cli
+  docker exec -i -u root ${CONTAINER} sh -c 'cat > ${DIR}/.gemini/antigravity-cli/antigravity-oauth-token' < /tmp/agy-${NAME}/.gemini/antigravity-cli/antigravity-oauth-token
+  docker exec -i -u root ${CONTAINER} sh -c 'cat > ${DIR}/.gemini/antigravity-cli/installation_id'       < /tmp/agy-${NAME}/.gemini/antigravity-cli/installation_id
+  docker exec -i -u root ${CONTAINER} sh -c 'cat > ${DIR}/.gemini/google_accounts.json'                  < /tmp/agy-${NAME}/.gemini/google_accounts.json
+  docker exec -u root ${CONTAINER} chown -R 10001:10001 ${DIR}
+
+(Prefix each docker command with "ssh waqar@192.168.1.10" if you're not on the NAS.)
 EOF
     ;;
   *)

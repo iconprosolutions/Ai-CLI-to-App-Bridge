@@ -4,6 +4,7 @@
 **/node_modules
 .git
 .bridge-runtime
+data
 deploy/data
 docs
 tests
