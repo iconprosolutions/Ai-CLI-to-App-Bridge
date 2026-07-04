@@ -177,6 +177,10 @@ function dashboardGate(req, res, next) {
 }
 
 // ── Dashboard (static control center) + health ─────────────────────────
+// Liveness probe for Docker HEALTHCHECK / monitors: no data, never gated
+// (the gated /dashboard/status would 401 the healthcheck under DASHBOARD_AUTH).
+app.get('/healthz', (req, res) => res.json({ ok: true }));
+
 // Static middleware passes unknown paths through, so the /dashboard/status,
 // /dashboard/events, and /dashboard/usage handlers below keep working.
 app.get('/', (req, res) => res.redirect('/dashboard/'));

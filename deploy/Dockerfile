@@ -52,6 +52,6 @@ ENV PROVIDER_PORT=9011 \
 
 EXPOSE 9011
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD curl -fsS http://127.0.0.1:9011/dashboard/status >/dev/null || exit 1
+  CMD curl -fsS http://127.0.0.1:9011/healthz >/dev/null || exit 1
 
 ENTRYPOINT ["./deploy/entrypoint.sh"]

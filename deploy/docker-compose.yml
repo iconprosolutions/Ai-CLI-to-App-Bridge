@@ -29,7 +29,7 @@ services:
       # them here too only if you customize them.
       - ../data/runtime:/app/.bridge-runtime
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9011/dashboard/status"]
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9011/healthz"]
       interval: 30s
       timeout: 5s
       retries: 3
