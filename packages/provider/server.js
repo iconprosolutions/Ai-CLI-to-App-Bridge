@@ -595,7 +595,10 @@ app.post('/v1/chat/completions', async (req, res) => {
   // recomputed against the (possibly rerouted) engine.
   const keyPin = (req.auth && req.auth.accountPin && req.auth.accountPin[route.engine]) || null;
   const pin = keyPin || route.account || null;
-  let sel = pool.select(route.engine, { pin });
+  // Soft pins ("this app's assigned account, but fail over when exhausted")
+  // only exist on keys; route pins stay hard.
+  const pinMode = (keyPin && pin === keyPin && req.auth.pinMode === 'soft') ? 'soft' : 'hard';
+  let sel = pool.select(route.engine, { pin, pinMode });
   if (!sel.ok) {
     record(sel.status);
     return sendError(res, sel.status, sel.message, sel.status === 429 ? 'rate_limit_error' : 'engine_auth_error', null, sel.retryInSec);
@@ -688,8 +691,9 @@ app.post('/v1/chat/completions', async (req, res) => {
           } catch (err2) { err = err2; }
         }
         const kind = err instanceof BridgeError ? err.kind : null;
-        // A pinned request (route or key) never fails over — it fails loud.
-        if (!pin && FAILOVER_KINDS.has(kind) && canFailover() && !clientAborted) {
+        // Hard-pinned requests (route or strict key pin) never fail over —
+        // they fail loud. Un-pinned and soft-pinned requests move on.
+        if ((!pin || pinMode === 'soft') && FAILOVER_KINDS.has(kind) && canFailover() && !clientAborted) {
           pool.feedback(route.engine, sel.account, err);
           const next = pool.select(route.engine, { exclude: sel.account.name });
           if (next.ok) {

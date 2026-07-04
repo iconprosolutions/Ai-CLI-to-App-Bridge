@@ -7,13 +7,14 @@ const { createSemaphore } = require('./semaphore');
 
 const NAME_RE = /^[A-Za-z0-9._-]+$/;
 
-// Validate a parsed accounts.json: { claude: [{name, dir, enabled?}], gemini: [...] }.
+// Validate a parsed accounts.json: { claude: [{name, dir, enabled?, primary?}], gemini: [...] }.
 // Same philosophy as routes.json — throw precisely at boot, keep last good on reload.
 function validateAccounts(data) {
   if (!data || typeof data !== 'object') throw new Error('accounts.json: root must be an object');
   for (const [engine, list] of Object.entries(data)) {
     if (!Array.isArray(list)) throw new Error(`accounts.json: "${engine}" must be an array`);
     const seen = new Set();
+    let primaries = 0;
     for (const a of list) {
       if (!a || typeof a.name !== 'string' || !NAME_RE.test(a.name)) {
         throw new Error(`accounts.json: every ${engine} account needs a name matching ${NAME_RE}`);
@@ -21,7 +22,9 @@ function validateAccounts(data) {
       if (seen.has(a.name)) throw new Error(`accounts.json: duplicate ${engine} account name "${a.name}"`);
       seen.add(a.name);
       if (typeof a.dir !== 'string' || !a.dir) throw new Error(`accounts.json: ${engine}/${a.name} needs a "dir"`);
+      if (a.primary === true) primaries += 1;
     }
+    if (primaries > 1) throw new Error(`accounts.json: "${engine}" has ${primaries} primary accounts — mark at most one`);
   }
   return data;
 }
@@ -50,6 +53,7 @@ function createAccountPool({
       name: def.name,
       dir: def.dir ? path.resolve(baseDir, def.dir) : null,
       enabled: def.enabled !== false,
+      primary: def.primary === true,
       implicit: Boolean(def.implicit),
       needsLogin: false,
       breaker: createBreaker({
@@ -73,7 +77,7 @@ function createAccountPool({
         cursor: state[engine] ? state[engine].cursor : 0,
         accounts: defs.map((def) => {
           const old = prev.find((p) => p.name === def.name && p.dir === (def.dir ? path.resolve(baseDir, def.dir) : null));
-          if (old) { old.enabled = def.enabled !== false; return old; } // keep breaker/needsLogin state
+          if (old) { old.enabled = def.enabled !== false; old.primary = def.primary === true; return old; } // keep breaker/needsLogin state
           return makeAccount(engine, def);
         }),
       };
@@ -101,13 +105,25 @@ function createAccountPool({
   }
 
   const eligible = (a) => a.enabled && !a.needsLogin;
+  const maxSlots = semaphoreOpts.max || 1;
 
-  function select(engine, { pin = null, exclude = null } = {}) {
+  // pinMode 'hard' (default): a pinned request fails loud if its account can't
+  // take it. pinMode 'soft': the pin is a *preference* — an app's assigned
+  // account — and an unusable assignment falls back to the rest of the pool.
+  function select(engine, { pin = null, pinMode = 'hard', exclude = null } = {}) {
     const eng = state[engine];
     if (!eng) return { ok: false, status: 400, message: `Unknown engine "${engine}"` };
 
     if (pin) {
       const acct = eng.accounts.find((a) => a.name === pin);
+      if (pinMode === 'soft') {
+        if (acct && eligible(acct)) {
+          const gate = acct.breaker.allow();
+          if (gate.allowed) return { ok: true, account: acct, trial: Boolean(gate.trial) };
+        }
+        // Assigned account unusable → the pool absorbs it (skip the failed pin).
+        return select(engine, { exclude: pin });
+      }
       if (!acct) return { ok: false, status: 400, message: `Unknown ${engine} account "${pin}"` };
       if (!acct.enabled) return { ok: false, status: 503, message: `Account "${engine}:${pin}" is disabled.` };
       if (acct.needsLogin) return { ok: false, status: 503, message: `Account "${engine}:${pin}" needs login. Run the account login step, then probe it from the dashboard.` };
@@ -116,6 +132,15 @@ function createAccountPool({
         return { ok: false, status: 429, message: `Account "${engine}:${pin}" circuit is open (${gate.reason || 'capacity'}).`, retryInSec: gate.retryInSec || 5 };
       }
       return { ok: true, account: acct, trial: Boolean(gate.trial) };
+    }
+
+    // Primary preference: the designated main account takes traffic while it
+    // is healthy AND has a free CLI slot; overflow and outages spill to the
+    // rest of the pool (rotation below naturally skips a broken primary).
+    const primary = eng.accounts.find((a) => a.primary && eligible(a) && a.name !== exclude);
+    if (primary && primary.semaphore.active < maxSlots) {
+      const gate = primary.breaker.allow();
+      if (gate.allowed) return { ok: true, account: primary, trial: Boolean(gate.trial) };
     }
 
     const n = eng.accounts.length;
@@ -205,6 +230,7 @@ function createAccountPool({
         dir: a.dir,
         implicit: a.implicit,
         enabled: a.enabled,
+        primary: a.primary === true,
         needsLogin: a.needsLogin,
         breaker: a.breaker.status(),
         inflight: a.semaphore.active,

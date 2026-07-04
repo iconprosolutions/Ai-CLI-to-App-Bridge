@@ -239,8 +239,9 @@
       <h3>Mint a key</h3>
       <div class="field"><label for="key-name">Name</label><input id="key-name" placeholder="hermes, ci, alice"></div>
       <div class="field"><label for="key-role">Role</label><select id="key-role"><option value="app">app — /v1 only</option><option value="admin">admin — full control</option></select></div>
-      <div class="field"><label for="key-pin-claude">Pin claude account (optional)</label><input id="key-pin-claude" placeholder="work"></div>
-      <div class="field"><label for="key-pin-gemini">Pin gemini account (optional)</label><input id="key-pin-gemini" placeholder="main"></div>
+      <div class="field"><label for="key-pin-claude">Assign claude account (optional)</label><input id="key-pin-claude" placeholder="work"></div>
+      <div class="field"><label for="key-pin-gemini">Assign gemini account (optional)</label><input id="key-pin-gemini" placeholder="main"></div>
+      <div class="field"><label for="key-pinmode">If the assigned account is exhausted</label><select id="key-pinmode"><option value="soft">fail over to the other accounts</option><option value="hard">fail the request (strict pin)</option></select></div>
       <div class="field"><label for="key-rpm">Requests / minute (optional)</label><input id="key-rpm" type="number" min="1" placeholder="e.g. 10"></div>
       <div class="field"><label for="key-tpd">Tokens / day (optional)</label><input id="key-tpd" type="number" min="1" placeholder="e.g. 200000"></div>
       <div class="field"><label for="key-usd">$ / month, API-equivalent (optional)</label><input id="key-usd" type="number" min="0.01" step="0.01" placeholder="e.g. 25"></div>

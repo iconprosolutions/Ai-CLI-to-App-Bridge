@@ -188,10 +188,10 @@ function createAdminRouter({
   router.post('/keys', (req, res) => {
     const body = req.body || {};
     try {
-      const rec = keyStore.mint({ name: body.name, role: body.role, accountPin: body.accountPin, limits: body.limits });
+      const rec = keyStore.mint({ name: body.name, role: body.role, accountPin: body.accountPin, limits: body.limits, pinMode: body.pinMode });
       events.emit('keys.change', { action: 'mint', name: rec.name, role: rec.role });
       return res.json({
-        name: rec.name, role: rec.role, accountPin: rec.accountPin || null, limits: rec.limits || null, createdAt: rec.createdAt, key: rec.key,
+        name: rec.name, role: rec.role, accountPin: rec.accountPin || null, pinMode: rec.pinMode || null, limits: rec.limits || null, createdAt: rec.createdAt, key: rec.key,
       });
     } catch (err) {
       return res.status(400).json({ error: err.message });
@@ -283,7 +283,34 @@ function createAdminRouter({
         writeFileAtomic(accountsFile, `${JSON.stringify(doc, null, 2)}\n`, 0o644);
       }
       events.emit('account.change', { action: 'add', engine, account: name });
+      pool.reload(); // deterministic — don't depend on the file watcher
       return res.json({ ok: true, engine, name, dir: rel });
+    } catch (err) {
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Designate an engine's primary account: it takes traffic whenever healthy
+  // with a free slot; the others are overflow + failover capacity. Persisted
+  // in accounts.json. Body {"unset": true} clears the designation instead.
+  router.post('/accounts/:engine/:name/primary', (req, res) => {
+    const engine = engineOr404(req, res);
+    if (!engine || !accountsFile) return;
+    const name = req.params.name;
+    try {
+      let doc = {};
+      try { doc = JSON.parse(fs.readFileSync(accountsFile, 'utf8')); } catch (_) {
+        return res.status(400).json({ error: 'No accounts.json yet — add a named account first.' });
+      }
+      const list = Array.isArray(doc[engine]) ? doc[engine] : [];
+      const target = list.find((a) => a && a.name === name);
+      if (!target) return res.status(404).json({ error: `Unknown ${engine} account "${name}"` });
+      for (const a of list) delete a.primary;
+      if (!(req.body || {}).unset) target.primary = true;
+      writeFileAtomic(accountsFile, `${JSON.stringify(doc, null, 2)}\n`, 0o644);
+      pool.reload();
+      events.emit('account.change', { action: 'primary', engine, account: name, primary: !(req.body || {}).unset });
+      return res.json({ ok: true, engine, name, primary: !(req.body || {}).unset });
     } catch (err) {
       return res.status(500).json({ error: err.message });
     }

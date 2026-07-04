@@ -1332,6 +1332,84 @@ async function main() {
   });
   assert(r.status === 400, 'a non sk-ant token is rejected with 400');
 
+  // ── Primary account + soft pins (per-app assignment with failover) ──────
+  console.log('\n## Primary account preference + soft/hard pins');
+  const P27 = 19660;
+  const DIR27 = path.join(TMP, 'p27');
+  fs.mkdirSync(DIR27, { recursive: true });
+  const CREDS27 = path.join(DIR27, 'creds27.json');
+  const ACCTS27 = path.join(DIR27, 'accounts.json');
+  const ENVLOG27 = path.join(TMP, 'env27.log');
+  const ADMIN27 = 'F'.repeat(48);
+  const SOFT27 = '1'.repeat(48);
+  const HARD27 = '2'.repeat(48);
+  fs.writeFileSync(ACCTS27, JSON.stringify({
+    claude: [
+      { name: 'w1', dir: 'accounts/claude/w1' },
+      { name: 'w2', dir: 'accounts/claude/w2', primary: true },
+    ],
+  }));
+  fs.writeFileSync(CREDS27, JSON.stringify({
+    version: 2,
+    keys: [
+      { name: 'admin', role: 'admin', key: ADMIN27, createdAt: '2026-01-01T00:00:00Z' },
+      { name: 'app-soft', role: 'app', key: SOFT27, accountPin: { claude: 'w1' }, pinMode: 'soft', createdAt: '2026-01-02T00:00:00Z' },
+      { name: 'app-hard', role: 'app', key: HARD27, accountPin: { claude: 'w1' }, pinMode: 'hard', createdAt: '2026-01-03T00:00:00Z' },
+    ],
+  }));
+  const CLAUDE_P27 = writeStub('claude-p27.sh', 'claude-sim', { FAKE_CLI_ENV_LOG: ENVLOG27 });
+  await bootProvider(P27, {
+    CLAUDE_PATH: CLAUDE_P27, GEMINI_PATH: AGY_ACCT,
+    BRIDGE_CREDENTIALS_FILE: CREDS27, BRIDGE_ACCOUNTS_FILE: ACCTS27,
+    BRIDGE_USERS_FILE: path.join(DIR27, 'users.json'),
+    BRIDGE_SESSIONS_FILE: path.join(DIR27, 'sessions.json'),
+  });
+  const chat27 = (key) => request(P27, {
+    path: '/v1/chat/completions', method: 'POST', headers: { Authorization: `Bearer ${key}` },
+    body: { model: 'bridge-claude-haiku-4.5-spark', messages: [{ role: 'user', content: 'x' }] },
+  });
+  const dirs27 = () => fs.readFileSync(ENVLOG27, 'utf8').trim().split('\n').filter(Boolean)
+    .map(JSON.parse).filter((l) => l.argv.includes('-p')).map((l) => l.CLAUDE_CONFIG_DIR);
+
+  // Unpinned traffic prefers the primary while it is healthy.
+  r = await chat27(ADMIN27);
+  assert(r.status === 200, 'unpinned request succeeds');
+  r = await chat27(ADMIN27);
+  const primDirs = dirs27();
+  assert(primDirs.length === 2 && primDirs.every((d) => /\/w2$/.test(d)), 'unpinned traffic sticks to the primary account (w2)');
+
+  // A soft-pinned app uses its assigned account while healthy…
+  r = await chat27(SOFT27);
+  assert(r.status === 200 && /\/w1$/.test(dirs27().pop()), 'soft-pinned key uses its assigned account (w1)');
+
+  // …but fails over to the pool when the assignment is unusable. Hard pins fail loud.
+  r = await request(P27, { path: '/admin/accounts/claude/w1/disable', method: 'POST', headers: { Authorization: `Bearer ${ADMIN27}` } });
+  assert(r.status === 200, 'admin disables w1');
+  r = await chat27(SOFT27);
+  assert(r.status === 200 && /\/w2$/.test(dirs27().pop()), 'soft pin fails over to the healthy account (w2)');
+  r = await chat27(HARD27);
+  assert(r.status === 503, 'hard pin fails loud (503) when its account is down');
+  await request(P27, { path: '/admin/accounts/claude/w1/enable', method: 'POST', headers: { Authorization: `Bearer ${ADMIN27}` } });
+
+  // Moving the primary persists in accounts.json and redirects traffic.
+  r = await request(P27, { path: '/admin/accounts/claude/w1/primary', method: 'POST', headers: { Authorization: `Bearer ${ADMIN27}` } });
+  assert(r.status === 200, 'set-primary endpoint succeeds');
+  {
+    const doc = JSON.parse(fs.readFileSync(ACCTS27, 'utf8'));
+    const w1 = doc.claude.find((a) => a.name === 'w1');
+    const w2 = doc.claude.find((a) => a.name === 'w2');
+    assert(w1.primary === true && w2.primary === undefined, 'primary flag moved to w1 in accounts.json');
+  }
+  r = await chat27(ADMIN27);
+  assert(r.status === 200 && /\/w1$/.test(dirs27().pop()), 'unpinned traffic follows the new primary (w1)');
+
+  // Validation: bad pinMode rejected at mint.
+  r = await request(P27, {
+    path: '/admin/keys', method: 'POST', headers: { Authorization: `Bearer ${ADMIN27}` },
+    body: { name: 'bad', role: 'app', accountPin: { claude: 'w1' }, pinMode: 'sideways' },
+  });
+  assert(r.status === 400, 'invalid pinMode rejected with 400');
+
   console.log(`\n# Result: ${passed} passed, ${failed} failed`);
   process.exit(failed === 0 ? 0 : 1);
 }

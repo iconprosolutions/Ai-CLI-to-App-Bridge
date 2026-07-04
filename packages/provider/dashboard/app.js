@@ -311,6 +311,7 @@
         return '<div class="ecard">'
           + '<div class="erow"><span class="ename">' + esc(e) + ' · ' + esc(a.name) + '</span>'
           + (a.implicit ? '<span class="chip" style="background:var(--tint-mint)">default</span>' : '')
+          + (a.primary ? '<span class="chip" style="background:var(--tint-peri)">★ primary</span>' : '')
           + '<span class="spacer"></span><span class="sbadge ' + badgeCls + '"><i></i>' + esc(st.label) + '</span></div>'
           + '<div class="ekv">'
           + '<span class="k">Signed in</span><span>' + identityHtml(a.identity) + '</span>'
@@ -325,6 +326,9 @@
           + (a.enabled
             ? '<button class="abtn" data-act="acct-disable" data-engine="' + esc(e) + '" data-name="' + esc(a.name) + '">Disable</button>'
             : '<button class="abtn" data-act="acct-enable" data-engine="' + esc(e) + '" data-name="' + esc(a.name) + '">Enable</button>')
+          + (a.implicit ? '' : (a.primary
+            ? '<button class="abtn" data-act="acct-primary" data-engine="' + esc(e) + '" data-name="' + esc(a.name) + '" data-unset="1">Unset primary</button>'
+            : '<button class="abtn" data-act="acct-primary" data-engine="' + esc(e) + '" data-name="' + esc(a.name) + '">Make primary</button>'))
           + '</div></div>';
       }).join('');
     }).join('');
@@ -619,7 +623,10 @@
     }).then(function (d) {
       if (!d) return;
       el.innerHTML = (d.keys || []).map(function (k) {
-        var pins = k.accountPin ? Object.keys(k.accountPin).map(function (e) { return esc(e + ':' + k.accountPin[e]); }).join(', ') : '—';
+        var pins = k.accountPin
+          ? Object.keys(k.accountPin).map(function (e) { return esc(e + ':' + k.accountPin[e]); }).join(', ')
+            + ' <span class="estb ' + (k.pinMode === 'soft' ? 'real">failover' : 'est">strict') + '</span>'
+          : '—';
         var lim = k.limits || {};
         var use = k.usage || {};
         var parts = [];
@@ -717,6 +724,10 @@
         .catch(function (err) { el.classList.remove('busy'); if (err && err.message !== 'unauthorized') alert('Probe failed for ' + e + ':' + n + ' — ' + err.message); });
     },
     'acct-enable': function (el) { return admin('POST', '/admin/accounts/' + el.getAttribute('data-engine') + '/' + el.getAttribute('data-name') + '/enable', {}); },
+    'acct-primary': function (el) {
+      return admin('POST', '/admin/accounts/' + el.getAttribute('data-engine') + '/' + el.getAttribute('data-name') + '/primary',
+        el.getAttribute('data-unset') ? { unset: true } : {}).then(fetchStatus);
+    },
     'acct-disable': function (el) {
       var e = el.getAttribute('data-engine');
       var n = el.getAttribute('data-name');
@@ -938,7 +949,7 @@
     var pin = {};
     if ($('key-pin-claude').value.trim()) pin.claude = $('key-pin-claude').value.trim();
     if ($('key-pin-gemini').value.trim()) pin.gemini = $('key-pin-gemini').value.trim();
-    if (Object.keys(pin).length) body.accountPin = pin;
+    if (Object.keys(pin).length) { body.accountPin = pin; body.pinMode = $('key-pinmode').value; }
     var limits = {};
     if ($('key-rpm').value) limits.rpm = Number($('key-rpm').value);
     if ($('key-tpd').value) limits.tokensPerDay = Number($('key-tpd').value);

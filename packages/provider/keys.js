@@ -87,10 +87,20 @@ function validateKeyRecord(k) {
   }
   validateAccountPin(k.accountPin);
   validateLimits(k.limits);
+  validatePinMode(k.pinMode);
   if (k.owner !== undefined && (typeof k.owner !== 'string' || !k.owner)) {
     throw new Error(`credentials.json: key "${k.name}" has an invalid owner`);
   }
   return k;
+}
+
+// How a key's accountPin behaves: 'hard' (default) fails loud when the pinned
+// account is unusable; 'soft' treats the pin as the app's assigned account and
+// fails over to the rest of the pool when it is exhausted/broken.
+function validatePinMode(m) {
+  if (m === undefined || m === null || m === '') return undefined;
+  if (m !== 'hard' && m !== 'soft') throw new Error('pinMode must be "hard" or "soft"');
+  return m;
 }
 
 function writeAtomic(file, data) {
@@ -162,6 +172,7 @@ function createKeyStore({ file, envKey = '' } = {}) {
       role: match.role,
       owner: match.owner || undefined,
       accountPin: match.accountPin ? { ...match.accountPin } : undefined,
+      pinMode: match.pinMode || undefined,
       limits: match.limits ? { ...match.limits } : undefined,
     };
   }
@@ -171,6 +182,7 @@ function createKeyStore({ file, envKey = '' } = {}) {
     role: k.role,
     owner: k.owner || undefined,
     accountPin: k.accountPin ? { ...k.accountPin } : undefined,
+    pinMode: k.pinMode || undefined,
     limits: k.limits ? { ...k.limits } : undefined,
     createdAt: k.createdAt,
   });
@@ -189,7 +201,7 @@ function createKeyStore({ file, envKey = '' } = {}) {
     return rec ? (rec.owner || null) : null;
   }
 
-  function mint({ name, role = 'app', accountPin, limits, owner } = {}) {
+  function mint({ name, role = 'app', accountPin, limits, owner, pinMode } = {}) {
     if (typeof name !== 'string' || !NAME_RE.test(name)) {
       throw new Error(`Key name must match ${NAME_RE}`);
     }
@@ -198,9 +210,11 @@ function createKeyStore({ file, envKey = '' } = {}) {
     if (data.keys.some((k) => k.name === name)) throw new Error(`A key named "${name}" already exists`);
     const pin = validateAccountPin(accountPin);
     const lim = validateLimits(limits);
+    const mode = validatePinMode(pinMode);
     const rec = { name, role, key: newSecret(), createdAt: nowIso() };
     if (owner) rec.owner = String(owner);
     if (pin) rec.accountPin = pin;
+    if (pin && mode) rec.pinMode = mode;
     if (lim) rec.limits = lim;
     data.keys.push(rec);
     writeAtomic(file, { version: 2, keys: data.keys });
