@@ -177,32 +177,29 @@
     <section id="what">
       <div class="eyebrow">01 · The pitch</div>
       <h2>What this is</h2>
-      <p class="lede">One process wraps your two flat-rate CLI subscriptions — <code>claude</code> (Claude Code) and <code>agy</code> (Google Antigravity) — behind a single OpenAI-compatible endpoint at <code>http://127.0.0.1:9011/v1</code>. Any tool that speaks the OpenAI API (Hermes, the OpenAI SDKs, curl) can now call those subscriptions as if they were paid API models — with streaming, tool calls, JSON mode, and per-app usage accounting. A web control center at <code>/dashboard/</code> lets you watch, test, and steer all of it.</p>
+      <p class="lede">One process wraps your flat-rate CLI subscriptions — <code>claude</code> (Claude Code) and <code>agy</code> (Google Antigravity) — behind a single OpenAI-compatible endpoint at <code>/v1</code>. Any tool that speaks the OpenAI API (Hermes, the OpenAI SDKs, curl, Cursor, LibreChat…) calls those subscriptions as if they were paid API models — streaming, tool calls, JSON mode, per-user usage accounting. It runs like a self-hosted OpenRouter, except the traffic rides <b>your subscriptions</b> instead of metered API credits.</p>
+      <p>It is a small multi-user product: you sign in, teammates you create sign in, everyone mints their own <code>sk-bridge-…</code> API keys per app with their own rate/token limits, and the admin steers accounts, routes, and users from the control center. Live for the team at <code>https://bridge.iconprosolutions.com</code> (LAN: <code>http://192.168.1.10:9011</code>).</p>
     </section>
 
     <!-- 2 ─────────────────────────────────────── -->
     <section id="start">
-      <div class="eyebrow">02 · Boot</div>
-      <h2>Start it</h2>
+      <div class="eyebrow">02 · Sign in</div>
+      <h2>Get in</h2>
       <ol class="steps">
         <li>
-          <p style="margin-bottom:6px">From the repo root, bring the consolidated provider up:</p>
-          <pre class="code"><span class="c"># /Users/waqar/Projects/experiments/ai-cli-bridge</span>
-npm run bridge:up</pre>
+          <p style="margin-bottom:6px">Open the control center and <b>sign in</b>. First boot creates an <code>admin</code> user; its one-time password is printed in the container log:</p>
+          <pre class="code">open https://bridge.iconprosolutions.com/dashboard/
+<span class="c"># admin password (first boot only):</span>
+docker logs ai-cli-bridge | grep <span class="s">'dashboard login'</span></pre>
+          <p style="font-size:13px;color:var(--body);margin:0">Change it right away from the profile panel. Sign-in gives you a session cookie — the whole dashboard, the Tester, and admin actions work off that. No key-pasting needed.</p>
         </li>
         <li>
-          <p style="margin-bottom:6px">Grab your API key. The launcher <b>prints it on every <code>up</code> and <code>status</code></b>. It's also stored on disk, mode <code>0600</code>:</p>
-          <pre class="code">npm run bridge:status         <span class="c"># prints key + health + pids</span>
-<span class="c"># persisted at:</span>
-.bridge-runtime/credentials.json</pre>
-          <p style="font-size:13px;color:var(--body);margin:0">You never generate this yourself — the launcher auto-creates it on first boot.</p>
-        </li>
-        <li>
-          <p style="margin-bottom:6px">Open the control center:</p>
-          <pre class="code">open http://127.0.0.1:9011/dashboard/</pre>
+          <p style="margin-bottom:6px">The server itself runs as a Docker container on the NAS (rebuild/upgrade):</p>
+          <pre class="code"><span class="c"># on the NAS, in ~/ai-cli-bridge</span>
+docker compose -f deploy/docker-compose.yml up -d --build</pre>
         </li>
       </ol>
-      <p style="font-size:13px;color:var(--body)">Other lifecycle commands: <code>bridge:down</code>, <code>bridge:restart</code>, <code>bridge:probe</code> (routes + live engine status, quota-free), <code>bridge:logs</code> (add <code>--follow</code>).</p>
+      <p style="font-size:13px;color:var(--body)">The runtime state — users, keys, account logins, usage ledger — all lives in the single <code>data/runtime/</code> volume. Back that one directory up and you have everything. Deploy details: <code>docs/DEPLOY-NAS.md</code>.</p>
     </section>
 
     <!-- 3 ─────────────────────────────────────── -->
@@ -210,13 +207,14 @@ npm run bridge:up</pre>
       <div class="eyebrow">03 · Do this first</div>
       <h2>First-run checklist</h2>
       <div class="callout">
-        <span class="ct">⚠ Step 1 is not optional</span>
-        <p>Open the <b>Connect</b> tab and paste your API key into the key field. It's saved to <code>localStorage</code>, and the Tester plus <b>every admin button</b> read it from there. Skip this and the Tester returns <code>401 · Missing or invalid Authorization bearer token</code> — that error always means you skipped this step, not that the key is wrong.</p>
+        <span class="ct">Signed in = authorized</span>
+        <p>Once you're logged in, the Tester and every admin button work off your session — nothing to paste. (If you're scripting <code>/admin</code> from outside a browser, an admin <code>sk-bridge-…</code> key in the Connect tab's key field is the fallback.)</p>
       </div>
       <ol class="steps">
-        <li><b>Paste the key in Connect.</b> Copy it from <code>bridge:status</code> or <code>credentials.json</code>, drop it into the key field on the Connect tab. Done once, it sticks in the browser.</li>
-        <li><b>Fire a test prompt in the Tester.</b> Pick any route, type a one-liner, hit send. A streamed reply confirms auth, routing, and the CLI spawn are all working end-to-end.</li>
-        <li><b>Check the Overview verdicts.</b> The header should read <span class="sb ok">READY</span> for at least one engine, with breakers closed and no alert banner. Now you're clear to point apps at it.</li>
+        <li><b>Confirm your accounts are signed in.</b> On the <b>Accounts</b> tab each engine card should read <span class="sb ok">READY</span> with a signed-in identity. Add more with the guided browser login (see §Accounts below).</li>
+        <li><b>Fire a test prompt in the Tester.</b> Pick a route, type a one-liner, send. A streamed reply confirms login, routing, and the CLI spawn all work end-to-end.</li>
+        <li><b>Mint a key for your first app.</b> Connect tab → name it → copy the <code>sk-bridge-…</code> secret once. That's what external tools authenticate with.</li>
+        <li><b>Create your teammates.</b> Users tab → add each person; they sign in and mint their own keys, metered separately.</li>
       </ol>
     </section>
 
@@ -225,10 +223,10 @@ npm run bridge:up</pre>
       <div class="eyebrow">04 · Integration</div>
       <h2>Connect an app</h2>
       <p>Point any OpenAI-compatible client at the bridge with three things:</p>
-      <pre class="code"><span class="k">Base URL</span>   http://127.0.0.1:9011/v1
-<span class="k">API key</span>    <span class="c"># bearer — from .bridge-runtime/credentials.json</span>
-<span class="k">Header</span>     X-App-Id: your-app        <span class="c"># enables per-app usage attribution</span></pre>
-      <p>The <code>X-App-Id</code> header is how the Usage tab splits tokens by app — set a distinct id per consumer.</p>
+      <pre class="code"><span class="k">Base URL</span>   https://bridge.iconprosolutions.com/v1   <span class="c"># LAN: http://192.168.1.10:9011/v1</span>
+<span class="k">API key</span>    sk-bridge-…               <span class="c"># mint it: Connect tab (you) or your profile (teammates)</span>
+<span class="k">Header</span>     X-App-Id: your-app        <span class="c"># optional — splits usage by app</span></pre>
+      <p>Keys are minted in the dashboard, shown once, and carry your limits — treat them like OpenRouter keys. The <code>X-App-Id</code> header further splits the Usage tab by app.</p>
 
       <h3>Hermes</h3>
       <p>Register a provider named <span class="rid">ai-cli-bridge</span> pointing at <code>http://127.0.0.1:9011/v1</code>, and put the key in <code>~/.hermes/.env</code> as <code>AI_CLI_BRIDGE_API_KEY</code>:</p>
@@ -306,9 +304,30 @@ hermes -z <span class="s">"Reply with exactly: ok"</span> --provider ai-cli-brid
       <div class="tabblock">
         <h3>Routes</h3>
         <div class="sub">Edit the model catalogue</div>
-        <p>Toggle, add, or delete routes. Edits persist to <code>packages/provider/routes.json</code> and <b>hot-apply with no restart</b>.</p>
+        <p>Toggle, add, or delete routes. Edits persist to <code>routes.json</code> and <b>hot-apply with no restart</b>.</p>
         <ul class="dash">
-          <li><b>Probe</b> lists each engine's live catalogue for free — <b>quota-free, no completions run</b> (claude is a static list, gemini asks <code>agy models</code>).</li>
+          <li><b>Probe</b> lists each engine's live catalogue for free — <b>quota-free, no completions run</b>.</li>
+        </ul>
+      </div>
+
+      <div class="tabblock">
+        <h3>Accounts</h3>
+        <div class="sub">The credential pool — one card per signed-in subscription</div>
+        <p>Each engine holds one or more accounts; requests round-robin across them with automatic quota failover and per-account circuit breakers.</p>
+        <ul class="dash">
+          <li><b>Add an account (no terminal):</b> for <b>claude</b>, use the guided browser login — click <b>Generate login link</b>, approve at claude.ai signed in as that account, paste the code back; the bridge exchanges it and the account joins the pool. For <b>gemini</b>, sign in with <code>agy</code> on any machine with a browser and paste the token-file contents (Google's login can't be relayed through the web app).</li>
+          <li><b>Make primary:</b> the ★ primary account takes traffic while it's healthy and has a free slot; overflow and outages spill to the rest. Per engine.</li>
+          <li><b>Rename</b> moves the account (and repoints any keys pinned to it); <b>Probe</b> confirms it answers; <b>Disable</b> pulls it from rotation.</li>
+        </ul>
+      </div>
+
+      <div class="tabblock">
+        <h3>Users</h3>
+        <div class="sub">Your team — admin only</div>
+        <p>Create logins (role <b>user</b> or <b>admin</b>), set each user's default key limits, reset passwords, disable or delete (which revokes their keys). Each row shows that user's keys and today/month usage.</p>
+        <ul class="dash">
+          <li><b>user</b> role sees only their own profile: mint one key per app (named <code>username.app</code>, inheriting your default limits), watch their own usage, change their password.</li>
+          <li><b>admin</b> role sees everything and manages accounts, routes, keys and users.</li>
         </ul>
       </div>
 
@@ -324,7 +343,7 @@ hermes -z <span class="s">"Reply with exactly: ok"</span> --provider ai-cli-brid
       <div class="tabblock">
         <h3>Tester</h3>
         <div class="sub">Fire requests without leaving the browser</div>
-        <p>SSE or blocking mode, tools JSON, <code>json_object</code>/<code>json_schema</code> modes, side-by-side A/B route compare, and copy-as-cURL. This is where your first smoke test lives — and it needs the key from the Connect tab.</p>
+        <p>SSE or blocking mode, tools JSON, <code>json_object</code>/<code>json_schema</code> modes, side-by-side A/B route compare, and copy-as-cURL. Authorizes off your login — no key needed; calls attribute to you in Usage.</p>
       </div>
 
       <div class="tabblock">
@@ -339,8 +358,8 @@ hermes -z <span class="s">"Reply with exactly: ok"</span> --provider ai-cli-brid
 
       <div class="tabblock">
         <h3>Connect</h3>
-        <div class="sub">Where the key lives + copy-paste snippets</div>
-        <p>Base URL, the key field (stored in <code>localStorage</code>), and ready-made Hermes / curl / JS / Python snippets. This tab is the source of the credential every other admin action uses.</p>
+        <div class="sub">Mint API keys + copy-paste snippets</div>
+        <p>Base URL, ready-made Hermes / curl / JS / Python snippets, and the <b>key manager</b>: mint named <code>sk-bridge-…</code> keys (secret shown once), set per-key limits (requests/min, tokens/day, $/month), assign a key to an account with hard or soft (failover) pinning, and revoke. As admin you manage everyone's keys here; teammates mint their own from their profile.</p>
       </div>
     </section>
 
