@@ -1255,6 +1255,14 @@ async function main() {
     assert(u.totals.requests === 1 && u.perKey[0].keyName === 'alice.chatbot', '/me/usage sees only own keys');
   }
 
+  // The dashboard Tester: a session alone authorizes /v1 (no key paste),
+  // attributed as user:<name> with the user's default limits applied.
+  r = await request(P26, {
+    path: '/v1/chat/completions', method: 'POST', headers: { Cookie: cookie },
+    body: { model: 'bridge-claude-haiku-4.5-spark', messages: [{ role: 'user', content: 'x' }] },
+  });
+  assert(r.status === 200, 'a signed-in session authorizes /v1 directly (Tester path)');
+
   r = await request(P26, { path: '/me/keys/admin', method: 'DELETE', headers: { Cookie: cookie } });
   assert(r.status === 403, "a user can't revoke a key they don't own");
   r = await request(P26, { path: '/admin/users', headers: { Cookie: cookie } });

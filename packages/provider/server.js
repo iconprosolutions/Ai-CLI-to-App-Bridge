@@ -183,6 +183,14 @@ app.use('/v1', (req, res, next) => {
   const token = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
   const who = keyStore.verify(token);
   if (!who) {
+    // A signed-in dashboard session may exercise /v1 directly (the Tester) —
+    // no key paste needed. Attributed as "user:<name>" in the ledger, with
+    // the user's default limits applied. External tools still use API keys.
+    const su = sessionUser(req);
+    if (su) {
+      req.auth = { name: `user:${su.username}`, role: su.role === 'admin' ? 'admin' : 'app', limits: su.defaultLimits };
+      return next();
+    }
     return sendError(res, 401, 'Missing or invalid Authorization bearer token.', 'invalid_request_error', 'Authorization');
   }
   req.auth = who;

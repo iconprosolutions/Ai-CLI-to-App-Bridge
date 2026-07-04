@@ -432,7 +432,7 @@
     if (key()) headers.Authorization = 'Bearer ' + key();
     var authHint = function (status) {
       return status === 401
-        ? '\n\n→ The provider requires a bearer key: open the Connect tab, paste the API key from `npm run bridge:status` (or .bridge-runtime/credentials.json) into the key field, and run again.'
+        ? '\n\n→ Sign in (top right) and the Tester authorizes automatically — or paste an API key in the Connect tab. Signed-in Tester calls are attributed as user:<you> in Usage.'
         : '';
     };
     if (state.transport !== 'stream') {
