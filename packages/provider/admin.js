@@ -7,7 +7,7 @@ const express = require('express');
 // can spend quota (probe). App-role keys are rejected with 403. With no key
 // configured at all, admin is disabled.
 function createAdminRouter({
-  keyStore, registry, pool, adapters, activeRequests, capture, events, enginesDisabled,
+  keyStore, registry, pool, adapters, activeRequests, capture, events, enginesDisabled, limitGuard,
 }) {
   const router = express.Router();
 
@@ -166,17 +166,35 @@ function createAdminRouter({
   // list() never returns secret values; mint returns the new secret exactly
   // once (never retrievable afterward). Admin-role gate is enforced above.
   router.get('/keys', (req, res) => {
-    res.json({ keys: keyStore.list() });
+    // Each key carries its limits plus live consumption so the dashboard can
+    // show "used X of Y today" without a second round-trip.
+    const keys = keyStore.list().map((k) => ({
+      ...k,
+      usage: limitGuard ? limitGuard.snapshot(k.name) : undefined,
+    }));
+    res.json({ keys });
   });
 
   router.post('/keys', (req, res) => {
     const body = req.body || {};
     try {
-      const rec = keyStore.mint({ name: body.name, role: body.role, accountPin: body.accountPin });
+      const rec = keyStore.mint({ name: body.name, role: body.role, accountPin: body.accountPin, limits: body.limits });
       events.emit('keys.change', { action: 'mint', name: rec.name, role: rec.role });
       return res.json({
-        name: rec.name, role: rec.role, accountPin: rec.accountPin || null, createdAt: rec.createdAt, key: rec.key,
+        name: rec.name, role: rec.role, accountPin: rec.accountPin || null, limits: rec.limits || null, createdAt: rec.createdAt, key: rec.key,
       });
+    } catch (err) {
+      return res.status(400).json({ error: err.message });
+    }
+  });
+
+  // Update a key's limits (body: { limits: { rpm?, tokensPerDay?, usdPerMonth? } };
+  // null/{} clears them). Secret and role are immutable — revoke + re-mint.
+  router.patch('/keys/:name', (req, res) => {
+    try {
+      const rec = keyStore.setLimits(req.params.name, (req.body || {}).limits);
+      events.emit('keys.change', { action: 'limits', name: rec.name });
+      return res.json(rec);
     } catch (err) {
       return res.status(400).json({ error: err.message });
     }

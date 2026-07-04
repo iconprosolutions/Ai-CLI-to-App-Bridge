@@ -203,11 +203,11 @@
   <div class="sec-head" style="margin-top:32px"><h2>API keys</h2><span class="note">admin only · one per app or teammate · attributed in Usage</span></div>
   <div class="grid2">
     <div>
-      <div class="table scrollx"><div style="min-width:520px">
-        <div class="thead" style="grid-template-columns:1.3fr 80px 1.2fr 90px"><span>Name</span><span>Role</span><span>Account pins</span><span>Actions</span></div>
+      <div class="table scrollx"><div style="min-width:640px">
+        <div class="thead" style="grid-template-columns:1.1fr 70px 1fr 1.4fr 150px"><span>Name</span><span>Role</span><span>Account pins</span><span>Limits · used</span><span>Actions</span></div>
         <div id="keys-table"><div class="empty">Set your admin API key (left) to manage keys.</div></div>
       </div></div>
-      <div class="privacy" style="margin-top:12px">Secrets are shown once at mint and never returned again — <code>GET /admin/keys</code> lists names, roles and pins only. The last admin key can't be revoked.</div>
+      <div class="privacy" style="margin-top:12px">Secrets are shown once at mint and never returned again — <code>GET /admin/keys</code> lists names, roles, pins and limits only. The last admin key can't be revoked. A key over one of its limits gets 429 + Retry-After on /v1.</div>
     </div>
     <div class="panel">
       <h3>Mint a key</h3>
@@ -215,6 +215,9 @@
       <div class="field"><label for="key-role">Role</label><select id="key-role"><option value="app">app — /v1 only</option><option value="admin">admin — full control</option></select></div>
       <div class="field"><label for="key-pin-claude">Pin claude account (optional)</label><input id="key-pin-claude" placeholder="work"></div>
       <div class="field"><label for="key-pin-gemini">Pin gemini account (optional)</label><input id="key-pin-gemini" placeholder="main"></div>
+      <div class="field"><label for="key-rpm">Requests / minute (optional)</label><input id="key-rpm" type="number" min="1" placeholder="e.g. 10"></div>
+      <div class="field"><label for="key-tpd">Tokens / day (optional)</label><input id="key-tpd" type="number" min="1" placeholder="e.g. 200000"></div>
+      <div class="field"><label for="key-usd">$ / month, API-equivalent (optional)</label><input id="key-usd" type="number" min="0.01" step="0.01" placeholder="e.g. 25"></div>
       <button class="abtn primary" id="key-mint">Mint key</button>
       <span class="mono" id="key-msg" style="font-size:11px;color:var(--faint);margin-left:10px"></span>
       <div id="minted-key" style="display:none;margin-top:14px">

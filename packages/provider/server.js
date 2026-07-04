@@ -13,6 +13,7 @@ const { createClaudeAdapter, createAgyAdapter } = require('@bridge/adapters');
 const { createRouteRegistry } = require('./routes');
 const { createAccountPool } = require('./accounts');
 const { createKeyStore } = require('./keys');
+const { createLimitGuard } = require('./limits');
 const { createContinuityStore } = require('./continuity');
 const { createTelemetry } = require('./telemetry');
 const { createUsageLedger } = require('./usage');
@@ -46,6 +47,10 @@ const MAX_CONCURRENT_PER_ENGINE = Math.max(1, intEnv('PROVIDER_MAX_CONCURRENT_PE
 const CREDENTIALS_FILE = process.env.BRIDGE_CREDENTIALS_FILE
   || path.resolve(__dirname, '../../.bridge-runtime/credentials.json');
 const keyStore = createKeyStore({ file: CREDENTIALS_FILE, envKey: API_KEY });
+
+// Per-key limits (rpm / tokens-per-day / $-per-month) — enforced on /v1,
+// counters seeded from the ledger after boot so restarts keep budgets intact.
+const limitGuard = createLimitGuard();
 
 // Engines are in-process adapters — no HTTP hop, and every control-plane
 // action operates on state this process owns.
@@ -155,13 +160,29 @@ app.use('/v1', (req, res, next) => {
   return next();
 });
 
+// ── Dashboard auth (optional; for tunnel/public exposure) ──────────────
+// DASHBOARD_AUTH=1 gates the dashboard DATA endpoints (status/usage/events)
+// behind an admin key — Bearer header or ?key= (EventSource can't set
+// headers). The static UI files stay public; they contain no data. Set this
+// before exposing the port through a Cloudflare tunnel / reverse proxy.
+const DASHBOARD_AUTH = process.env.DASHBOARD_AUTH === '1';
+function dashboardGate(req, res, next) {
+  if (!DASHBOARD_AUTH || !keyStore.authEnabled) return next();
+  const token = (req.headers.authorization || '').replace(/^Bearer\s+/i, '') || String(req.query.key || '');
+  const who = keyStore.verify(token);
+  if (!who || who.role !== 'admin') {
+    return res.status(401).json({ error: 'Dashboard auth is enabled — pass an admin key (Authorization: Bearer <key> or ?key=<key>).' });
+  }
+  return next();
+}
+
 // ── Dashboard (static control center) + health ─────────────────────────
 // Static middleware passes unknown paths through, so the /dashboard/status,
 // /dashboard/events, and /dashboard/usage handlers below keep working.
 app.get('/', (req, res) => res.redirect('/dashboard/'));
 app.use('/dashboard', express.static(path.join(__dirname, 'dashboard')));
 
-app.get('/dashboard/status', async (req, res) => {
+app.get('/dashboard/status', dashboardGate, async (req, res) => {
   const checks = await Promise.all(ENGINE_NAMES.map((e) => adapters[e].healthCheck()));
   const engines = {};
   ENGINE_NAMES.forEach((e, i) => {
@@ -226,16 +247,16 @@ app.get('/health', (req, res) => {
 });
 
 // Live event stream for the dashboard (SSE).
-app.get('/dashboard/events', events.handler);
+app.get('/dashboard/events', dashboardGate, events.handler);
 
 // Control plane (always key-gated; see admin.js).
 app.use('/admin', createAdminRouter({
-  keyStore, registry, pool, adapters, activeRequests, capture, events, enginesDisabled,
+  keyStore, registry, pool, adapters, activeRequests, capture, events, enginesDisabled, limitGuard,
 }));
 
 // Durable usage rollups (JSONL ledger; survives restarts).
-app.get('/dashboard/usage', async (req, res) => {
-  const range = ['today', '7d', '30d', 'all'].includes(String(req.query.range)) ? String(req.query.range) : '7d';
+app.get('/dashboard/usage', dashboardGate, async (req, res) => {
+  const range = ['today', 'month', '7d', '30d', 'all'].includes(String(req.query.range)) ? String(req.query.range) : '7d';
   res.json(await ledger.aggregate(range));
 });
 
@@ -299,6 +320,9 @@ app.post('/v1/chat/completions', async (req, res) => {
         status,
       });
     }
+    if (keyName && route && status === 200) {
+      limitGuard.record(keyName, estPromptTokens + estCompletionTokens, ledger.costOf(route.model, estPromptTokens, estCompletionTokens));
+    }
     events.emit('request.end', {
       id: reqId,
       appId,
@@ -310,6 +334,16 @@ app.post('/v1/chat/completions', async (req, res) => {
     });
     console.log(`[req ${reqId}] ${status} model=${aliasUsed || '?'} app=${appId} ${Date.now() - started}ms`);
   };
+
+  // Per-key limits: consume an rpm slot and check budgets before any engine
+  // work. 429 carries Retry-After so OpenAI clients back off correctly.
+  if (req.auth && req.auth.limits) {
+    const verdict = limitGuard.check(req.auth.name, req.auth.limits);
+    if (!verdict.ok) {
+      record(429);
+      return sendError(res, 429, verdict.message, 'rate_limit_error', null, verdict.retryAfterSec);
+    }
+  }
 
   for (const [name, val] of [['logprobs', body.logprobs]]) {
     if (val !== undefined && val !== null && val !== false) {
@@ -844,6 +878,12 @@ const server = app.listen(PORT, BIND_HOST, () => {
     console.warn(`WARNING: provider bound to ${BIND_HOST} with no API key set — anyone who can reach this port can spend your Claude/Gemini quota. Set PROVIDER_API_KEY or bind to 127.0.0.1.`);
   }
 });
+
+// Seed per-key budget counters from the durable ledger (async, additive —
+// live traffic that races the seed is kept).
+Promise.all([ledger.aggregate('today'), ledger.aggregate('month')])
+  .then(([today, month]) => limitGuard.seed({ today, month }))
+  .catch((err) => console.warn(`[limits] budget seed failed: ${err.message}`));
 
 // A bridge dying must never orphan a quota-burning CLI run (audit H7).
 installGracefulShutdown({ server });

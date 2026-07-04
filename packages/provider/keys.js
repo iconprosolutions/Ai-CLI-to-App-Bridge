@@ -41,6 +41,31 @@ function validateAccountPin(pin) {
   return { ...pin };
 }
 
+// Per-key usage limits: rpm (requests/minute), tokensPerDay, usdPerMonth
+// (API-equivalent spend per pricing.json). All optional; absent = unlimited.
+function validateLimits(l) {
+  if (l === undefined || l === null) return undefined;
+  if (typeof l !== 'object' || Array.isArray(l)) {
+    throw new Error('limits must be an object like { rpm, tokensPerDay, usdPerMonth }');
+  }
+  const out = {};
+  for (const [k, v] of Object.entries(l)) {
+    if (v === undefined || v === null || v === '') continue;
+    if (!['rpm', 'tokensPerDay', 'usdPerMonth'].includes(k)) {
+      throw new Error(`limits.${k} is not a recognized limit (expected rpm, tokensPerDay, usdPerMonth)`);
+    }
+    const n = Number(v);
+    if (k === 'usdPerMonth') {
+      if (!Number.isFinite(n) || n <= 0) throw new Error('limits.usdPerMonth must be a number > 0');
+      out[k] = Math.round(n * 100) / 100;
+    } else {
+      if (!Number.isInteger(n) || n < 1) throw new Error(`limits.${k} must be an integer ≥ 1`);
+      out[k] = n;
+    }
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
 function validateKeyRecord(k) {
   if (!k || typeof k.name !== 'string' || !NAME_RE.test(k.name)) {
     throw new Error(`credentials.json: every key needs a name matching ${NAME_RE}`);
@@ -52,6 +77,7 @@ function validateKeyRecord(k) {
     throw new Error(`credentials.json: key "${k.name}" is missing its secret`);
   }
   validateAccountPin(k.accountPin);
+  validateLimits(k.limits);
   return k;
 }
 
@@ -119,16 +145,27 @@ function createKeyStore({ file, envKey = '' } = {}) {
       if (a.length === b.length && crypto.timingSafeEqual(a, b)) match = rec;
     }
     if (!match) return null;
-    return { name: match.name, role: match.role, accountPin: match.accountPin ? { ...match.accountPin } : undefined };
+    return {
+      name: match.name,
+      role: match.role,
+      accountPin: match.accountPin ? { ...match.accountPin } : undefined,
+      limits: match.limits ? { ...match.limits } : undefined,
+    };
   }
 
   function list() {
     return data.keys
-      .map((k) => ({ name: k.name, role: k.role, accountPin: k.accountPin ? { ...k.accountPin } : undefined, createdAt: k.createdAt }))
+      .map((k) => ({
+        name: k.name,
+        role: k.role,
+        accountPin: k.accountPin ? { ...k.accountPin } : undefined,
+        limits: k.limits ? { ...k.limits } : undefined,
+        createdAt: k.createdAt,
+      }))
       .sort((x, y) => String(x.createdAt).localeCompare(String(y.createdAt)));
   }
 
-  function mint({ name, role = 'app', accountPin } = {}) {
+  function mint({ name, role = 'app', accountPin, limits } = {}) {
     if (typeof name !== 'string' || !NAME_RE.test(name)) {
       throw new Error(`Key name must match ${NAME_RE}`);
     }
@@ -136,11 +173,25 @@ function createKeyStore({ file, envKey = '' } = {}) {
     if (name === 'env') throw new Error('Key name "env" is reserved');
     if (data.keys.some((k) => k.name === name)) throw new Error(`A key named "${name}" already exists`);
     const pin = validateAccountPin(accountPin);
+    const lim = validateLimits(limits);
     const rec = { name, role, key: newSecret(), createdAt: nowIso() };
     if (pin) rec.accountPin = pin;
+    if (lim) rec.limits = lim;
     data.keys.push(rec);
     writeAtomic(file, { version: 2, keys: data.keys });
     return { ...rec };
+  }
+
+  // Update a key's limits in place (pass null/{} to clear). The secret and
+  // role never change here — revoke + re-mint for that.
+  function setLimits(name, limits) {
+    const rec = data.keys.find((k) => k.name === name);
+    if (!rec) throw new Error(`Unknown key "${name}"`);
+    const lim = validateLimits(limits);
+    if (lim) rec.limits = lim;
+    else delete rec.limits;
+    writeAtomic(file, { version: 2, keys: data.keys });
+    return { name: rec.name, role: rec.role, accountPin: rec.accountPin ? { ...rec.accountPin } : undefined, limits: rec.limits ? { ...rec.limits } : undefined };
   }
 
   function revoke(name) {
@@ -160,6 +211,7 @@ function createKeyStore({ file, envKey = '' } = {}) {
     list,
     mint,
     revoke,
+    setLimits,
     get authEnabled() { return data.keys.length > 0 || Boolean(envRecord); },
     file,
   };

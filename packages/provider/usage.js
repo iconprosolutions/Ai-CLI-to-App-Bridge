@@ -61,9 +61,17 @@ function createUsageLedger({
 
   const priceFor = (model) => (pricing.models && pricing.models[model]) || pricing.default || { input: 0, output: 0 };
 
+  // API-equivalent dollar value of one request — the same math aggregate()
+  // uses, exposed so per-key spend limits count identically.
+  function costOf(model, promptTokens, completionTokens) {
+    const price = priceFor(model);
+    return ((promptTokens || 0) / 1e6) * (price.input || 0) + ((completionTokens || 0) / 1e6) * (price.output || 0);
+  }
+
   function cutoffFor(range) {
     const now = Date.now();
     if (range === 'today') { const d = new Date(); d.setHours(0, 0, 0, 0); return d.getTime(); }
+    if (range === 'month') { const d = new Date(); d.setHours(0, 0, 0, 0); d.setDate(1); return d.getTime(); } // calendar month
     if (range === '7d') return now - 7 * 864e5;
     if (range === '30d') return now - 30 * 864e5;
     return 0; // 'all'
@@ -120,8 +128,7 @@ function createUsageLedger({
     for (const e of entries) {
       const pt = e.promptTokens || 0;
       const ct = e.completionTokens || 0;
-      const price = priceFor(e.model);
-      const usd = (pt / 1e6) * (price.input || 0) + (ct / 1e6) * (price.output || 0);
+      const usd = costOf(e.model, pt, ct);
       const success = e.status === 200;
 
       totals.requests += 1;
@@ -188,7 +195,7 @@ function createUsageLedger({
     };
   }
 
-  return { append, flush, flushSync, aggregate, dir };
+  return { append, flush, flushSync, aggregate, costOf, dir };
 }
 
 module.exports = { createUsageLedger };

@@ -5,6 +5,19 @@ last-updated: '2026-07-04T18:45:00.000Z'
 
 ## Current Status
 
+- **SaaS hardening shipped + live (2026-07-04 pm).** Per-user keys now carry
+  optional `limits` (`rpm` sliding window, `tokensPerDay` calendar-day,
+  `usdPerMonth` API-equivalent calendar-month) enforced on `/v1` with
+  `429 + Retry-After`; counters seeded from the ledger at boot so restarts
+  keep budgets. `PATCH /admin/keys/:name` edits limits; `GET /admin/keys`
+  returns limits + live consumption; Connect tab has limit inputs on mint, a
+  "Limits · used" column, and an edit action. `DASHBOARD_AUTH=1` (default in
+  the deploy compose) gates dashboard data endpoints behind an admin key
+  (Bearer or `?key=` for SSE) so a Cloudflare tunnel exposes nothing
+  unauthenticated — static UI stays public, `/v1`+`/admin` were already gated.
+  Verified live on the NAS: `demo-user` key (rpm 2) → 200, 200, 429 with
+  `Retry-After: 54`; dashboard 401 without key / 200 with; hermes unaffected.
+  198 assertions green (20 new in P25).
 - **LIVE ON THE NAS (2026-07-04).** The Server Edition runs in Docker on the
   Ugreen NAS (`ai-cli-bridge` container, `http://192.168.1.10:9011`). Both
   engines verified with real completions (claude 2.1.201 via copied

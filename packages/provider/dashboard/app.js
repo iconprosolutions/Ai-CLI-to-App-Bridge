@@ -51,14 +51,34 @@
   }
 
   // ── Transport ─────────────────────────────────────────────────────────
+  // When DASHBOARD_AUTH=1 on the server (tunnel/public exposure), the data
+  // endpoints require an admin key — sent as a Bearer header here and as
+  // ?key= on the EventSource (which can't set headers).
+  function authHeaders() { return key() ? { 'Authorization': 'Bearer ' + key() } : {}; }
+  var lockedWarned = false;
+  function showLocked() {
+    setLive(false);
+    $('livelabel').textContent = 'Locked';
+    if (!lockedWarned) {
+      lockedWarned = true;
+      alert('Dashboard auth is enabled on this server. Open the Connect tab, paste an admin API key, and the dashboard will unlock.');
+    }
+  }
   function fetchStatus() {
-    return fetch('/dashboard/status').then(function (r) { return r.json(); }).then(function (d) {
+    return fetch('/dashboard/status', { headers: authHeaders() }).then(function (r) {
+      if (r.status === 401) { showLocked(); return null; }
+      return r.json();
+    }).then(function (d) {
+      if (!d) return;
       state.status = d;
       renderAll();
     }).catch(function () { setLive(false); });
   }
   function fetchUsage() {
-    return fetch('/dashboard/usage?range=' + state.usageRange).then(function (r) { return r.json(); }).then(function (d) {
+    return fetch('/dashboard/usage?range=' + state.usageRange, { headers: authHeaders() }).then(function (r) {
+      return r.status === 401 ? null : r.json();
+    }).then(function (d) {
+      if (!d) return;
       state.usage = d;
       renderUsage();
       if (state.view === 'overview') renderTiles();
@@ -84,7 +104,7 @@
   }
   function connectEvents() {
     try {
-      es = new EventSource('/dashboard/events');
+      es = new EventSource('/dashboard/events' + (key() ? '?key=' + encodeURIComponent(key()) : ''));
       ['request.start', 'request.end', 'breaker.change', 'engine.health', 'capture.change', 'account.change', 'keys.change'].forEach(function (t) {
         es.addEventListener(t, throttledRefresh);
       });
@@ -599,11 +619,20 @@
       if (!d) return;
       el.innerHTML = (d.keys || []).map(function (k) {
         var pins = k.accountPin ? Object.keys(k.accountPin).map(function (e) { return esc(e + ':' + k.accountPin[e]); }).join(', ') : '—';
-        return '<div class="trow" style="grid-template-columns:1.3fr 80px 1.2fr 90px">'
+        var lim = k.limits || {};
+        var use = k.usage || {};
+        var parts = [];
+        if (lim.rpm) parts.push(lim.rpm + '/min');
+        if (lim.tokensPerDay) parts.push(ftok(use.tokensToday || 0) + ' of ' + ftok(lim.tokensPerDay) + ' tok/day');
+        if (lim.usdPerMonth) parts.push('$' + (use.usdThisMonth || 0).toFixed(2) + ' of $' + lim.usdPerMonth + '/mo');
+        var limHtml = parts.length ? parts.map(function (p) { return '<span class="chip">' + esc(p) + '</span>'; }).join(' ') : '<span class="sub2">unlimited</span>';
+        return '<div class="trow" style="grid-template-columns:1.1fr 70px 1fr 1.4fr 150px">'
           + '<span>' + esc(k.name) + '</span>'
           + '<span><span class="nbadge">' + esc(k.role) + '</span></span>'
           + '<span class="sub2">' + pins + '</span>'
-          + '<span><button class="abtn danger" data-act="key-revoke" data-name="' + esc(k.name) + '">Revoke</button></span></div>';
+          + '<span>' + limHtml + '</span>'
+          + '<span><button class="abtn" data-act="key-limits" data-name="' + esc(k.name) + '" data-limits="' + esc(JSON.stringify(lim)) + '">Limits</button> '
+          + '<button class="abtn danger" data-act="key-revoke" data-name="' + esc(k.name) + '">Revoke</button></span></div>';
       }).join('') || '<div class="empty">No keys.</div>';
     }).catch(function () { el.innerHTML = '<div class="empty">Could not load keys.</div>'; });
   }
@@ -665,6 +694,26 @@
       var n = el.getAttribute('data-name');
       if (!confirm('Revoke key "' + n + '"? Any app using it stops working immediately.')) return Promise.resolve();
       return admin('DELETE', '/admin/keys/' + encodeURIComponent(n)).then(function () { renderKeys(); });
+    },
+    'key-limits': function (el) {
+      var n = el.getAttribute('data-name');
+      var cur = {};
+      try { cur = JSON.parse(el.getAttribute('data-limits') || '{}'); } catch (_) { cur = {}; }
+      var ask = function (label, curVal) {
+        var v = prompt(label + ' for "' + n + '" (blank = unlimited):', curVal == null ? '' : String(curVal));
+        if (v === null) return undefined; // cancelled → abort the whole edit
+        return v.trim() === '' ? null : Number(v);
+      };
+      var rpm = ask('Requests / minute', cur.rpm); if (rpm === undefined) return Promise.resolve();
+      var tpd = ask('Tokens / day', cur.tokensPerDay); if (tpd === undefined) return Promise.resolve();
+      var usd = ask('$ / month (API-equivalent)', cur.usdPerMonth); if (usd === undefined) return Promise.resolve();
+      var limits = {};
+      if (rpm !== null) limits.rpm = rpm;
+      if (tpd !== null) limits.tokensPerDay = tpd;
+      if (usd !== null) limits.usdPerMonth = usd;
+      return admin('PATCH', '/admin/keys/' + encodeURIComponent(n), { limits: limits })
+        .then(function () { renderKeys(); })
+        .catch(function (err) { if (err && err.message !== 'unauthorized') alert(err.message); });
     },
     'route-toggle': function (el) {
       var enabled = el.getAttribute('data-enabled') === 'true';
@@ -791,9 +840,17 @@
     b.setAttribute('data-engine', b.getAttribute('data-probe'));
   });
 
-  // Key field
+  // Key field. A key change may unlock an auth-gated dashboard: refetch and
+  // reconnect the event stream with the new key.
   $('c-key').value = key();
-  $('c-key').addEventListener('change', function () { localStorage.setItem('providerApiKey', this.value); renderKeys(); });
+  $('c-key').addEventListener('change', function () {
+    localStorage.setItem('providerApiKey', this.value);
+    renderKeys();
+    lockedWarned = false;
+    if (es) { es.close(); es = null; }
+    connectEvents();
+    fetchStatus().then(fetchUsage);
+  });
 
   // Mint a named key (admin). Secret is shown once, in-page, then cleared from state.
   $('key-mint').addEventListener('click', function () {
@@ -804,11 +861,16 @@
     if ($('key-pin-claude').value.trim()) pin.claude = $('key-pin-claude').value.trim();
     if ($('key-pin-gemini').value.trim()) pin.gemini = $('key-pin-gemini').value.trim();
     if (Object.keys(pin).length) body.accountPin = pin;
+    var limits = {};
+    if ($('key-rpm').value) limits.rpm = Number($('key-rpm').value);
+    if ($('key-tpd').value) limits.tokensPerDay = Number($('key-tpd').value);
+    if ($('key-usd').value) limits.usdPerMonth = Number($('key-usd').value);
+    if (Object.keys(limits).length) body.limits = limits;
     admin('POST', '/admin/keys', body).then(function (d) {
       $('key-msg').textContent = 'Minted "' + d.name + '".';
       $('minted-key').style.display = '';
       $('minted-secret').textContent = d.key;
-      ['key-name', 'key-pin-claude', 'key-pin-gemini'].forEach(function (id) { $(id).value = ''; });
+      ['key-name', 'key-pin-claude', 'key-pin-gemini', 'key-rpm', 'key-tpd', 'key-usd'].forEach(function (id) { $(id).value = ''; });
       renderKeys();
     }).catch(function (err) { if (err && err.message !== 'unauthorized') $('key-msg').textContent = err.message; });
   });

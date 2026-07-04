@@ -15,6 +15,10 @@ services:
     environment:
       - PROVIDER_PORT=9011
       - BIND_HOST=0.0.0.0
+      # Dashboard data endpoints require an admin key (Bearer or ?key=).
+      # Keep =1 whenever the port is reachable beyond the LAN (e.g. through a
+      # Cloudflare tunnel); the static UI stays public, the data does not.
+      - DASHBOARD_AUTH=${DASHBOARD_AUTH:-1}
       # Uncomment to pin a fixed admin key instead of the auto-generated one:
       # - PROVIDER_API_KEY=${PROVIDER_API_KEY}
     volumes:

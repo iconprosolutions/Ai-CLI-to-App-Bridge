@@ -1109,6 +1109,91 @@ async function main() {
       'v1 file migrated to v2 in place, key value preserved as admin');
   }
 
+  // ── Per-key limits + dashboard auth (the SaaS boundary) ─────────────────
+  console.log('\n## Per-key limits (rpm / tokens-per-day / $-per-month) + dashboard auth');
+  const P25 = 19640;
+  const CREDS25 = path.join(TMP, 'creds25.json');
+  const ADMIN25 = 'C'.repeat(48);
+  const LIM25 = 'D'.repeat(48);
+  fs.writeFileSync(CREDS25, JSON.stringify({
+    version: 2,
+    keys: [
+      { name: 'admin', role: 'admin', key: ADMIN25, createdAt: '2026-01-01T00:00:00Z' },
+      { name: 'lim', role: 'app', key: LIM25, limits: { rpm: 2 }, createdAt: '2026-01-02T00:00:00Z' },
+    ],
+  }));
+  await bootProvider(P25, {
+    CLAUDE_PATH: CLAUDE_KEYS, GEMINI_PATH: AGY_ACCT,
+    BRIDGE_CREDENTIALS_FILE: CREDS25, USAGE_FLUSH_MS: '50', DASHBOARD_AUTH: '1',
+  });
+  const chat25 = (key) => request(P25, {
+    path: '/v1/chat/completions', method: 'POST', headers: { Authorization: `Bearer ${key}` },
+    body: { model: 'bridge-claude-haiku-4.5-spark', messages: [{ role: 'user', content: 'x' }] },
+  });
+
+  // rpm: two pass, the third inside the same minute gets 429 + Retry-After.
+  r = await chat25(LIM25);
+  assert(r.status === 200, 'request 1/2 under the rpm limit passes');
+  r = await chat25(LIM25);
+  assert(r.status === 200, 'request 2/2 reaches the rpm cap');
+  r = await chat25(LIM25);
+  assert(r.status === 429 && errType(r) === 'rate_limit_error', 'request over the rpm cap → 429 rate_limit_error');
+  assert(Number(r.headers['retry-after']) >= 1 && Number(r.headers['retry-after']) <= 60, '429 carries a sane Retry-After');
+  r = await chat25(ADMIN25);
+  assert(r.status === 200, 'a key without limits is unaffected');
+
+  // Daily token budget: PATCH the key down to 1 token/day — the two earlier
+  // successes already consumed real (fake-CLI) tokens, so the next call trips.
+  r = await request(P25, {
+    path: '/admin/keys/lim', method: 'PATCH', headers: { Authorization: `Bearer ${ADMIN25}` },
+    body: { limits: { tokensPerDay: 1 } },
+  });
+  assert(r.status === 200 && JSON.parse(r.body).limits.tokensPerDay === 1, 'PATCH /admin/keys/:name updates limits');
+  r = await chat25(LIM25);
+  assert(r.status === 429 && /Daily token budget/i.test(JSON.parse(r.body).error.message),
+    'exhausted daily token budget → 429 naming the budget');
+
+  // Clearing limits restores unlimited service.
+  r = await request(P25, {
+    path: '/admin/keys/lim', method: 'PATCH', headers: { Authorization: `Bearer ${ADMIN25}` },
+    body: { limits: {} },
+  });
+  assert(r.status === 200, 'PATCH with empty limits clears them');
+  r = await chat25(LIM25);
+  assert(r.status === 200, 'cleared limits → key is unlimited again');
+
+  // Mint with limits + list exposes limits and live usage counters.
+  r = await request(P25, {
+    path: '/admin/keys', method: 'POST', headers: { Authorization: `Bearer ${ADMIN25}` },
+    body: { name: 'alice', role: 'app', limits: { rpm: 5, tokensPerDay: 100000, usdPerMonth: 10 } },
+  });
+  assert(r.status === 200 && JSON.parse(r.body).limits.usdPerMonth === 10, 'mint accepts limits');
+  r = await request(P25, {
+    path: '/admin/keys', method: 'POST', headers: { Authorization: `Bearer ${ADMIN25}` },
+    body: { name: 'bad', role: 'app', limits: { rpm: 0 } },
+  });
+  assert(r.status === 400, 'invalid limits (rpm 0) are rejected with 400');
+  r = await request(P25, { path: '/admin/keys', headers: { Authorization: `Bearer ${ADMIN25}` } });
+  {
+    const keys = JSON.parse(r.body).keys || [];
+    const lim = keys.find((k) => k.name === 'lim');
+    const alice = keys.find((k) => k.name === 'alice');
+    assert(alice && alice.limits.rpm === 5, 'list returns limits');
+    assert(lim && lim.usage && lim.usage.tokensToday > 0, 'list returns live per-key consumption');
+  }
+
+  // Dashboard auth: DASHBOARD_AUTH=1 gates data endpoints, not the static UI.
+  r = await request(P25, { path: '/dashboard/status' });
+  assert(r.status === 401, 'DASHBOARD_AUTH=1: /dashboard/status without a key → 401');
+  r = await request(P25, { path: '/dashboard/status', headers: { Authorization: `Bearer ${ADMIN25}` } });
+  assert(r.status === 200, 'admin Bearer header unlocks /dashboard/status');
+  r = await request(P25, { path: `/dashboard/usage?range=today&key=${ADMIN25}` });
+  assert(r.status === 200, '?key= query unlocks /dashboard/usage (EventSource path)');
+  r = await request(P25, { path: `/dashboard/status?key=${LIM25}` });
+  assert(r.status === 401, 'app-role key cannot read the dashboard');
+  r = await request(P25, { path: '/dashboard/' });
+  assert(r.status === 200 && /html/i.test(String(r.headers['content-type'])), 'static dashboard UI stays public');
+
   console.log(`\n# Result: ${passed} passed, ${failed} failed`);
   process.exit(failed === 0 ? 0 : 1);
 }

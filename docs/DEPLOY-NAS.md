@@ -140,6 +140,36 @@ providers:
 Send `X-App-Id: <app>` to attribute usage per app; use a per-app named key
 (minted in the Connect tab) to attribute per teammate and scope it to `/v1` only.
 
+## 8. Per-user keys with limits (SaaS mode)
+
+Every user gets their own `app`-role key, optionally with limits — enforced on
+`/v1` with `429 + Retry-After` when exceeded:
+
+```bash
+curl -s -X POST http://192.168.1.10:9011/admin/keys \
+  -H "Authorization: Bearer <admin-key>" -H "Content-Type: application/json" \
+  -d '{"name":"alice","role":"app","limits":{"rpm":10,"tokensPerDay":200000,"usdPerMonth":25}}'
+```
+
+- `rpm` — requests per minute (sliding window)
+- `tokensPerDay` — prompt+completion tokens per calendar day
+- `usdPerMonth` — API-equivalent spend per calendar month (per `pricing.json`)
+
+All optional; omit for unlimited. Update anytime with
+`PATCH /admin/keys/<name> {"limits":{...}}` (empty object clears), or use the
+Connect tab, which shows each key's limits and live consumption ("Limits"
+button edits them). Budget counters survive restarts (seeded from the ledger).
+
+## 9. Exposing it beyond the LAN (Cloudflare tunnel)
+
+The compose file sets `DASHBOARD_AUTH=1`: the dashboard *data* endpoints
+(status/usage/events) require an admin key — the page loads, then asks for the
+key once (stored in the browser). `/v1` and `/admin` are always key-gated. With
+that, pointing a Cloudflare tunnel at port `9011` exposes nothing unauthenticated.
+Give users only their own `app`-role key: it can spend quota but cannot read the
+dashboard, list keys, or touch `/admin`. Prefer keys with limits (§8) for
+anything reachable from outside.
+
 ## Gemini on the NAS
 
 Supported. The image installs Antigravity's official **linux-amd64** `agy` build
