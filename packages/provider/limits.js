@@ -31,9 +31,14 @@ function secondsToNextMonth() {
   return Math.max(1, Math.ceil((next - d) / 1000));
 }
 
+const WARN_PCT = 0.8; // soft warning threshold before the hard 429
+
 function createLimitGuard() {
   // keyName → { window: [ts...], day: {key, tokens}, month: {key, usd} }
   const perKey = new Map();
+  // De-dupe "you're near your budget" signals to once per key+reason+period,
+  // so a busy key at 85% doesn't emit a warning on every single request.
+  const warned = new Set();
 
   function row(name) {
     let r = perKey.get(name);
@@ -100,7 +105,23 @@ function createLimitGuard() {
     }
 
     if (limits.rpm) r.window.push(now);
-    return { ok: true };
+
+    // Soft budget warning: at/above WARN_PCT of a day/month budget (but under
+    // the hard cap, or we'd have 429'd). `fresh` is true only the first time
+    // per key+reason+period so callers can alert once, not on every request.
+    let warning;
+    if (limits.tokensPerDay && r.day.tokens >= WARN_PCT * limits.tokensPerDay) {
+      const pct = Math.floor((r.day.tokens / limits.tokensPerDay) * 100);
+      const stamp = `${name}:tokensPerDay:${r.day.key}`;
+      warning = { reason: 'tokensPerDay', pct, used: r.day.tokens, limit: limits.tokensPerDay, fresh: !warned.has(stamp) };
+      warned.add(stamp);
+    } else if (limits.usdPerMonth && r.month.usd >= WARN_PCT * limits.usdPerMonth) {
+      const pct = Math.floor((r.month.usd / limits.usdPerMonth) * 100);
+      const stamp = `${name}:usdPerMonth:${r.month.key}`;
+      warning = { reason: 'usdPerMonth', pct, used: Math.round(r.month.usd * 100) / 100, limit: limits.usdPerMonth, fresh: !warned.has(stamp) };
+      warned.add(stamp);
+    }
+    return warning ? { ok: true, warning } : { ok: true };
   }
 
   // Called from the request-finish path with what the request actually used.

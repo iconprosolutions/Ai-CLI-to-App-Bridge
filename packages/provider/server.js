@@ -224,6 +224,27 @@ function engineCap(engine) {
   return engine === 'gemini' ? MAX_PROMPT_BYTES : Infinity;
 }
 
+// Serialize an aggregate() rollup to CSV. `dimension` picks which breakdown
+// (perKey/perApp/perRoute/perAccount/perUser) becomes the rows; RFC-4180
+// quoting so a name with a comma/quote can't corrupt the columns.
+const CSV_DIMENSIONS = {
+  key: 'perKey', app: 'perApp', route: 'perRoute', account: 'perAccount', user: 'perUser',
+};
+function csvCell(v) {
+  const s = v === undefined || v === null ? '' : String(v);
+  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+function usageToCsv(agg, dimension) {
+  const field = CSV_DIMENSIONS[dimension] || 'perKey';
+  const rows = agg[field] || [];
+  const cols = rows.length ? Object.keys(rows[0]) : ['(no data)'];
+  const lines = [cols.join(',')];
+  for (const row of rows) lines.push(cols.map((c) => csvCell(row[c])).join(','));
+  return `${lines.join('\n')}\n`;
+}
+const USAGE_RANGES = ['today', 'month', '7d', '30d', 'all'];
+const rangeOf = (q) => (USAGE_RANGES.includes(String(q)) ? String(q) : '7d');
+
 function sendError(res, status, message, type, param, retryAfterSec) {
   if (retryAfterSec) res.set('Retry-After', String(retryAfterSec));
   return res.status(status).json(openaiErrorBody(message, type, param));
@@ -380,9 +401,22 @@ app.post('/me/keys/:name/rotate', (req, res) => {
 app.get('/me/usage', async (req, res) => {
   const user = requireSession(req, res);
   if (!user) return;
-  const range = ['today', 'month', '7d', '30d', 'all'].includes(String(req.query.range)) ? String(req.query.range) : '7d';
+  const range = rangeOf(req.query.range);
   const own = new Set(keyStore.listByOwner(user.username).map((k) => k.name));
   res.json(await ledger.aggregate(range, { keyFilter: own }));
+});
+
+// CSV export of the caller's own usage (spreadsheet / billing reconciliation).
+app.get('/me/usage.csv', async (req, res) => {
+  const user = requireSession(req, res);
+  if (!user) return;
+  const range = rangeOf(req.query.range);
+  const own = new Set(keyStore.listByOwner(user.username).map((k) => k.name));
+  const agg = await ledger.aggregate(range, { keyFilter: own });
+  const dim = req.query.dimension === 'app' ? 'app' : 'key';
+  res.set('Content-Type', 'text/csv; charset=utf-8');
+  res.set('Content-Disposition', `attachment; filename="usage-${user.username}-${range}.csv"`);
+  res.send(usageToCsv(agg, dim));
 });
 
 // ── Dashboard auth (optional; for tunnel/public exposure) ──────────────
@@ -500,8 +534,18 @@ app.use('/admin', createAdminRouter({
 
 // Durable usage rollups (JSONL ledger; survives restarts).
 app.get('/dashboard/usage', dashboardGate, async (req, res) => {
-  const range = ['today', 'month', '7d', '30d', 'all'].includes(String(req.query.range)) ? String(req.query.range) : '7d';
+  const range = rangeOf(req.query.range);
   res.json(await ledger.aggregate(range, { ownerOf: keyStore.ownerOf }));
+});
+
+// CSV export of the whole ledger (admin). ?dimension=key|app|route|account|user.
+app.get('/dashboard/usage.csv', dashboardGate, async (req, res) => {
+  const range = rangeOf(req.query.range);
+  const dim = CSV_DIMENSIONS[req.query.dimension] ? req.query.dimension : 'key';
+  const agg = await ledger.aggregate(range, { ownerOf: keyStore.ownerOf });
+  res.set('Content-Type', 'text/csv; charset=utf-8');
+  res.set('Content-Disposition', `attachment; filename="usage-${dim}-${range}.csv"`);
+  res.send(usageToCsv(agg, dim));
 });
 
 // ── /v1/models ──────────────────────────────────────────────────────────
@@ -586,6 +630,13 @@ app.post('/v1/chat/completions', async (req, res) => {
     if (!verdict.ok) {
       record(429);
       return sendError(res, 429, verdict.message, 'rate_limit_error', null, verdict.retryAfterSec);
+    }
+    // Soft budget warning: tell the caller (header) and — once per period —
+    // alert the operator (webhook) before the hard 429 arrives.
+    if (verdict.warning) {
+      const w = verdict.warning;
+      res.set('X-Bridge-Budget-Warning', `${w.reason} at ${w.pct}% (${w.used} of ${w.limit})`);
+      if (w.fresh) events.emit('budget.warning', { keyName: req.auth.name, reason: w.reason, pct: w.pct, used: String(w.used), limit: String(w.limit) });
     }
   }
 

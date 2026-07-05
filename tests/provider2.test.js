@@ -1900,6 +1900,72 @@ async function main() {
   r = await request(P32, { path: '/me/keys/admin/rotate', method: 'POST', headers: { Cookie: daveCookie }, body: {} });
   assert(r.status === 403, "a user can't rotate a key they don't own");
 
+  // ── Usage CSV export + budget warnings at 80% ───────────────────────────
+  console.log('\n## Usage CSV export + 80% budget warnings');
+  const hits33 = [];
+  const hookSrv33 = http.createServer((req, res) => { let b = ''; req.on('data', (c) => (b += c)); req.on('end', () => { hits33.push(b); res.end('ok'); }); });
+  await new Promise((res) => hookSrv33.listen(0, '127.0.0.1', res));
+  const P33 = 19720;
+  const DIR33 = path.join(TMP, 'p33');
+  fs.mkdirSync(DIR33, { recursive: true });
+  const CREDS33 = path.join(DIR33, 'creds.json');
+  const ADMIN33 = '5'.repeat(48);
+  fs.writeFileSync(CREDS33, JSON.stringify({
+    version: 3, keys: [{ name: 'admin', role: 'admin', keyHash: sha256(ADMIN33), createdAt: '2026-01-01T00:00:00Z' }],
+  }));
+  await bootProvider(P33, {
+    CLAUDE_PATH: CLAUDE_KEYS, GEMINI_PATH: AGY_ACCT, BRIDGE_CREDENTIALS_FILE: CREDS33,
+    BRIDGE_USERS_FILE: path.join(DIR33, 'users.json'), BRIDGE_SESSIONS_FILE: path.join(DIR33, 'sessions.json'),
+    BRIDGE_ACCOUNTS_FILE: path.join(DIR33, 'accounts.json'),
+    BRIDGE_WEBHOOK_URL: `http://127.0.0.1:${hookSrv33.address().port}/hook`,
+    USAGE_FLUSH_MS: '50', DASHBOARD_AUTH: '1',
+  });
+
+  // A key with a tiny daily token budget: the fake CLI reports 16 tokens/call,
+  // so call 2 crosses 80% of 18 (warn) and call 3 hits the hard cap (429).
+  r = await request(P33, {
+    path: '/admin/keys', method: 'POST', headers: { Authorization: `Bearer ${ADMIN33}` },
+    body: { name: 'budgeted', role: 'app', limits: { tokensPerDay: 18 } },
+  });
+  const budKey = JSON.parse(r.body).key;
+  const call33 = () => request(P33, {
+    path: '/v1/chat/completions', method: 'POST', headers: { Authorization: `Bearer ${budKey}` },
+    body: { model: 'bridge-claude-haiku-4.5-spark', messages: [{ role: 'user', content: 'hi' }] },
+  });
+  r = await call33();
+  assert(r.status === 200 && !r.headers['x-bridge-budget-warning'], 'first call: under threshold, no warning header');
+  r = await call33();
+  assert(r.status === 200 && /tokensPerDay at \d+%/.test(String(r.headers['x-bridge-budget-warning'])),
+    `second call: X-Bridge-Budget-Warning header appears (got "${r.headers['x-bridge-budget-warning']}")`);
+  r = await call33();
+  assert(r.status === 429, 'third call: hard daily cap → 429');
+  await new Promise((res) => setTimeout(res, 250));
+  assert(hits33.some((h) => h.includes('budget')), `a fresh budget warning fires the webhook once (got ${hits33.length} hits)`);
+  hookSrv33.close();
+
+  // CSV export (admin): header row + per-key rows, correct content type.
+  r = await request(P33, { path: '/dashboard/usage.csv?range=today', headers: { Authorization: `Bearer ${ADMIN33}` } });
+  assert(r.status === 200 && /text\/csv/.test(String(r.headers['content-type'])), 'usage.csv returns text/csv');
+  {
+    const lines = r.body.trim().split('\n');
+    assert(lines[0].startsWith('keyName,'), 'CSV header names the key dimension');
+    assert(lines.some((l) => l.startsWith('budgeted,')), 'CSV has a row for the budgeted key');
+  }
+  r = await request(P33, { path: '/dashboard/usage.csv?range=today&dimension=route', headers: { Authorization: `Bearer ${ADMIN33}` } });
+  assert(r.status === 200 && r.body.split('\n')[0].startsWith('routeId,'), 'dimension=route switches the CSV breakdown');
+  r = await request(P33, { path: '/dashboard/usage.csv' });
+  assert(r.status === 401, 'usage.csv is admin-gated');
+
+  // Owner CSV: a signed-in user gets only their own keys.
+  r = await request(P33, {
+    path: '/admin/users', method: 'POST', headers: { Authorization: `Bearer ${ADMIN33}` },
+    body: { username: 'erin', password: 'erinpass123', role: 'user' },
+  });
+  r = await request(P33, { path: '/auth/login', method: 'POST', body: { username: 'erin', password: 'erinpass123' } });
+  const erinCookie = String(r.headers['set-cookie'] || '').split(';')[0];
+  r = await request(P33, { path: '/me/usage.csv', headers: { Cookie: erinCookie } });
+  assert(r.status === 200 && /text\/csv/.test(String(r.headers['content-type'])), '/me/usage.csv works for a signed-in user');
+
   console.log(`\n# Result: ${passed} passed, ${failed} failed`);
   process.exit(failed === 0 ? 0 : 1);
 }
