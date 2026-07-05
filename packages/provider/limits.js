@@ -132,6 +132,20 @@ function createLimitGuard() {
     r.month.usd += usd || 0;
   }
 
+  // OpenAI-style rate-limit headers for the current rpm window. Read-only —
+  // reflects state AFTER check() consumed this request's slot. Returns null
+  // when the key has no rpm limit (nothing meaningful to report).
+  function rpmStatus(name, limits) {
+    if (!name || !limits || !limits.rpm) return null;
+    const r = perKey.get(name);
+    const now = Date.now();
+    const win = r ? r.window.filter((t) => now - t < 60000) : [];
+    const remaining = Math.max(0, limits.rpm - win.length);
+    // Reset = when the oldest in-window request ages out (a slot frees).
+    const resetSec = win.length ? Math.max(1, Math.ceil((win[0] + 60000 - now) / 1000)) : 0;
+    return { limit: limits.rpm, remaining, resetSec };
+  }
+
   // Dashboard: current consumption for a key (for the Connect tab display).
   function snapshot(name) {
     const r = perKey.get(name);
@@ -140,7 +154,7 @@ function createLimitGuard() {
     return { tokensToday: fresh.day.tokens, usdThisMonth: Math.round(fresh.month.usd * 100) / 100 };
   }
 
-  return { check, record, seed, snapshot };
+  return { check, record, seed, snapshot, rpmStatus };
 }
 
 module.exports = { createLimitGuard };

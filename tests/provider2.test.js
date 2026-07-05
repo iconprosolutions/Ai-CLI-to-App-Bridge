@@ -2000,6 +2000,31 @@ async function main() {
   r = await request(P33, { path: '/me/usage.csv', headers: { Cookie: erinCookie } });
   assert(r.status === 200 && /text\/csv/.test(String(r.headers['content-type'])), '/me/usage.csv works for a signed-in user');
 
+  // Rate-limit headers: an rpm-limited key gets OpenAI-style headers so SDKs
+  // can back off before the hard 429.
+  r = await request(P33, {
+    path: '/admin/keys', method: 'POST', headers: { Authorization: `Bearer ${ADMIN33}` },
+    body: { name: 'rpm-key', role: 'app', limits: { rpm: 5 } },
+  });
+  const rpmKey = JSON.parse(r.body).key;
+  r = await request(P33, {
+    path: '/v1/chat/completions', method: 'POST', headers: { Authorization: `Bearer ${rpmKey}`, 'X-App-Id': 'hdr-test' },
+    body: { model: 'bridge-claude-haiku-4.5-spark', messages: [{ role: 'user', content: 'x' }] },
+  });
+  assert(r.status === 200 && r.headers['x-ratelimit-limit-requests'] === '5' && r.headers['x-ratelimit-remaining-requests'] === '4',
+    `rate-limit headers reflect the rpm budget (got limit=${r.headers['x-ratelimit-limit-requests']}, remaining=${r.headers['x-ratelimit-remaining-requests']})`);
+  assert(/^\d+s$/.test(String(r.headers['x-ratelimit-reset-requests'])), 'reset header is a seconds value');
+
+  // OpenAI `user` field attributes usage when no X-App-Id header is sent.
+  await request(P33, {
+    path: '/v1/chat/completions', method: 'POST', headers: { Authorization: `Bearer ${ADMIN33}` },
+    body: { model: 'bridge-claude-haiku-4.5-spark', user: 'agent-smith', messages: [{ role: 'user', content: 'x' }] },
+  });
+  await new Promise((res) => setTimeout(res, 150));
+  r = await request(P33, { path: '/dashboard/usage?range=today', headers: { Authorization: `Bearer ${ADMIN33}` } });
+  assert(((JSON.parse(r.body).perApp) || []).some((a) => a.appId === 'agent-smith'),
+    'the OpenAI user field is used for app attribution when X-App-Id is absent');
+
   // ── max_tokens + stop sequences, end-to-end (chat completions) ──────────
   console.log('\n## max_tokens + stop honored end-to-end');
   const P34 = 19730;

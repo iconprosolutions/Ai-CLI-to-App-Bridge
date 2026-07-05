@@ -206,8 +206,10 @@ function newRequestId() {
   return crypto.randomBytes(6).toString('hex');
 }
 
-function appIdFrom(req) {
-  const raw = req.headers['x-app-id'] || req.headers['x-client-id'] || '';
+function appIdFrom(req, body) {
+  // X-App-Id / X-Client-Id header first; fall back to the OpenAI `user` field
+  // (many SDKs set it) so per-caller attribution works without a custom header.
+  const raw = req.headers['x-app-id'] || req.headers['x-client-id'] || (body && body.user) || '';
   const cleaned = String(raw).trim().slice(0, 64);
   return cleaned && /^[A-Za-z0-9_.\- ]+$/.test(cleaned) ? cleaned : 'default';
 }
@@ -570,7 +572,7 @@ app.post('/v1/chat/completions', async (req, res) => {
   const body = req.body || {};
   const aliasUsed = body.model;
   let route = registry.resolve(aliasUsed); // may be reassigned by overflow reroute
-  const appId = appIdFrom(req);
+  const appId = appIdFrom(req, body);
   const keyName = (req.auth && req.auth.name) || null;
   let estPromptTokens = 0;
   let estCompletionTokens = 0;
@@ -638,6 +640,14 @@ app.post('/v1/chat/completions', async (req, res) => {
       const w = verdict.warning;
       res.set('X-Bridge-Budget-Warning', `${w.reason} at ${w.pct}% (${w.used} of ${w.limit})`);
       if (w.fresh) events.emit('budget.warning', { keyName: req.auth.name, reason: w.reason, pct: w.pct, used: String(w.used), limit: String(w.limit) });
+    }
+    // OpenAI-style rate-limit headers so SDK auto-backoff works against the
+    // key's rpm budget.
+    const rl = limitGuard.rpmStatus(req.auth.name, req.auth.limits);
+    if (rl) {
+      res.set('X-RateLimit-Limit-Requests', String(rl.limit));
+      res.set('X-RateLimit-Remaining-Requests', String(rl.remaining));
+      res.set('X-RateLimit-Reset-Requests', `${rl.resetSec}s`);
     }
   }
 
