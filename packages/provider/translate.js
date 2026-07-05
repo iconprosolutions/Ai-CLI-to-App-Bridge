@@ -90,10 +90,131 @@ function openaiErrorBody(message, type, param) {
   return { error: { message, type, param: param === undefined ? null : param, code: null } };
 }
 
+// ── Output shaping: stop sequences + max_tokens ────────────────────────────
+// The CLIs run to completion — they honor neither param — so the bridge
+// enforces both after the fact, matching OpenAI semantics: the earliest stop
+// sequence truncates the reply (the sequence itself removed, finish_reason
+// "stop"); max_tokens caps completion length (finish_reason "length"). Token
+// accounting is the same ~4-chars/token estimate used everywhere else.
+
+// OpenAI accepts stop as a string or an array of up to 4; normalize to a
+// clean string[] (empty strings dropped — they'd match everywhere).
+function normalizeStops(stop) {
+  const arr = Array.isArray(stop) ? stop : (stop === undefined || stop === null ? [] : [stop]);
+  return arr.filter((s) => typeof s === 'string' && s.length > 0).slice(0, 4);
+}
+
+// Cut `text` to at most `maxTokens` tokens using the char/token estimate,
+// landing on the last whole token so we don't cut mid-character.
+function truncateToTokens(text, maxTokens) {
+  const maxChars = maxTokens * 4; // inverse of estimateTokens
+  return text.length > maxChars ? text.slice(0, maxChars) : text;
+}
+
+// Apply stop then max_tokens to a complete reply. Returns the possibly-cut
+// text and a finish_reason ('stop' by default; 'length' iff max_tokens did
+// the cutting). Stop wins ties: a stop cut keeps finish_reason 'stop'.
+function applyStopAndMax(text, { stop, maxTokens } = {}) {
+  let out = String(text == null ? '' : text);
+  let finishReason = 'stop';
+  const stops = normalizeStops(stop);
+  let earliest = -1;
+  for (const s of stops) {
+    const i = out.indexOf(s);
+    if (i !== -1 && (earliest === -1 || i < earliest)) earliest = i;
+  }
+  if (earliest !== -1) out = out.slice(0, earliest);
+  if (maxTokens && estimateTokens(out) > maxTokens) {
+    out = truncateToTokens(out, maxTokens);
+    finishReason = 'length';
+  }
+  return { text: out, finishReason, truncated: out.length !== String(text == null ? '' : text).length };
+}
+
+// Streaming counterpart: fed incremental chunks, it emits only the text that
+// is safe to release now, holds back a tail that might be the start of a stop
+// sequence spanning a chunk boundary, and reports when the reply is complete
+// (a stop sequence matched or the token cap was reached) so the caller stops
+// the stream. finish_reason reflects which limit ended it.
+function createOutputLimiter({ stop, maxTokens } = {}) {
+  const stops = normalizeStops(stop);
+  const maxStopLen = stops.reduce((m, s) => Math.max(m, s.length), 0);
+  let pending = ''; // not-yet-safe tail (could begin a stop sequence)
+  let emittedTokens = 0;
+  let done = false;
+  let finishReason = null;
+
+  // Given the running buffer, return the index of the earliest stop match.
+  const earliestStop = (buf) => {
+    let e = -1;
+    for (const s of stops) {
+      const i = buf.indexOf(s);
+      if (i !== -1 && (e === -1 || i < e)) e = i;
+    }
+    return e;
+  };
+
+  return {
+    // Returns the text to emit for this chunk ('' if all held back). Sets
+    // done/finishReason when a limit ends the reply.
+    push(chunk) {
+      if (done) return '';
+      pending += String(chunk || '');
+      let emit = '';
+
+      const si = earliestStop(pending);
+      if (si !== -1) {
+        emit = pending.slice(0, si);
+        pending = '';
+        done = true;
+        finishReason = 'stop';
+      } else if (maxStopLen > 1) {
+        // Hold back a tail that could be the prefix of a stop sequence.
+        const keep = Math.min(maxStopLen - 1, pending.length);
+        emit = pending.slice(0, pending.length - keep);
+        pending = pending.slice(pending.length - keep);
+      } else {
+        emit = pending;
+        pending = '';
+      }
+
+      if (maxTokens) {
+        const remaining = maxTokens - emittedTokens;
+        if (remaining <= 0) { done = true; finishReason = finishReason || 'length'; return ''; }
+        if (estimateTokens(emit) > remaining) {
+          emit = truncateToTokens(emit, remaining);
+          done = true;
+          finishReason = 'length';
+        }
+      }
+      emittedTokens += estimateTokens(emit);
+      return emit;
+    },
+    // Flush the held-back tail at stream end (no stop matched).
+    end() {
+      if (done) return '';
+      let emit = pending;
+      pending = '';
+      if (maxTokens) {
+        const remaining = maxTokens - emittedTokens;
+        if (remaining <= 0) return '';
+        if (estimateTokens(emit) > remaining) { emit = truncateToTokens(emit, remaining); finishReason = 'length'; }
+      }
+      emittedTokens += estimateTokens(emit);
+      return emit;
+    },
+    get done() { return done; },
+    get finishReason() { return finishReason; },
+  };
+}
+
 module.exports = {
   estimateTokens,
   formatContent,
   parseToolCallsFromText,
   messagesToPrompt,
   openaiErrorBody,
+  normalizeStops,
+  applyStopAndMax,
+  createOutputLimiter,
 };

@@ -23,6 +23,7 @@ const { createCapture } = require('./capture');
 const { createAdminRouter } = require('./admin');
 const {
   estimateTokens, parseToolCallsFromText, messagesToPrompt, openaiErrorBody, formatContent,
+  normalizeStops, applyStopAndMax, createOutputLimiter,
 } = require('./translate');
 
 const app = express();
@@ -651,8 +652,16 @@ app.post('/v1/chat/completions', async (req, res) => {
     return sendError(res, 400, 'Parameter "n" must be 1 — multiple choices are not supported.', 'unsupported_parameter', 'n');
   }
   // Accepted-but-ignored sampling params are reported honestly, not dropped.
-  const ignoredParams = ['temperature', 'top_p', 'max_tokens', 'stop', 'presence_penalty', 'frequency_penalty']
+  // (max_tokens and stop are HONORED — see output shaping below — so they are
+  // no longer on this list.)
+  const ignoredParams = ['temperature', 'top_p', 'presence_penalty', 'frequency_penalty']
     .filter((p) => body[p] !== undefined && body[p] !== null);
+
+  // Output shaping the CLIs don't do themselves: stop sequences truncate the
+  // reply, max_tokens caps its length. Enforced post-hoc (see translate.js).
+  const maxTokens = Number.isInteger(body.max_tokens) && body.max_tokens > 0 ? body.max_tokens : null;
+  const stopSeqs = normalizeStops(body.stop);
+  const shapeOutput = Boolean(maxTokens || stopSeqs.length);
 
   if (!route) {
     record(400);
@@ -1003,15 +1012,25 @@ app.post('/v1/chat/completions', async (req, res) => {
       const HOLD_CAP = 2048;
       let holding = toolsProvided;
       let held = '';
+      // stop / max_tokens shaping for streamed content (not the tool path,
+      // where hold-back + parsing owns the bytes). Once the limiter is done,
+      // further deltas are dropped; the CLI is left to finish on its own.
+      const limiter = (shapeOutput && !toolsProvided) ? createOutputLimiter({ stop: stopSeqs, maxTokens }) : null;
+      const pushContent = (d) => {
+        if (!limiter) { pacer.push(d); return; }
+        if (limiter.done) return;
+        const emit = limiter.push(d);
+        if (emit) pacer.push(emit);
+      };
       const feed = (d) => {
         markFirstByte();
-        if (!holding) { pacer.push(d); return; }
+        if (!holding) { pushContent(d); return; }
         held += d;
         const head = held.trimStart();
         if (!head) return;
         if (!(head.startsWith('```') || head.startsWith('{')) || held.length > HOLD_CAP) {
           holding = false;
-          pacer.push(held);
+          pushContent(held);
           held = '';
         }
       };
@@ -1052,9 +1071,11 @@ app.post('/v1/chat/completions', async (req, res) => {
         } catch (_) { /* keep the original attempt; fall through to deliver held content */ }
       }
       if (holding && held && !detectedTools) {
-        pacer.push(held); // looked like JSON but wasn't a tool call — deliver it
+        pushContent(held); // looked like JSON but wasn't a tool call — deliver it
         held = '';
       }
+      // Release any tail the limiter held back for stop-boundary detection.
+      if (limiter && !limiter.done) { const tail = limiter.end(); if (tail) pacer.push(tail); }
       await pacer.drain();
       applyUsage(result);
       breakerFeedback();
@@ -1078,7 +1099,8 @@ app.post('/v1/chat/completions', async (req, res) => {
           }],
         })}\n\n`);
       } else {
-        res.write(`data: ${JSON.stringify({ ...chunkBase, ...finishExtra, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}\n\n`);
+        const fr = limiter && limiter.finishReason ? limiter.finishReason : 'stop';
+        res.write(`data: ${JSON.stringify({ ...chunkBase, ...finishExtra, choices: [{ index: 0, delta: {}, finish_reason: fr }] })}\n\n`);
       }
       if (body.stream_options && body.stream_options.include_usage) {
         res.write(`data: ${JSON.stringify({
@@ -1168,6 +1190,18 @@ app.post('/v1/chat/completions', async (req, res) => {
     // (claude only; agy returns no sessionId → no-op). Tool-call turns are
     // skipped — their assistant message shape complicates prefix matching.
     if (!detectedTools) continuity.remember(route.id, route.engine, sel.account.name, messages, text, result.sessionId);
+
+    // Honor stop / max_tokens on plain-text replies (skipped for tool calls
+    // and JSON mode, where truncation would corrupt the structured payload).
+    let finishReason = detectedTools ? 'tool_calls' : 'stop';
+    if (!detectedTools && !wantsJson && shapeOutput) {
+      const shaped = applyStopAndMax(text, { stop: stopSeqs, maxTokens });
+      if (shaped.truncated) {
+        text = shaped.text;
+        finishReason = shaped.finishReason;
+        estCompletionTokens = estimateTokens(text);
+      }
+    }
     const messageObj = detectedTools
       ? { role: 'assistant', content: null, tool_calls: detectedTools }
       : { role: 'assistant', content: text };
@@ -1181,7 +1215,7 @@ app.post('/v1/chat/completions', async (req, res) => {
         {
           index: 0,
           message: messageObj,
-          finish_reason: detectedTools ? 'tool_calls' : 'stop',
+          finish_reason: finishReason,
         },
       ],
       usage: {

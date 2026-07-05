@@ -140,6 +140,38 @@ async function main() {
     assert(small.size() === 2, 'LRU caps the store at max entries');
   }
 
+  // ── Output shaping (stop / max_tokens) — pure helpers ─────────────────
+  console.log('\n## translate.js — stop sequences + max_tokens');
+  {
+    const { normalizeStops, applyStopAndMax, createOutputLimiter } = require(path.join(REPO, 'packages', 'provider', 'translate.js'));
+    assert(JSON.stringify(normalizeStops('END')) === '["END"]', 'a string stop normalizes to a one-element array');
+    assert(normalizeStops(['a', '', 'b', 'c', 'd', 'e']).length === 4, 'stops are capped at 4 and empties dropped');
+    assert(normalizeStops(undefined).length === 0, 'no stop → empty');
+
+    let s = applyStopAndMax('hello STOP world', { stop: 'STOP' });
+    assert(s.text === 'hello ' && s.finishReason === 'stop' && s.truncated, 'stop truncates and removes the sequence');
+    s = applyStopAndMax('keep all of this', { stop: 'NOPE' });
+    assert(s.text === 'keep all of this' && !s.truncated, 'a stop that never appears leaves the text intact');
+    s = applyStopAndMax('a'.repeat(400), { maxTokens: 10 }); // 10 tokens ≈ 40 chars
+    assert(s.text.length === 40 && s.finishReason === 'length' && s.truncated, 'max_tokens caps length with finish_reason length');
+    s = applyStopAndMax('aaa STOP ' + 'b'.repeat(400), { stop: 'STOP', maxTokens: 100 });
+    assert(s.text === 'aaa ' && s.finishReason === 'stop', 'stop wins when it lands before the token cap');
+
+    // Streaming limiter: a stop sequence split across two chunks.
+    const lim = createOutputLimiter({ stop: 'END' });
+    let out = lim.push('hello E');   // holds back a possible 'E…' prefix
+    out += lim.push('ND of line');   // 'END' completes → cut before it
+    assert(out === 'hello ' && lim.done && lim.finishReason === 'stop', 'streaming limiter catches a stop spanning a chunk boundary');
+    // max_tokens across chunks stops mid-stream.
+    const lim2 = createOutputLimiter({ maxTokens: 5 }); // ~20 chars
+    let acc = lim2.push('x'.repeat(12));
+    acc += lim2.push('y'.repeat(30));
+    assert(acc.length === 20 && lim2.done && lim2.finishReason === 'length', 'streaming limiter enforces max_tokens across chunks');
+    // No limits → passthrough, never done.
+    const lim3 = createOutputLimiter({});
+    assert(lim3.push('anything') === 'anything' && !lim3.done, 'no limits → passthrough limiter');
+  }
+
   // ── Routes registry unit checks ─────────────────────────────────────
   console.log('\n## routes.js — validation + reload');
   const { validateRoutes, createRouteRegistry } = require(path.join(REPO, 'packages', 'provider', 'routes.js'));
@@ -686,11 +718,13 @@ async function main() {
   assert(r.status === 400 && errType(r) === 'unsupported_parameter', 'n=2 rejected 400 unsupported_parameter');
   r = await request(P1, {
     path: '/v1/chat/completions', method: 'POST',
-    body: { model: 'bridge-smart', temperature: 0.2, max_tokens: 100, messages: [{ role: 'user', content: 'x' }] },
+    body: { model: 'bridge-smart', temperature: 0.2, top_p: 0.9, max_tokens: 100, messages: [{ role: 'user', content: 'x' }] },
   });
   completion = JSON.parse(r.body || '{}');
-  assert(Array.isArray(completion.bridge_ignored_params) && completion.bridge_ignored_params.includes('temperature') && completion.bridge_ignored_params.includes('max_tokens'),
-    'ignored sampling params reported in bridge_ignored_params');
+  assert(Array.isArray(completion.bridge_ignored_params) && completion.bridge_ignored_params.includes('temperature') && completion.bridge_ignored_params.includes('top_p'),
+    'genuinely-ignored sampling params reported in bridge_ignored_params');
+  assert(!completion.bridge_ignored_params.includes('max_tokens'),
+    'max_tokens is honored now, not reported as ignored');
 
   console.log('\n## Phase 3 — include_usage + heartbeat');
   r = await request(P1, {
@@ -1965,6 +1999,62 @@ async function main() {
   const erinCookie = String(r.headers['set-cookie'] || '').split(';')[0];
   r = await request(P33, { path: '/me/usage.csv', headers: { Cookie: erinCookie } });
   assert(r.status === 200 && /text\/csv/.test(String(r.headers['content-type'])), '/me/usage.csv works for a signed-in user');
+
+  // ── max_tokens + stop sequences, end-to-end (chat completions) ──────────
+  console.log('\n## max_tokens + stop honored end-to-end');
+  const P34 = 19730;
+  const SHAPE_TXT = 'alpha keep STOPHERE beta gamma delta';
+  const CLAUDE_SHAPE = writeStub('claude-shape.sh', 'claude-sim', { FAKE_CLI_TEXT: SHAPE_TXT });
+  const CLAUDE_LONG = writeStub('claude-long.sh', 'claude-sim', { FAKE_CLI_TEXT: 'w'.repeat(400) });
+  await bootProvider(P34, { CLAUDE_PATH: CLAUDE_SHAPE, GEMINI_PATH: AGY_STUB, BRIDGE_ROUTES_FILE: (() => {
+    const f = path.join(TMP, 'routes-34.json');
+    const doc = JSON.parse(fs.readFileSync(path.join(REPO, 'packages', 'provider', 'routes.json'), 'utf8'));
+    for (const rt of doc.routes) { delete rt.overflowFallback; delete rt.quotaFallback; }
+    fs.writeFileSync(f, JSON.stringify(doc));
+    return f;
+  })() });
+
+  // Non-streaming: a stop sequence truncates and is removed; finish 'stop'.
+  r = await request(P34, {
+    path: '/v1/chat/completions', method: 'POST',
+    body: { model: 'bridge-claude-haiku-4.5-spark', stop: 'STOPHERE', messages: [{ role: 'user', content: 'x' }] },
+  });
+  {
+    const c = JSON.parse(r.body);
+    assert(r.status === 200 && c.choices[0].message.content === 'alpha keep ' && c.choices[0].finish_reason === 'stop',
+      `stop truncates the reply and sets finish_reason stop (got ${JSON.stringify(c.choices[0].message.content)})`);
+    assert(!(c.bridge_ignored_params || []).includes('stop'), 'stop is no longer reported as ignored');
+  }
+  // Non-streaming: max_tokens caps length; finish_reason 'length'.
+  await request(P34, { path: '/admin/breakers/claude/reset', method: 'POST' }).catch(() => {});
+  await bootProvider(P34 + 1, { CLAUDE_PATH: CLAUDE_LONG, GEMINI_PATH: AGY_STUB, BRIDGE_ROUTES_FILE: (() => {
+    const f = path.join(TMP, 'routes-34b.json');
+    const doc = JSON.parse(fs.readFileSync(path.join(REPO, 'packages', 'provider', 'routes.json'), 'utf8'));
+    for (const rt of doc.routes) { delete rt.overflowFallback; delete rt.quotaFallback; }
+    fs.writeFileSync(f, JSON.stringify(doc));
+    return f;
+  })() });
+  r = await request(P34 + 1, {
+    path: '/v1/chat/completions', method: 'POST',
+    body: { model: 'bridge-claude-haiku-4.5-spark', max_tokens: 5, messages: [{ role: 'user', content: 'x' }] },
+  });
+  {
+    const c = JSON.parse(r.body);
+    assert(r.status === 200 && c.choices[0].message.content.length === 20 && c.choices[0].finish_reason === 'length',
+      `max_tokens caps to ~5 tokens (20 chars) with finish_reason length (got len ${c.choices[0].message.content.length})`);
+  }
+  // Streaming: the stop sequence truncates the streamed content too.
+  r = await request(P34, {
+    path: '/v1/chat/completions', method: 'POST',
+    body: { model: 'bridge-claude-haiku-4.5-spark', stop: 'STOPHERE', stream: true, messages: [{ role: 'user', content: 'x' }] },
+  });
+  {
+    const chunks = parseSse(r.body);
+    const text = chunks.map((c) => (c.choices && c.choices[0] && c.choices[0].delta && c.choices[0].delta.content) || '').join('');
+    const finish = chunks.map((c) => c.choices && c.choices[0] && c.choices[0].finish_reason).filter(Boolean).pop();
+    assert(text === 'alpha keep ' && finish === 'stop', `streaming honors stop (got ${JSON.stringify(text)}, finish ${finish})`);
+    assert(!text.includes('STOPHERE'), 'the stop sequence itself never streams to the client');
+  }
 
   console.log(`\n# Result: ${passed} passed, ${failed} failed`);
   process.exit(failed === 0 ? 0 : 1);
