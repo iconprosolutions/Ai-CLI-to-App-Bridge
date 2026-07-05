@@ -1658,6 +1658,86 @@ async function main() {
     assert(pv === ' --help now', 'a raw prompt starting with "-" gets a protective leading space at the adapter');
   }
 
+  // ── Webhook alerting (notify.js) ─────────────────────────────────────────
+  console.log('\n## Webhook alerting — formats, cooldown, transitions, end-to-end');
+  {
+    const { createNotifier, detectFormat } = require(path.join(REPO, 'packages', 'provider', 'notify.js'));
+    assert(detectFormat('https://hooks.slack.com/services/T/B/x') === 'slack', 'slack URL auto-detected');
+    assert(detectFormat('https://discord.com/api/webhooks/1/x') === 'discord', 'discord URL auto-detected');
+    assert(detectFormat('https://ntfy.sh/my-topic') === 'ntfy', 'ntfy URL auto-detected');
+    assert(detectFormat('https://example.com/hook') === 'json', 'unknown URL falls back to json');
+
+    const calls = [];
+    const fakeFetch = (url, opts) => { calls.push({ url, opts }); return Promise.resolve({ ok: true }); };
+    const n = createNotifier({ url: 'https://hooks.slack.com/services/T/B/x', fetchImpl: fakeFetch, cooldownMs: 60000, logger: { warn: () => {} } });
+
+    n.handle('account.change', { kind: 'breaker', engine: 'claude', account: 'main', breaker: { state: 'open', reason: 'quota', retryInSec: 900 } });
+    assert(calls.length === 1 && JSON.parse(calls[0].opts.body).text.includes('claude:main breaker OPEN (quota)'),
+      'breaker open → slack {text} alert');
+    n.handle('account.change', { kind: 'breaker', engine: 'claude', account: 'main', breaker: { state: 'open', reason: 'quota' } });
+    assert(calls.length === 1, 'repeat open within cooldown is suppressed');
+    n.handle('account.change', { kind: 'breaker', engine: 'claude', account: 'main', breaker: { state: 'closed' } });
+    assert(calls.length === 2 && JSON.parse(calls[1].opts.body).text.includes('healthy again'), 'breaker recovery announced');
+    n.handle('account.change', { kind: 'needs-login', engine: 'gemini', account: 'work' });
+    assert(calls.length === 3 && JSON.parse(calls[2].opts.body).text.includes('gemini:work needs login'), 'needs-login alert');
+    n.handle('engine.health', { engine: 'claude', ok: true });
+    n.handle('engine.health', { engine: 'claude', ok: true });
+    assert(calls.length === 3, 'healthy baseline produces no alert');
+    n.handle('engine.health', { engine: 'claude', ok: false, detail: 'binary gone' });
+    assert(calls.length === 4 && JSON.parse(calls[3].opts.body).text.includes('health check failing'), 'ok→fail transition alerts');
+    n.handle('engine.health', { engine: 'claude', ok: false, detail: 'binary gone' });
+    assert(calls.length === 4, 'staying failed does not re-alert');
+    n.handle('engine.health', { engine: 'claude', ok: true });
+    assert(calls.length === 5 && JSON.parse(calls[4].opts.body).text.includes('healthy again'), 'fail→ok recovery alerts');
+    n.handle('engine.health', { engine: 'claude', disabled: true }); // admin toggle carries no ok field
+    assert(calls.length === 5, 'events without a boolean ok are ignored');
+    n.handle('budget.warning', { keyName: 'alice.app', reason: 'tokensPerDay', pct: 85, used: '85,000', limit: '100,000' });
+    assert(calls.length === 6 && JSON.parse(calls[5].opts.body).text.includes('85% of its tokensPerDay budget'), 'budget warning alert');
+
+    const off = createNotifier({ fetchImpl: fakeFetch });
+    off.handle('account.change', { kind: 'needs-login', engine: 'claude', account: 'x' });
+    assert(off.enabled === false && calls.length === 6, 'no URL → disabled, nothing posted');
+
+    const ntfy = [];
+    const n2 = createNotifier({ url: 'https://ntfy.sh/topic', fetchImpl: (u, o) => { ntfy.push(o); return Promise.resolve({ ok: true }); } });
+    n2.handle('account.change', { kind: 'needs-login', engine: 'claude', account: 'y' });
+    assert(ntfy.length === 1 && typeof ntfy[0].body === 'string' && !ntfy[0].body.startsWith('{') && ntfy[0].headers.Title,
+      'ntfy format posts plain text with a Title header');
+  }
+
+  // End-to-end: a real quota breaker-open reaches the webhook server.
+  {
+    const hits = [];
+    const hookSrv = http.createServer((req, res) => {
+      let b = '';
+      req.on('data', (c) => (b += c));
+      req.on('end', () => { hits.push(b); res.end('ok'); });
+    });
+    await new Promise((res) => hookSrv.listen(0, '127.0.0.1', res));
+    const hookPort = hookSrv.address().port;
+
+    const P30 = 19690;
+    const CLAUDE_Q30 = writeStub('claude-q30.sh', 'claude-sim', { FAKE_CLI_STDERR: 'Claude usage limit reached. Your limit will reset at 5pm.' });
+    await bootProvider(P30, {
+      CLAUDE_PATH: CLAUDE_Q30, GEMINI_PATH: AGY_STUB,
+      BRIDGE_WEBHOOK_URL: `http://127.0.0.1:${hookPort}/hook`,
+    });
+    for (let i = 0; i < 3; i += 1) {
+      await request(P30, {
+        path: '/v1/chat/completions', method: 'POST',
+        body: { model: 'bridge-smart', messages: [{ role: 'user', content: 'x' }] },
+      });
+    }
+    await new Promise((res) => setTimeout(res, 300));
+    assert(hits.length >= 1 && hits.some((h) => h.includes('breaker OPEN')),
+      `a real breaker-open POSTs to the webhook (got ${hits.length} hits)`);
+    {
+      const payload = JSON.parse(hits.find((h) => h.includes('breaker OPEN')));
+      assert(payload.source && payload.message && payload.at, 'generic json format carries source/message/at');
+    }
+    hookSrv.close();
+  }
+
   console.log(`\n# Result: ${passed} passed, ${failed} failed`);
   process.exit(failed === 0 ? 0 : 1);
 }

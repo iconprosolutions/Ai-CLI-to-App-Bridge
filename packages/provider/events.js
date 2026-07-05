@@ -5,6 +5,10 @@
 // EventSource reconnects automatically (retry hint below).
 function createEventBus({ pingMs = 15000 } = {}) {
   const clients = new Set();
+  // In-process listeners (webhook notifier, future consumers). Unlike SSE
+  // clients these always receive events — alerting must work precisely when
+  // no dashboard tab is watching.
+  const listeners = new Set();
 
   const ping = setInterval(() => {
     for (const res of clients) {
@@ -27,6 +31,9 @@ function createEventBus({ pingMs = 15000 } = {}) {
   }
 
   function emit(type, data) {
+    for (const fn of listeners) {
+      try { fn(type, data); } catch (_) { /* a listener must never break emit */ }
+    }
     if (!clients.size) return;
     const payload = `event: ${type}\ndata: ${JSON.stringify(data)}\n\n`;
     for (const res of clients) {
@@ -34,7 +41,12 @@ function createEventBus({ pingMs = 15000 } = {}) {
     }
   }
 
-  return { handler, emit, get clientCount() { return clients.size; } };
+  function on(fn) {
+    listeners.add(fn);
+    return () => listeners.delete(fn);
+  }
+
+  return { handler, emit, on, get clientCount() { return clients.size; } };
 }
 
 module.exports = { createEventBus };

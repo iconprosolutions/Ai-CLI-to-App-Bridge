@@ -145,6 +145,19 @@ const continuity = createContinuityStore({ formatContent });
 
 const events = createEventBus();
 const capture = createCapture({ max: 50 });
+
+// Operator alerting: pushes breaker-open / needs-login / health transitions /
+// budget warnings to a webhook (Slack/Discord/ntfy/JSON). No URL → disabled.
+const { createNotifier } = require('./notify');
+const notifier = createNotifier({
+  url: strEnv('BRIDGE_WEBHOOK_URL', ''),
+  format: strEnv('BRIDGE_WEBHOOK_FORMAT', ''),
+  cooldownMs: intEnv('BRIDGE_WEBHOOK_COOLDOWN_MS', 5 * 60 * 1000),
+});
+if (notifier.enabled) {
+  events.on(notifier.handle);
+  console.log(`[notify] webhook alerts enabled (format: ${notifier.format})`);
+}
 const activeRequests = new Map(); // reqId → {id, routeId, engine, appId, account, startedAt, streaming, ac, killedByAdmin}
 const enginesDisabled = {};
 for (const e of ENGINE_NAMES) enginesDisabled[e] = false;
@@ -424,6 +437,7 @@ app.get('/dashboard/status', dashboardGate, async (req, res) => {
     breakers: Object.fromEntries(ENGINE_NAMES.map((e) => [e, pool.engineBreakerStatus(e)])),
     accounts: accountsSnap,
     capture: { enabled: capture.enabled, count: capture.size },
+    notifications: { enabled: notifier.enabled, format: notifier.enabled ? notifier.format : null, ...notifier.stats() },
     activeRequests: [...activeRequests.values()].map((a) => ({
       id: a.id, routeId: a.routeId, engine: a.engine, appId: a.appId, startedAt: a.startedAt, streaming: a.streaming,
     })),
