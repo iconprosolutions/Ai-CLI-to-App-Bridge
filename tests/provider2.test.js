@@ -67,8 +67,16 @@ async function bootProvider(port, env) {
   // never read/migrate the real credentials.json — each boot gets its own file
   // (absent unless the test writes one, so auth is open by default as before).
   process.env.BRIDGE_USAGE_DIR = path.join(TMP, `usage-${port}`);
+  // The shipped catalogue declares cross-engine fallbacks (overflow/quota).
+  // Default boots strip them so error-path tests keep their no-fallback
+  // semantics; fallback behavior is tested by boots that pass their own
+  // BRIDGE_ROUTES_FILE (overflow: P22, quota: P31).
   const routesCopy = path.join(TMP, `routes-${port}.json`);
-  fs.copyFileSync(path.join(REPO, 'packages', 'provider', 'routes.json'), routesCopy);
+  {
+    const doc = JSON.parse(fs.readFileSync(path.join(REPO, 'packages', 'provider', 'routes.json'), 'utf8'));
+    for (const rt of doc.routes) { delete rt.overflowFallback; delete rt.quotaFallback; }
+    fs.writeFileSync(routesCopy, JSON.stringify(doc, null, 2));
+  }
   process.env.BRIDGE_ROUTES_FILE = routesCopy;
   process.env.BRIDGE_CREDENTIALS_FILE = path.join(TMP, `creds-${port}.json`);
   Object.assign(process.env, env);
@@ -154,6 +162,17 @@ async function main() {
   threw = false;
   try { validateRoutes({ defaultRoute: 'a', routes: [{ id: 'a', label: 'x', engine: 'gemini', model: 'm', overflowFallback: 'b' }, { id: 'b', label: 'y', engine: 'gemini', model: 'm' }] }); } catch (e) { threw = /overflowFallback/.test(e.message); }
   assert(threw, 'overflowFallback to the same engine rejected');
+  try {
+    validateRoutes({ defaultRoute: 'a', routes: [{ id: 'a', label: 'x', engine: 'claude', model: 'm', quotaFallback: 'b' }, { id: 'b', label: 'y', engine: 'gemini', model: 'm' }] });
+    threw = false;
+  } catch (_) { threw = true; }
+  assert(!threw, 'quotaFallback to a different engine accepted');
+  threw = false;
+  try { validateRoutes({ defaultRoute: 'a', routes: [{ id: 'a', label: 'x', engine: 'claude', model: 'm', quotaFallback: 'nope' }] }); } catch (e) { threw = /quotaFallback/.test(e.message); }
+  assert(threw, 'quotaFallback to a nonexistent route rejected');
+  threw = false;
+  try { validateRoutes({ defaultRoute: 'a', routes: [{ id: 'a', label: 'x', engine: 'claude', model: 'm', quotaFallback: 'b' }, { id: 'b', label: 'y', engine: 'claude', model: 'm' }] }); } catch (e) { threw = /quotaFallback/.test(e.message); }
+  assert(threw, 'quotaFallback to the same engine rejected');
   const routesFile = path.join(TMP, 'routes.json');
   fs.writeFileSync(routesFile, JSON.stringify({ defaultRoute: 'r1', routes: [{ id: 'r1', label: 'R1', engine: 'claude', model: 'm1', aliases: ['fast'] }] }));
   const reg = createRouteRegistry(routesFile, { watch: false, logger: { log: () => {}, error: () => {} } });
@@ -1736,6 +1755,75 @@ async function main() {
       assert(payload.source && payload.message && payload.at, 'generic json format carries source/message/at');
     }
     hookSrv.close();
+  }
+
+  // ── Cross-model failover (quotaFallback): claude exhausted → gemini ─────
+  console.log('\n## Cross-model failover — quotaFallback engine reroute');
+  const P31 = 19700;
+  const CM_ROUTES = path.join(TMP, 'cm-routes.json');
+  fs.writeFileSync(CM_ROUTES, JSON.stringify({
+    defaultRoute: 'cm-claude',
+    routes: [
+      { id: 'cm-claude', label: 'CM Claude', engine: 'claude', model: 'claude-x', quotaFallback: 'cm-gem' },
+      { id: 'cm-gem', label: 'CM Gemini', engine: 'gemini', model: 'Gemini 3.5 Flash (Medium)' },
+      { id: 'cm-claude-nofb', label: 'CM Claude NoFB', engine: 'claude', model: 'claude-x' },
+      { id: 'cm-claude-pin', label: 'CM Claude Pinned', engine: 'claude', model: 'claude-x', account: 'default', quotaFallback: 'cm-gem' },
+    ],
+  }));
+  const CLAUDE_Q31 = writeStub('claude-q31.sh', 'claude-sim', { FAKE_CLI_STDERR: 'Claude usage limit reached. Your limit will reset at 5pm.' });
+  await bootProvider(P31, { CLAUDE_PATH: CLAUDE_Q31, GEMINI_PATH: AGY_STUB, BRIDGE_ROUTES_FILE: CM_ROUTES });
+
+  // 1. Streaming request, quota fails pre-first-byte → mid-request engine
+  //    reroute; the gemini reply streams and the marker rides a chunk.
+  r = await request(P31, {
+    path: '/v1/chat/completions', method: 'POST',
+    body: { model: 'cm-claude', stream: true, messages: [{ role: 'user', content: 'hello stream' }] },
+  });
+  {
+    const chunks = parseSse(r.body);
+    const text = chunks.map((c) => (c.choices && c.choices[0] && c.choices[0].delta && c.choices[0].delta.content) || '').join('');
+    assert(r.status === 200 && text.includes('[gemini]'), 'streamed request moves engines mid-request and delivers the gemini reply');
+    assert(chunks.some((c) => c.bridge_rerouted && c.bridge_rerouted.reason === 'engine_exhausted' && c.bridge_rerouted.to === 'cm-gem'),
+      'stream carries the bridge_rerouted engine_exhausted marker');
+  }
+
+  // 2. Non-streaming: served by gemini with the reroute marked.
+  r = await request(P31, {
+    path: '/v1/chat/completions', method: 'POST',
+    body: { model: 'cm-claude', messages: [{ role: 'user', content: 'hello again' }] },
+  });
+  {
+    const c = JSON.parse(r.body);
+    assert(r.status === 200 && c.choices[0].message.content.includes('[gemini]'),
+      'non-streaming request is served by the fallback engine');
+    assert(c.bridge_rerouted && c.bridge_rerouted.from === 'cm-claude' && c.bridge_rerouted.reason === 'engine_exhausted',
+      'completion carries bridge_rerouted from/reason');
+  }
+
+  // 3. By now the claude breaker is open → the reroute happens pre-dispatch
+  //    (no doomed claude spawn) and still serves.
+  r = await request(P31, {
+    path: '/v1/chat/completions', method: 'POST',
+    body: { model: 'cm-claude', messages: [{ role: 'user', content: 'third time' }] },
+  });
+  assert(r.status === 200 && JSON.parse(r.body).bridge_rerouted, 'breaker-open route reroutes pre-dispatch (no claude spawn)');
+
+  // 4. No quotaFallback declared → the honest 429 stands.
+  r = await request(P31, {
+    path: '/v1/chat/completions', method: 'POST',
+    body: { model: 'cm-claude-nofb', messages: [{ role: 'user', content: 'x' }] },
+  });
+  assert(r.status === 429 && errType(r) === 'rate_limit_error', 'route without quotaFallback still fails 429 (no silent engine switch)');
+
+  // 5. Hard-pinned route never moves engines — it fails loud.
+  r = await request(P31, {
+    path: '/v1/chat/completions', method: 'POST',
+    body: { model: 'cm-claude-pin', messages: [{ role: 'user', content: 'x' }] },
+  });
+  {
+    let body31 = {};
+    try { body31 = JSON.parse(r.body); } catch (_) { /* empty */ }
+    assert(r.status === 429 && !body31.bridge_rerouted, `hard-pinned route fails loud, never reroutes (got ${r.status})`);
   }
 
   console.log(`\n# Result: ${passed} passed, ${failed} failed`);

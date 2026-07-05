@@ -686,12 +686,30 @@ app.post('/v1/chat/completions', async (req, res) => {
   const pinMode = (keyPin && pin === keyPin && req.auth.pinMode === 'soft') ? 'soft' : 'hard';
   let sel = pool.select(route.engine, { pin, pinMode });
   if (!sel.ok) {
-    record(sel.status);
-    return sendError(res, sel.status, sel.message, sel.status === 429 ? 'rate_limit_error' : 'engine_auth_error', null, sel.retryInSec);
+    // Cross-model failover before spawning anything: the engine's whole pool
+    // is exhausted (429: all cooling down) or out of service (503: all
+    // disabled/logged out) and the route declares a different-engine
+    // fallback → move the request instead of bouncing the caller. Hard pins
+    // fail loud as ever; the fallback engine must also fit the prompt.
+    const fb = (!pin || pinMode === 'soft') && route.quotaFallback ? registry.resolve(route.quotaFallback) : null;
+    if (fb && fb.enabled !== false && !enginesDisabled[fb.engine]
+      && Buffer.byteLength(prompt, 'utf8') <= engineCap(fb.engine)) {
+      const alt = pool.select(fb.engine, {});
+      if (alt.ok) {
+        rerouted = { from: route.id, to: fb.id, reason: 'engine_exhausted' };
+        console.log(`[req ${reqId}] ${route.engine} pool unavailable (${sel.status}) → cross-model reroute ${route.id} → ${fb.id}`);
+        route = fb;
+        sel = alt;
+      }
+    }
+    if (!sel.ok) {
+      record(sel.status);
+      return sendError(res, sel.status, sel.message, sel.status === 429 ? 'rate_limit_error' : 'engine_auth_error', null, sel.retryInSec);
+    }
   }
   accountName = sel.account.name;
 
-  const adapter = adapters[route.engine];
+  let adapter = adapters[route.engine];
   const ac = new AbortController();
   let activePacer = null;
   let clientAborted = false;
@@ -792,6 +810,30 @@ app.post('/v1/chat/completions', async (req, res) => {
             console.log(`[req ${reqId}] failover ${route.engine} → account ${sel.account.name} (${kind})`);
             // The new account has no session → always the full prompt, no resume.
             return adapter.invoke({ prompt: fullPrompt, model: route.model, signal: ac.signal, onDelta, env: pool.envFor(route.engine, sel.account) });
+          }
+          // Same engine fully exhausted mid-request → cross-model failover
+          // (quota-shaped failures only: an auth/spawn error on one engine is
+          // no reason to burn the other engine's quota). Nothing has streamed
+          // (canFailover), so the whole request can move engines.
+          const fb = kind === 'quota' && route.quotaFallback ? registry.resolve(route.quotaFallback) : null;
+          if (fb && fb.enabled !== false && !enginesDisabled[fb.engine]
+            && Buffer.byteLength(fullPrompt, 'utf8') <= engineCap(fb.engine)) {
+            const alt = pool.select(fb.engine, {});
+            if (alt.ok) {
+              release();
+              release = await alt.account.semaphore.acquire(ac.signal);
+              sel = alt;
+              rerouted = { from: route.id, to: fb.id, reason: 'engine_exhausted' };
+              route = fb;
+              adapter = adapters[fb.engine];
+              accountName = sel.account.name;
+              active.account = sel.account.name;
+              active.engine = fb.engine;
+              active.routeId = fb.id;
+              if (onFailover) onFailover();
+              console.log(`[req ${reqId}] cross-model failover → ${fb.id} (${fb.engine})`);
+              return adapter.invoke({ prompt: fullPrompt, model: route.model, signal: ac.signal, onDelta, env: pool.envFor(route.engine, sel.account) });
+            }
           }
         }
         throw err;
@@ -954,9 +996,13 @@ app.post('/v1/chat/completions', async (req, res) => {
       // only — result.sessionId is undefined for agy, making this a no-op).
       if (!detectedTools) continuity.remember(route.id, route.engine, sel.account.name, messages, result.text, result.sessionId);
 
+      // A mid-request cross-model reroute happens after the first chunk went
+      // out, so the marker rides the finish chunk as well.
+      const finishExtra = rerouted ? { bridge_rerouted: rerouted } : {};
       if (detectedTools) {
         res.write(`data: ${JSON.stringify({
           ...chunkBase,
+          ...finishExtra,
           choices: [{
             index: 0,
             delta: { tool_calls: detectedTools.map((tc, i) => ({ index: i, ...tc })) },
@@ -964,7 +1010,7 @@ app.post('/v1/chat/completions', async (req, res) => {
           }],
         })}\n\n`);
       } else {
-        res.write(`data: ${JSON.stringify({ ...chunkBase, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}\n\n`);
+        res.write(`data: ${JSON.stringify({ ...chunkBase, ...finishExtra, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}\n\n`);
       }
       if (body.stream_options && body.stream_options.include_usage) {
         res.write(`data: ${JSON.stringify({
