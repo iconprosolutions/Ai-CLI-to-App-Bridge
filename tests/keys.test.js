@@ -149,6 +149,44 @@ function run() {
     assert(list.every((k) => k.name && k.role && k.createdAt && !('key' in k)), 'list rows carry name/role/createdAt only');
   }
 
+  // (7b) expiry: expired keys stop verifying; setExpiry sets/clears.
+  {
+    const dir = tmp();
+    const file = path.join(dir, 'credentials.json');
+    fs.writeFileSync(file, JSON.stringify({ apiKey: 'admin-key-value' }));
+    const store = createKeyStore({ file });
+    const live = store.mint({ name: 'soon', role: 'app', expiresInDays: 7 });
+    assert(store.verify(live.key) && /Z$/.test(live.expiresAt), 'mint with expiresInDays sets a future expiry and still verifies');
+    const dead = store.mint({ name: 'past', role: 'app', expiresAt: '2000-01-01T00:00:00Z' });
+    assert(store.verify(dead.key) === null, 'a key past its expiresAt does not verify');
+    assert(store.list().find((k) => k.name === 'past').expired === true, 'list marks an expired key');
+    store.setExpiry('past', null);
+    assert(store.verify(dead.key) && !store.list().find((k) => k.name === 'past').expiresAt, 'clearing expiry revives the key');
+    throws(() => store.mint({ name: 'bad', role: 'app', expiresInDays: -3 }), /expiresInDays/, 'negative expiresInDays rejected');
+  }
+
+  // (7c) rotate: new secret verifies, old dies; graceDays parks the old under
+  // a shadow name that still works until it expires.
+  {
+    const dir = tmp();
+    const file = path.join(dir, 'credentials.json');
+    fs.writeFileSync(file, JSON.stringify({ apiKey: 'admin-key-value' }));
+    const store = createKeyStore({ file });
+    const orig = store.mint({ name: 'app1', role: 'app', accountPin: { gemini: 'main' }, limits: { rpm: 5 } });
+    const rot = store.rotate('app1');
+    assert(rot.key !== orig.key && store.verify(rot.key), 'rotate issues a working new secret');
+    assert(store.verify(orig.key) === null, 'the old secret stops verifying after an instant rotate');
+    assert(store.verify(rot.key).accountPin.gemini === 'main' && store.verify(rot.key).limits.rpm === 5,
+      'rotate preserves pins and limits');
+    // With grace, the old secret keeps working under a shadow record.
+    const orig2 = store.mint({ name: 'app2', role: 'app' });
+    const rot2 = store.rotate('app2', { graceDays: 3 });
+    assert(store.verify(rot2.key) && store.verify(orig2.key), 'graceDays keeps the old secret alive during rollover');
+    const shadow = store.list().find((k) => k.name === 'app2.rotated');
+    assert(shadow && /Z$/.test(shadow.expiresAt), 'the grace window is a shadow record with an expiry');
+    throws(() => store.rotate('nope'), /unknown/i, 'rotating an unknown key rejected');
+  }
+
   // (8) loadAndMigrate + bootstrapCredentialsFile helpers.
   {
     const dir = tmp();

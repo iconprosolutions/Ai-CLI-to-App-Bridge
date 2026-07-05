@@ -1826,6 +1826,80 @@ async function main() {
     assert(r.status === 429 && !body31.bridge_rerouted, `hard-pinned route fails loud, never reroutes (got ${r.status})`);
   }
 
+  // ── API key expiry + rotation (end-to-end) ──────────────────────────────
+  console.log('\n## API key expiry + rotation');
+  const P32 = 19710;
+  const DIR32 = path.join(TMP, 'p32');
+  fs.mkdirSync(DIR32, { recursive: true });
+  const CREDS32 = path.join(DIR32, 'creds.json');
+  const ADMIN32 = '7'.repeat(48);
+  fs.writeFileSync(CREDS32, JSON.stringify({
+    version: 3, keys: [{ name: 'admin', role: 'admin', keyHash: sha256(ADMIN32), createdAt: '2026-01-01T00:00:00Z' }],
+  }));
+  await bootProvider(P32, {
+    CLAUDE_PATH: CLAUDE_KEYS, GEMINI_PATH: AGY_ACCT, BRIDGE_CREDENTIALS_FILE: CREDS32,
+    BRIDGE_USERS_FILE: path.join(DIR32, 'users.json'), BRIDGE_SESSIONS_FILE: path.join(DIR32, 'sessions.json'),
+    BRIDGE_ACCOUNTS_FILE: path.join(DIR32, 'accounts.json'),
+  });
+  const chat32 = (key) => request(P32, {
+    path: '/v1/chat/completions', method: 'POST', headers: { Authorization: `Bearer ${key}` },
+    body: { model: 'bridge-claude-haiku-4.5-spark', messages: [{ role: 'user', content: 'x' }] },
+  });
+
+  // Mint an already-expired key → it never authorizes.
+  r = await request(P32, {
+    path: '/admin/keys', method: 'POST', headers: { Authorization: `Bearer ${ADMIN32}` },
+    body: { name: 'expired', role: 'app', expiresAt: '2000-01-01T00:00:00Z' },
+  });
+  const expiredKey = JSON.parse(r.body).key;
+  assert(r.status === 200 && JSON.parse(r.body).expiresAt, 'admin mints a key with an expiry');
+  r = await chat32(expiredKey);
+  assert(r.status === 401, 'an expired key is refused at /v1');
+
+  // Mint a live key, use it, rotate it → old dies, new works.
+  r = await request(P32, {
+    path: '/admin/keys', method: 'POST', headers: { Authorization: `Bearer ${ADMIN32}` },
+    body: { name: 'rotate-me', role: 'app' },
+  });
+  const k1 = JSON.parse(r.body).key;
+  assert((await chat32(k1)).status === 200, 'a fresh key authorizes /v1');
+  r = await request(P32, {
+    path: '/admin/keys/rotate-me/rotate', method: 'POST', headers: { Authorization: `Bearer ${ADMIN32}` }, body: {},
+  });
+  const k2 = JSON.parse(r.body).key;
+  assert(r.status === 200 && k2 && k2 !== k1, 'rotate returns a new secret');
+  assert((await chat32(k1)).status === 401, 'the pre-rotation secret is dead');
+  assert((await chat32(k2)).status === 200, 'the rotated secret works');
+
+  // Grace rotation keeps the old secret alive under a shadow key.
+  r = await request(P32, {
+    path: '/admin/keys', method: 'POST', headers: { Authorization: `Bearer ${ADMIN32}` }, body: { name: 'grace-me', role: 'app' },
+  });
+  const g1 = JSON.parse(r.body).key;
+  r = await request(P32, {
+    path: '/admin/keys/grace-me/rotate', method: 'POST', headers: { Authorization: `Bearer ${ADMIN32}` }, body: { graceDays: 3 },
+  });
+  const g2 = JSON.parse(r.body).key;
+  assert((await chat32(g1)).status === 200 && (await chat32(g2)).status === 200, 'grace rotation: both old and new secrets work during the window');
+  r = await request(P32, { path: '/admin/keys', headers: { Authorization: `Bearer ${ADMIN32}` } });
+  assert((JSON.parse(r.body).keys || []).some((k) => k.name === 'grace-me.rotated' && k.expiresAt), 'the grace window shows as a shadow key with an expiry');
+
+  // Owner self-service rotation.
+  r = await request(P32, {
+    path: '/admin/users', method: 'POST', headers: { Authorization: `Bearer ${ADMIN32}` },
+    body: { username: 'dave', password: 'davepass123', role: 'user' },
+  });
+  r = await request(P32, { path: '/auth/login', method: 'POST', body: { username: 'dave', password: 'davepass123' } });
+  const daveCookie = String(r.headers['set-cookie'] || '').split(';')[0];
+  r = await request(P32, { path: '/me/keys', method: 'POST', headers: { Cookie: daveCookie }, body: { app: 'cli' } });
+  const dk1 = JSON.parse(r.body).key;
+  r = await request(P32, { path: '/me/keys/dave.cli/rotate', method: 'POST', headers: { Cookie: daveCookie }, body: {} });
+  const dk2 = JSON.parse(r.body).key;
+  assert(r.status === 200 && dk2 !== dk1, 'owner rotates their own key');
+  assert((await chat32(dk1)).status === 401 && (await chat32(dk2)).status === 200, "owner's old secret dies, new one works");
+  r = await request(P32, { path: '/me/keys/admin/rotate', method: 'POST', headers: { Cookie: daveCookie }, body: {} });
+  assert(r.status === 403, "a user can't rotate a key they don't own");
+
   console.log(`\n# Result: ${passed} passed, ${failed} failed`);
   process.exit(failed === 0 ? 0 : 1);
 }

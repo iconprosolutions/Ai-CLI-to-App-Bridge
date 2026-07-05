@@ -189,23 +189,46 @@ function createAdminRouter({
   router.post('/keys', (req, res) => {
     const body = req.body || {};
     try {
-      const rec = keyStore.mint({ name: body.name, role: body.role, accountPin: body.accountPin, limits: body.limits, pinMode: body.pinMode });
+      const rec = keyStore.mint({
+        name: body.name, role: body.role, accountPin: body.accountPin, limits: body.limits, pinMode: body.pinMode,
+        expiresAt: body.expiresAt, expiresInDays: body.expiresInDays,
+      });
       events.emit('keys.change', { action: 'mint', name: rec.name, role: rec.role });
       return res.json({
-        name: rec.name, role: rec.role, accountPin: rec.accountPin || null, pinMode: rec.pinMode || null, limits: rec.limits || null, createdAt: rec.createdAt, key: rec.key,
+        name: rec.name, role: rec.role, accountPin: rec.accountPin || null, pinMode: rec.pinMode || null, limits: rec.limits || null, expiresAt: rec.expiresAt || null, createdAt: rec.createdAt, key: rec.key,
       });
     } catch (err) {
       return res.status(400).json({ error: err.message });
     }
   });
 
-  // Update a key's limits (body: { limits: { rpm?, tokensPerDay?, usdPerMonth? } };
-  // null/{} clears them). Secret and role are immutable — revoke + re-mint.
+  // Update a key's limits and/or expiry (body: { limits?, expiresAt? }; a null
+  // or '' value clears that field). Secret and role are immutable — rotate or
+  // revoke+re-mint for those.
   router.patch('/keys/:name', (req, res) => {
+    const body = req.body || {};
     try {
-      const rec = keyStore.setLimits(req.params.name, (req.body || {}).limits);
-      events.emit('keys.change', { action: 'limits', name: rec.name });
+      let rec;
+      if ('limits' in body) rec = keyStore.setLimits(req.params.name, body.limits);
+      if ('expiresAt' in body) rec = keyStore.setExpiry(req.params.name, body.expiresAt);
+      if (!rec) return res.status(400).json({ error: 'Nothing to update — send "limits" and/or "expiresAt".' });
+      events.emit('keys.change', { action: 'update', name: rec.name });
       return res.json(rec);
+    } catch (err) {
+      return res.status(400).json({ error: err.message });
+    }
+  });
+
+  // Rotate a key's secret in place (keeps name/role/owner/pins/limits). Body
+  // may carry { graceDays } to keep the old secret alive under a shadow name
+  // during a rollover, and { expiresInDays } to set the new secret's expiry.
+  // Returns the new secret exactly once.
+  router.post('/keys/:name/rotate', (req, res) => {
+    const body = req.body || {};
+    try {
+      const rec = keyStore.rotate(req.params.name, { graceDays: body.graceDays, expiresInDays: body.expiresInDays });
+      events.emit('keys.change', { action: 'rotate', name: rec.name });
+      return res.json({ name: rec.name, role: rec.role, expiresAt: rec.expiresAt || null, rotatedAt: rec.rotatedAt || null, key: rec.key });
     } catch (err) {
       return res.status(400).json({ error: err.message });
     }

@@ -360,6 +360,23 @@ app.delete('/me/keys/:name', (req, res) => {
   }
 });
 
+// Owners can rotate their own key's secret (a leaked key → new secret without
+// losing the key's name/limits/history). Body may carry { graceDays }.
+app.post('/me/keys/:name/rotate', (req, res) => {
+  const user = requireSession(req, res);
+  if (!user) return;
+  if (keyStore.ownerOf(req.params.name) !== user.username) {
+    return res.status(403).json({ error: 'That key is not yours.' });
+  }
+  try {
+    const rec = keyStore.rotate(req.params.name, { graceDays: (req.body || {}).graceDays });
+    events.emit('keys.change', { action: 'rotate', name: rec.name });
+    return res.json({ name: rec.name, key: rec.key, expiresAt: rec.expiresAt || null, rotatedAt: rec.rotatedAt || null });
+  } catch (err) {
+    return res.status(400).json({ error: err.message });
+  }
+});
+
 app.get('/me/usage', async (req, res) => {
   const user = requireSession(req, res);
   if (!user) return;

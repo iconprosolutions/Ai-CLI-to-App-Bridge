@@ -84,6 +84,20 @@ function validateLimits(l) {
   return Object.keys(out).length ? out : undefined;
 }
 
+// Optional expiry: an ISO-8601 instant after which verify() rejects the key.
+// Accepts an ISO string, an epoch-ms number, or { expiresInDays: N } sugar.
+function validateExpiry(exp) {
+  if (exp === undefined || exp === null || exp === '') return undefined;
+  if (typeof exp === 'object' && exp.expiresInDays !== undefined) {
+    const n = Number(exp.expiresInDays);
+    if (!Number.isFinite(n) || n <= 0) throw new Error('expiresInDays must be a number > 0');
+    return new Date(Date.now() + n * 24 * 3600 * 1000).toISOString();
+  }
+  const ms = typeof exp === 'number' ? exp : Date.parse(exp);
+  if (!Number.isFinite(ms)) throw new Error('expiresAt must be an ISO-8601 date, epoch ms, or {expiresInDays}');
+  return new Date(ms).toISOString();
+}
+
 function validateKeyRecord(k) {
   if (!k || typeof k.name !== 'string' || !NAME_RE.test(k.name)) {
     throw new Error(`credentials.json: every key needs a name matching ${NAME_RE}`);
@@ -97,6 +111,9 @@ function validateKeyRecord(k) {
   validateAccountPin(k.accountPin);
   validateLimits(k.limits);
   validatePinMode(k.pinMode);
+  if (k.expiresAt !== undefined && !Number.isFinite(Date.parse(k.expiresAt))) {
+    throw new Error(`credentials.json: key "${k.name}" has an invalid expiresAt`);
+  }
   if (k.owner !== undefined && (typeof k.owner !== 'string' || !k.owner)) {
     throw new Error(`credentials.json: key "${k.name}" has an invalid owner`);
   }
@@ -195,6 +212,9 @@ function createKeyStore({ file, envKey = '' } = {}) {
       if (a.length === b.length && crypto.timingSafeEqual(a, b)) match = rec;
     }
     if (!match) return null;
+    // An expired key stops authorizing — same as revoked, but self-acting so
+    // rotation windows and time-boxed keys don't need a manual sweep.
+    if (match.expiresAt && Date.parse(match.expiresAt) <= Date.now()) return null;
     return {
       name: match.name,
       role: match.role,
@@ -202,6 +222,7 @@ function createKeyStore({ file, envKey = '' } = {}) {
       accountPin: match.accountPin ? { ...match.accountPin } : undefined,
       pinMode: match.pinMode || undefined,
       limits: match.limits ? { ...match.limits } : undefined,
+      expiresAt: match.expiresAt || undefined,
     };
   }
 
@@ -213,6 +234,8 @@ function createKeyStore({ file, envKey = '' } = {}) {
     pinMode: k.pinMode || undefined,
     limits: k.limits ? { ...k.limits } : undefined,
     createdAt: k.createdAt,
+    expiresAt: k.expiresAt || undefined,
+    expired: k.expiresAt ? Date.parse(k.expiresAt) <= Date.now() : undefined,
   });
 
   function list() {
@@ -229,7 +252,7 @@ function createKeyStore({ file, envKey = '' } = {}) {
     return rec ? (rec.owner || null) : null;
   }
 
-  function mint({ name, role = 'app', accountPin, limits, owner, pinMode } = {}) {
+  function mint({ name, role = 'app', accountPin, limits, owner, pinMode, expiresAt, expiresInDays } = {}) {
     if (typeof name !== 'string' || !NAME_RE.test(name)) {
       throw new Error(`Key name must match ${NAME_RE}`);
     }
@@ -239,15 +262,56 @@ function createKeyStore({ file, envKey = '' } = {}) {
     const pin = validateAccountPin(accountPin);
     const lim = validateLimits(limits);
     const mode = validatePinMode(pinMode);
+    const exp = validateExpiry(expiresInDays !== undefined ? { expiresInDays } : expiresAt);
     const secret = newSecret();
     const rec = { name, role, keyHash: hashSecret(secret), createdAt: nowIso() };
     if (owner) rec.owner = String(owner);
     if (pin) rec.accountPin = pin;
     if (pin && mode) rec.pinMode = mode;
     if (lim) rec.limits = lim;
+    if (exp) rec.expiresAt = exp;
     data.keys.push(rec);
     writeAtomic(file, { version: 3, keys: data.keys });
     // The one and only time the secret exists in the clear.
+    return { ...publicKey(rec), key: presentKey(secret) };
+  }
+
+  // Set/clear a key's expiry (pass null/'' to clear). Accepts the same forms
+  // as mint (ISO string, epoch ms, or { expiresInDays }).
+  function setExpiry(name, expiresAt) {
+    const rec = data.keys.find((k) => k.name === name);
+    if (!rec) throw new Error(`Unknown key "${name}"`);
+    const exp = validateExpiry(expiresAt);
+    if (exp) rec.expiresAt = exp; else delete rec.expiresAt;
+    writeAtomic(file, { version: 3, keys: data.keys });
+    return publicKey(rec);
+  }
+
+  // Rotate: issue a fresh secret for an existing key, keeping its name, role,
+  // owner, pins and limits. The old secret stops verifying immediately. An
+  // optional grace (graceDays) leaves the old secret valid a while longer by
+  // parking it under a shadow name so both work during a rollover; without a
+  // grace the swap is instant. Returns the new secret exactly once.
+  function rotate(name, { expiresInDays, graceDays } = {}) {
+    const rec = data.keys.find((k) => k.name === name);
+    if (!rec) throw new Error(`Unknown key "${name}"`);
+    if (name === 'env') throw new Error('The env key cannot be rotated');
+    if (graceDays !== undefined) {
+      const g = Number(graceDays);
+      if (!Number.isFinite(g) || g <= 0) throw new Error('graceDays must be a number > 0');
+      // Park the OLD secret (current hash) under a shadow name that expires
+      // after the grace window; the primary name gets the new secret.
+      let shadow = `${name}.rotated`;
+      for (let i = 2; data.keys.some((k) => k.name === shadow); i += 1) shadow = `${name}.rotated${i}`;
+      if (!NAME_RE.test(shadow)) throw new Error('Cannot derive a valid shadow name for the grace window');
+      const parked = { ...rec, name: shadow, expiresAt: new Date(Date.now() + g * 24 * 3600 * 1000).toISOString() };
+      data.keys.push(parked);
+    }
+    const secret = newSecret();
+    rec.keyHash = hashSecret(secret);
+    rec.rotatedAt = nowIso();
+    if (expiresInDays !== undefined) rec.expiresAt = validateExpiry({ expiresInDays });
+    writeAtomic(file, { version: 3, keys: data.keys });
     return { ...publicKey(rec), key: presentKey(secret) };
   }
 
@@ -294,6 +358,8 @@ function createKeyStore({ file, envKey = '' } = {}) {
     revoke,
     setLimits,
     setAccountPin,
+    setExpiry,
+    rotate,
     get authEnabled() { return data.keys.length > 0 || Boolean(envRecord); },
     file,
   };
