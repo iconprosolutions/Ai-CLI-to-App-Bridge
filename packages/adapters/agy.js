@@ -70,7 +70,12 @@ function createAgyAdapter(opts = {}) {
           `Prompt too large for the Antigravity (Gemini) CLI: ${promptBytes} bytes exceeds the ${maxPromptBytes}-byte cap (agy passes the prompt as a command-line argument, so ARG_MAX applies). Remedies: send this request to a Claude route (uses stdin, no cap), shorten the conversation history, or enable session continuity so only new turns are sent.`,
           { code: 'prompt_overflow' });
       }
-      const args = ['--print', prompt, '--model', selected, '--print-timeout', `${Math.ceil(timeoutMs / 1000)}s`];
+      // Flag-injection guard: agy takes the prompt as the value of --print, so
+      // it occupies one argv slot and can't add flags. But a prompt that
+      // *starts* with '-' can be misread as an option by the CLI's parser — a
+      // leading space (invisible to the model) keeps it a plain value.
+      const safePrompt = /^\s*-/.test(prompt || '') ? ` ${prompt}` : (prompt || '');
+      const args = ['--print', safePrompt, '--model', selected, '--print-timeout', `${Math.ceil(timeoutMs / 1000)}s`];
       const ansi = createAnsiStripper();
       const run = await runCli(bin, args, {
         signal,

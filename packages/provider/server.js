@@ -69,7 +69,11 @@ app.use((req, res, next) => {
   if (host && expected && host === expected) return next();
   return res.status(403).json({ error: 'Cross-origin request refused.' });
 });
-app.use(express.json({ limit: '10mb' }));
+// Body-size limits: /v1 carries whole conversations (large), everything else
+// is small control-plane JSON. A tight cap off /v1 shrinks the memory a flood
+// of junk POSTs can pin, and oversized bodies get a clean 400 (handler below).
+app.use('/v1', express.json({ limit: intEnv('MAX_BODY_BYTES_V1', 10 * 1024 * 1024) }));
+app.use(express.json({ limit: intEnv('MAX_BODY_BYTES', 256 * 1024) }));
 
 const PORT = intEnv('PROVIDER_PORT', 9011);
 // Bind to loopback by default; opt in to 0.0.0.0 only when you mean to expose it.
@@ -357,17 +361,27 @@ app.get('/me/usage', async (req, res) => {
 // headers). The static UI files stay public; they contain no data. Set this
 // before exposing the port through a Cloudflare tunnel / reverse proxy.
 const DASHBOARD_AUTH = process.env.DASHBOARD_AUTH === '1';
-function dashboardGate(req, res, next) {
-  if (!DASHBOARD_AUTH || !keyStore.authEnabled) return next();
-  const su = sessionUser(req);
-  if (su && su.role === 'admin') return next(); // logged-in admin
-  const token = (req.headers.authorization || '').replace(/^Bearer\s+/i, '') || String(req.query.key || '');
-  const who = keyStore.verify(token);
-  if (!who || who.role !== 'admin') {
-    return res.status(401).json({ error: 'Dashboard auth is enabled — sign in as an admin, or pass an admin key (Authorization: Bearer <key> or ?key=<key>).' });
-  }
-  return next();
+// A URL query key ends up in access logs, proxy caches, and browser history,
+// so we only honor ?key= where a header is impossible — the EventSource (SSE)
+// stream. Every other gated endpoint requires the Authorization header (or an
+// admin session cookie).
+function makeDashboardGate({ allowQueryKey = false } = {}) {
+  return function dashboardGate(req, res, next) {
+    if (!DASHBOARD_AUTH || !keyStore.authEnabled) return next();
+    const su = sessionUser(req);
+    if (su && su.role === 'admin') return next(); // logged-in admin
+    let token = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+    if (!token && allowQueryKey) token = String(req.query.key || '');
+    const who = keyStore.verify(token);
+    if (!who || who.role !== 'admin') {
+      const hint = allowQueryKey ? 'Authorization: Bearer <key> or ?key=<key>' : 'Authorization: Bearer <key>';
+      return res.status(401).json({ error: `Dashboard auth is enabled — sign in as an admin, or pass an admin key (${hint}).` });
+    }
+    return next();
+  };
 }
+const dashboardGate = makeDashboardGate();
+const dashboardGateSse = makeDashboardGate({ allowQueryKey: true });
 
 // ── Dashboard (static control center) + health ─────────────────────────
 // Liveness probe for Docker HEALTHCHECK / monitors: no data, never gated
@@ -443,8 +457,9 @@ app.get('/health', (req, res) => {
   });
 });
 
-// Live event stream for the dashboard (SSE).
-app.get('/dashboard/events', dashboardGate, events.handler);
+// Live event stream for the dashboard (SSE). EventSource can't set headers,
+// so this is the one gate that accepts ?key=.
+app.get('/dashboard/events', dashboardGateSse, events.handler);
 
 // Control plane (always key-gated; see admin.js).
 app.use('/admin', createAdminRouter({
@@ -1076,8 +1091,15 @@ const server = app.listen(PORT, BIND_HOST, () => {
   console.log(`Engines: ${ENGINE_NAMES.map((e) => `${e} (in-process)`).join(', ')}`);
   console.log(`Max concurrent per engine: ${MAX_CONCURRENT_PER_ENGINE}`);
   console.log(`Routes: ${registry.list().map((r) => r.id).join(', ')}`);
-  if (!keyStore.authEnabled && BIND_HOST !== '127.0.0.1' && BIND_HOST !== 'localhost') {
+  const exposed = BIND_HOST !== '127.0.0.1' && BIND_HOST !== 'localhost';
+  if (!keyStore.authEnabled && exposed) {
     console.warn(`WARNING: provider bound to ${BIND_HOST} with no API key set — anyone who can reach this port can spend your Claude/Gemini quota. Set PROVIDER_API_KEY or bind to 127.0.0.1.`);
+  }
+  // The /v1 API is key-gated, but the dashboard DATA endpoints (status/usage/
+  // events — which expose account emails, usage, and live requests) are only
+  // gated when DASHBOARD_AUTH=1. Bound off-loopback without it, they're open.
+  if (exposed && !DASHBOARD_AUTH) {
+    console.warn(`WARNING: provider bound to ${BIND_HOST} with DASHBOARD_AUTH off — the dashboard data endpoints (status/usage/events) are reachable without a login. Set DASHBOARD_AUTH=1 before exposing this port beyond a trusted LAN.`);
   }
 });
 

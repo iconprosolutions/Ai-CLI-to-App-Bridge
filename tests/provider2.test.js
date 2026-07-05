@@ -5,6 +5,8 @@ const http = require('http');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const crypto = require('crypto');
+const sha256 = (s) => crypto.createHash('sha256').update(s).digest('hex');
 
 const REPO = path.resolve(__dirname, '..');
 const FAKE_CLI = path.join(__dirname, 'fixtures', 'fake-cli.js');
@@ -1192,8 +1194,10 @@ async function main() {
   r = await request(P25, { path: '/dashboard/status', headers: { Authorization: `Bearer ${ADMIN25}` } });
   assert(r.status === 200, 'admin Bearer header unlocks /dashboard/status');
   r = await request(P25, { path: `/dashboard/usage?range=today&key=${ADMIN25}` });
-  assert(r.status === 200, '?key= query unlocks /dashboard/usage (EventSource path)');
-  r = await request(P25, { path: `/dashboard/status?key=${LIM25}` });
+  assert(r.status === 401, '?key= no longer unlocks /dashboard/usage (query keys leak into logs — header only)');
+  r = await request(P25, { path: '/dashboard/usage?range=today', headers: { Authorization: `Bearer ${ADMIN25}` } });
+  assert(r.status === 200, 'admin Bearer header unlocks /dashboard/usage');
+  r = await request(P25, { path: '/dashboard/status', headers: { Authorization: `Bearer ${LIM25}` } });
   assert(r.status === 401, 'app-role key cannot read the dashboard');
   r = await request(P25, { path: '/dashboard/' });
   assert(r.status === 200 && /html/i.test(String(r.headers['content-type'])), 'static dashboard UI stays public');
@@ -1550,6 +1554,109 @@ async function main() {
     if (rr.status === 429) ipLimited = rr;
   }
   assert(Boolean(ipLimited), 'sustained cross-username spraying from one IP is rate limited');
+
+  // ── Internet-exposure hardening: headers, cookies, ?key= scope, body caps ─
+  console.log('\n## Exposure hardening — headers, secure cookies, ?key= scope, body caps');
+  const P29 = 19680;
+  const DIR29 = path.join(TMP, 'p29');
+  fs.mkdirSync(DIR29, { recursive: true });
+  const CREDS29 = path.join(DIR29, 'creds.json');
+  const ADMIN29 = '9'.repeat(48);
+  fs.writeFileSync(CREDS29, JSON.stringify({
+    version: 3,
+    keys: [{ name: 'admin', role: 'admin', keyHash: sha256(ADMIN29), createdAt: '2026-01-01T00:00:00Z' }],
+  }));
+  const AGY_ARGLOG = path.join(DIR29, 'agy-args.log');
+  const AGY_ARG = writeStub('agy-arg.sh', 'agy-sim', { FAKE_CLI_ENV_LOG: AGY_ARGLOG });
+  await bootProvider(P29, {
+    CLAUDE_PATH: writeStub('claude-29.sh', 'claude-sim'), GEMINI_PATH: AGY_ARG,
+    BRIDGE_CREDENTIALS_FILE: CREDS29,
+    BRIDGE_USERS_FILE: path.join(DIR29, 'users.json'),
+    BRIDGE_SESSIONS_FILE: path.join(DIR29, 'sessions.json'),
+    BRIDGE_ACCOUNTS_FILE: path.join(DIR29, 'accounts.json'),
+    DASHBOARD_AUTH: '1',
+  });
+
+  // Security headers on every response.
+  r = await request(P29, { path: '/healthz' });
+  assert(r.headers['x-content-type-options'] === 'nosniff', 'X-Content-Type-Options: nosniff set');
+  assert(r.headers['x-frame-options'] === 'DENY', 'X-Frame-Options: DENY set');
+  assert(/same-origin/.test(String(r.headers['referrer-policy'])), 'Referrer-Policy set');
+  assert(!r.headers['strict-transport-security'], 'no HSTS on a plain-HTTP request');
+  r = await request(P29, { path: '/healthz', headers: { 'X-Forwarded-Proto': 'https' } });
+  assert(/max-age=/.test(String(r.headers['strict-transport-security'])), 'HSTS set when X-Forwarded-Proto: https');
+
+  // Secure cookie flag follows the forwarded protocol (tunnel terminates TLS).
+  r = await request(P29, {
+    path: '/auth/login', method: 'POST', headers: { 'X-Forwarded-Proto': 'https' },
+    body: { username: 'admin', password: 'nope' },
+  });
+  // (login fails, but a login that succeeds must carry Secure; test with a real user)
+  r = await request(P29, {
+    path: '/admin/users', method: 'POST', headers: { Authorization: `Bearer ${ADMIN29}` },
+    body: { username: 'carol', password: 'carolpass12', role: 'user' },
+  });
+  assert(r.status === 200, 'admin created a user for the cookie test');
+  r = await request(P29, {
+    path: '/auth/login', method: 'POST', headers: { 'X-Forwarded-Proto': 'https' },
+    body: { username: 'carol', password: 'carolpass12' },
+  });
+  assert(/Secure/.test(String(r.headers['set-cookie'])), 'session cookie carries Secure behind an https proxy');
+  r = await request(P29, { path: '/auth/login', method: 'POST', body: { username: 'carol', password: 'carolpass12' } });
+  assert(!/Secure/.test(String(r.headers['set-cookie'])), 'session cookie omits Secure on a plain-HTTP hop');
+
+  // ?key= is honored on the SSE stream but refused on other gated endpoints.
+  r = await request(P29, { path: `/dashboard/status?key=${ADMIN29}` });
+  assert(r.status === 401, '?key= is refused on /dashboard/status (would leak into logs)');
+  r = await request(P29, { path: '/dashboard/status', headers: { Authorization: `Bearer ${ADMIN29}` } });
+  assert(r.status === 200, 'the Authorization header still authorizes /dashboard/status');
+  // The SSE stream never ends, so check the response head then close the
+  // socket — request() would hang waiting for 'end'.
+  {
+    const sse = await new Promise((resolve) => {
+      const req = http.request({ port: P29, path: `/dashboard/events?key=${ADMIN29}`, method: 'GET' }, (res) => {
+        resolve({ status: res.statusCode, ctype: String(res.headers['content-type'] || '') });
+        res.destroy();
+        req.destroy();
+      });
+      req.on('error', () => resolve({ status: 0, ctype: '' }));
+      req.end();
+    });
+    assert(sse.status === 200 && /text\/event-stream/.test(sse.ctype), '?key= is honored on the SSE stream (EventSource can\'t set headers)');
+  }
+
+  // Body caps: an oversized control-plane body is a clean 400, not a crash.
+  r = await request(P29, {
+    path: '/admin/keys', method: 'POST', headers: { Authorization: `Bearer ${ADMIN29}` },
+    body: { name: 'big', role: 'app', junk: 'z'.repeat(400 * 1024) },
+  });
+  assert(r.status === 400, 'oversized control-plane body → clean 400 (256KB cap off /v1)');
+
+  // agy argv guard: through /v1 the flattened prompt is role-prefixed ([USER]…),
+  // so it reaches the CLI intact as the --print value (never split into flags).
+  r = await request(P29, {
+    path: '/v1/chat/completions', method: 'POST', headers: { Authorization: `Bearer ${ADMIN29}` },
+    body: { model: 'bridge-agy-gemini-3.5-flash-medium-pulse', messages: [{ role: 'user', content: '-rf danger' }] },
+  });
+  assert(r.status === 200, 'a gemini prompt containing a leading-dash line is delivered without an arg-parse error');
+  {
+    const lines = fs.readFileSync(AGY_ARGLOG, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+    const call = lines.find((l) => (l.argv || []).includes('--print'));
+    const pv = call.argv[call.argv.indexOf('--print') + 1];
+    assert(pv.includes('-rf danger'), 'the dash-containing prompt is delivered intact as one --print value');
+  }
+  // The guard itself: a RAW prompt beginning with '-' (a direct adapter caller,
+  // not the role-prefixed /v1 path) gets a protective leading space so the CLI
+  // can't read it as a flag.
+  {
+    const { createAgyAdapter } = require(path.join(REPO, 'packages', 'adapters', 'agy.js'));
+    const guardLog = path.join(DIR29, 'agy-guard.log');
+    const adapter = createAgyAdapter({ bin: writeStub('agy-guard.sh', 'agy-sim', { FAKE_CLI_ENV_LOG: guardLog }) });
+    await adapter.invoke({ prompt: '--help now', model: 'Gemini 3.5 Flash (Medium)' });
+    const call = fs.readFileSync(guardLog, 'utf8').trim().split('\n').map((l) => JSON.parse(l)).find((l) => (l.argv || []).includes('--print'));
+    const pv = call.argv[call.argv.indexOf('--print') + 1];
+    assert(pv === ' --help now', 'a raw prompt starting with "-" gets a protective leading space at the adapter');
+  }
 
   console.log(`\n# Result: ${passed} passed, ${failed} failed`);
   process.exit(failed === 0 ? 0 : 1);
