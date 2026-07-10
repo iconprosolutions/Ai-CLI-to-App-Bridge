@@ -44,9 +44,13 @@ app.set('trust proxy', true);
 function requestIsHttps(req) {
   return req.secure || String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim() === 'https';
 }
+// Origins allowed to iframe the dashboard (space-separated, e.g. Orbit hubs).
+// Unset = DENY, the safe default for internet-exposed deployments.
+const FRAME_ANCESTORS = (process.env.FRAME_ANCESTORS || '').trim();
 app.use((req, res, next) => {
   res.set('X-Content-Type-Options', 'nosniff');
-  res.set('X-Frame-Options', 'DENY');
+  if (FRAME_ANCESTORS) res.set('Content-Security-Policy', `frame-ancestors ${FRAME_ANCESTORS}`);
+  else res.set('X-Frame-Options', 'DENY');
   res.set('Referrer-Policy', 'same-origin');
   res.set('Cross-Origin-Opener-Policy', 'same-origin');
   if (requestIsHttps(req)) res.set('Strict-Transport-Security', 'max-age=15552000; includeSubDomains');
@@ -253,12 +257,121 @@ function sendError(res, status, message, type, param, retryAfterSec) {
   return res.status(status).json(openaiErrorBody(message, type, param));
 }
 
+// ── Response translation shims ──────────────────────────────────────────
+// /v1/completions and /v1/messages run the chat pipeline, then reshape its
+// reply on the way out by wrapping res.json (non-streaming) and res.write
+// (SSE). Each write carries exactly one event (ends in \n\n), so a per-write
+// transform is safe. Error envelopes pass through unchanged.
+function parseSseData(str) {
+  if (!str.startsWith('data: ')) return null; // heartbeat/comment — leave as-is
+  const payload = str.slice(6).trim();
+  if (payload === '[DONE]') return '[DONE]';
+  try { return JSON.parse(payload); } catch (_) { return null; }
+}
+
+function installTextCompletionShim(res, streaming) {
+  if (streaming) {
+    const origWrite = res.write.bind(res);
+    res.write = (chunk, ...rest) => {
+      const obj = parseSseData(String(chunk));
+      if (obj === null) return origWrite(chunk, ...rest); // heartbeat/comment
+      if (obj === '[DONE]') return origWrite('data: [DONE]\n\n', ...rest);
+      const c = (obj.choices && obj.choices[0]) || {};
+      const out = {
+        id: String(obj.id || '').replace('chatcmpl-', 'cmpl-'),
+        object: 'text_completion',
+        created: obj.created,
+        model: obj.model,
+        choices: c.delta !== undefined || c.finish_reason !== undefined
+          ? [{ text: (c.delta && c.delta.content) || '', index: 0, logprobs: null, finish_reason: c.finish_reason || null }]
+          : [],
+      };
+      if (obj.usage) out.usage = obj.usage;
+      return origWrite(`data: ${JSON.stringify(out)}\n\n`, ...rest);
+    };
+    return;
+  }
+  const origJson = res.json.bind(res);
+  res.json = (obj) => {
+    if (!obj || obj.object !== 'chat.completion') return origJson(obj); // error body
+    const c = obj.choices[0] || {};
+    return origJson({
+      id: String(obj.id || '').replace('chatcmpl-', 'cmpl-'),
+      object: 'text_completion',
+      created: obj.created,
+      model: obj.model,
+      choices: [{ text: (c.message && c.message.content) || '', index: 0, logprobs: null, finish_reason: c.finish_reason }],
+      usage: obj.usage,
+    });
+  };
+}
+
+const ANTHROPIC_STOP = { stop: 'end_turn', length: 'max_tokens', tool_calls: 'tool_use' };
+function installAnthropicShim(res, streaming, model) {
+  const msgId = `msg_${crypto.randomBytes(12).toString('hex')}`;
+  if (streaming) {
+    const origWrite = res.write.bind(res);
+    let started = false;
+    let finish = 'end_turn';
+    res.write = (chunk, ...rest) => {
+      const obj = parseSseData(String(chunk));
+      if (obj === null) return origWrite(chunk, ...rest); // heartbeat/comment
+      if (obj === '[DONE]') return true; // Anthropic has no [DONE]; message_stop already sent
+      const c = (obj.choices && obj.choices[0]) || {};
+      const ev = (type, data) => origWrite(`event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`, ...rest);
+      if (!started) {
+        started = true;
+        ev('message_start', { message: { id: msgId, type: 'message', role: 'assistant', model, content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: obj.usage ? obj.usage.prompt_tokens : 0, output_tokens: 0 } } });
+        ev('content_block_start', { index: 0, content_block: { type: 'text', text: '' } });
+      }
+      if (c.delta && c.delta.content) ev('content_block_delta', { index: 0, delta: { type: 'text_delta', text: c.delta.content } });
+      if (c.finish_reason) {
+        finish = ANTHROPIC_STOP[c.finish_reason] || 'end_turn';
+        ev('content_block_stop', { index: 0 });
+        ev('message_delta', { delta: { stop_reason: finish, stop_sequence: null }, usage: { output_tokens: obj.usage ? obj.usage.completion_tokens : 0 } });
+        ev('message_stop', {});
+      }
+      return true;
+    };
+    return;
+  }
+  const origJson = res.json.bind(res);
+  res.json = (obj) => {
+    if (!obj || obj.object !== 'chat.completion') {
+      // Reshape the OpenAI error envelope into Anthropic's.
+      if (obj && obj.error) return origJson({ type: 'error', error: { type: obj.error.type || 'error', message: obj.error.message } });
+      return origJson(obj);
+    }
+    const c = obj.choices[0] || {};
+    return origJson({
+      id: msgId,
+      type: 'message',
+      role: 'assistant',
+      model,
+      content: [{ type: 'text', text: (c.message && c.message.content) || '' }],
+      stop_reason: ANTHROPIC_STOP[c.finish_reason] || 'end_turn',
+      stop_sequence: null,
+      usage: { input_tokens: obj.usage ? obj.usage.prompt_tokens : 0, output_tokens: obj.usage ? obj.usage.completion_tokens : 0 },
+    });
+  };
+}
+
 // ── Auth (OpenAI error envelope, /v1 only) ─────────────────────────────
 // Any valid named key (admin or app) may call /v1. The matched key is attached
 // as req.auth so the request path can honor its accountPin and attribute usage.
+// /v1/messages speaks Anthropic shapes — install its translation shim BEFORE
+// auth so even an auth-layer error comes back Anthropic-shaped, and so the
+// route handler doesn't double-wrap res.
+app.use('/v1/messages', (req, res, next) => {
+  const body = req.body || {};
+  installAnthropicShim(res, body.stream === true, body.model);
+  next();
+});
+
 app.use('/v1', (req, res, next) => {
   if (!keyStore.authEnabled) return next();
-  const token = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+  // Bearer (OpenAI) or x-api-key (Anthropic /v1/messages clients).
+  const token = (req.headers.authorization || '').replace(/^Bearer\s+/i, '') || String(req.headers['x-api-key'] || '');
   const who = keyStore.verify(token);
   if (!who) {
     // A signed-in dashboard session may exercise /v1 directly (the Tester) —
@@ -566,7 +679,11 @@ app.get('/v1/models', (req, res) => {
 });
 
 // ── /v1/chat/completions ────────────────────────────────────────────────
-app.post('/v1/chat/completions', async (req, res) => {
+// The core dispatch handler. /v1/completions and /v1/messages reuse it via
+// thin request/response translation shims (below) so the routing, auth,
+// limits, failover, continuity, tool and output-shaping logic lives in one
+// place and never forks.
+async function chatCompletion(req, res) {
   const reqId = newRequestId();
   const started = Date.now();
   const body = req.body || {};
@@ -1242,6 +1359,65 @@ app.post('/v1/chat/completions', async (req, res) => {
     release();
     activeRequests.delete(reqId);
   }
+}
+app.post('/v1/chat/completions', chatCompletion);
+
+// ── /v1/completions (legacy text-completions API) ───────────────────────
+// Older SDKs/tools still speak the text API. Translate prompt→messages, run
+// the same pipeline, and reshape the reply to the text_completion object.
+// Tools/JSON-mode aren't part of that API; max_tokens/stop/stream all work.
+app.post('/v1/completions', (req, res) => {
+  const body = req.body || {};
+  if (body.prompt === undefined || body.prompt === null) {
+    return sendError(res, 400, '`prompt` is required.', 'invalid_request_error', 'prompt');
+  }
+  if (body.best_of !== undefined && body.best_of !== null && body.best_of !== 1) {
+    return sendError(res, 400, 'Parameter "best_of" must be 1.', 'unsupported_parameter', 'best_of');
+  }
+  const promptText = Array.isArray(body.prompt) ? body.prompt.map(String).join('\n') : String(body.prompt);
+  // Rebuild the body as a chat request; carry model/max_tokens/stop/stream/user.
+  req.body = {
+    model: body.model,
+    messages: [{ role: 'user', content: promptText }],
+    stream: body.stream === true,
+    ...(body.max_tokens !== undefined ? { max_tokens: body.max_tokens } : {}),
+    ...(body.stop !== undefined ? { stop: body.stop } : {}),
+    ...(body.user !== undefined ? { user: body.user } : {}),
+    ...(body.stream_options ? { stream_options: body.stream_options } : {}),
+  };
+  installTextCompletionShim(res, body.stream === true);
+  return chatCompletion(req, res);
+});
+
+// ── /v1/messages (Anthropic Messages API) ───────────────────────────────
+// Lets Anthropic-SDK / Claude-native tools point straight at the bridge.
+// Accepts {model, system, messages, max_tokens, stop_sequences, stream} and
+// x-api-key auth (aliased to Bearer by the /v1 auth middleware), translates
+// to the chat pipeline, and reshapes the reply into Anthropic message shape.
+app.post('/v1/messages', (req, res) => {
+  const body = req.body || {};
+  if (!Array.isArray(body.messages)) {
+    return sendError(res, 400, '`messages` must be an array.', 'invalid_request_error', 'messages');
+  }
+  // Anthropic content blocks → plain text (the bridge is text-in/text-out).
+  const flatten = (content) => {
+    if (typeof content === 'string') return content;
+    if (Array.isArray(content)) return content.map((b) => (b && b.type === 'text' ? b.text : (typeof b === 'string' ? b : ''))).join('');
+    return content == null ? '' : String(content);
+  };
+  const messages = [];
+  if (body.system) messages.push({ role: 'system', content: flatten(body.system) });
+  for (const m of body.messages) messages.push({ role: m.role === 'assistant' ? 'assistant' : 'user', content: flatten(m.content) });
+  req.body = {
+    model: body.model,
+    messages,
+    stream: body.stream === true,
+    ...(body.max_tokens !== undefined ? { max_tokens: body.max_tokens } : {}),
+    ...(body.stop_sequences !== undefined ? { stop: body.stop_sequences } : {}),
+    ...(body.metadata && body.metadata.user_id ? { user: body.metadata.user_id } : {}),
+  };
+  // The Anthropic response shim is installed by pre-auth middleware above.
+  return chatCompletion(req, res);
 });
 
 app.use((req, res) => {

@@ -19,6 +19,9 @@ services:
       # Keep =1 whenever the port is reachable beyond the LAN (e.g. through a
       # Cloudflare tunnel); the static UI stays public, the data does not.
       - DASHBOARD_AUTH=${DASHBOARD_AUTH:-1}
+      # Let Orbit (claude-os hub) embed the dashboard in an iframe. LAN-only;
+      # remove this line if the port is ever exposed beyond the LAN.
+      - FRAME_ANCESTORS=http://localhost:5199 http://127.0.0.1:5199 http://localhost:7878 http://127.0.0.1:7878
       # Uncomment to pin a fixed admin key instead of the auto-generated one:
       # - PROVIDER_API_KEY=${PROVIDER_API_KEY}
     volumes:

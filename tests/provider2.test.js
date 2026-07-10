@@ -2081,6 +2081,105 @@ async function main() {
     assert(!text.includes('STOPHERE'), 'the stop sequence itself never streams to the client');
   }
 
+  // ── /v1/completions (legacy) + /v1/messages (Anthropic) shims ───────────
+  console.log('\n## /v1/completions + /v1/messages compatibility endpoints');
+  const noFallbackRoutes = (name) => {
+    const f = path.join(TMP, name);
+    const doc = JSON.parse(fs.readFileSync(path.join(REPO, 'packages', 'provider', 'routes.json'), 'utf8'));
+    for (const rt of doc.routes) { delete rt.overflowFallback; delete rt.quotaFallback; }
+    fs.writeFileSync(f, JSON.stringify(doc));
+    return f;
+  };
+  const P35 = 19740;
+  const CLAUDE_C = writeStub('claude-compat.sh', 'claude-sim', { FAKE_CLI_TEXT: 'Hello there, general.' });
+  await bootProvider(P35, { CLAUDE_PATH: CLAUDE_C, GEMINI_PATH: AGY_STUB, BRIDGE_ROUTES_FILE: noFallbackRoutes('routes-35.json') });
+
+  // Legacy text completions.
+  r = await request(P35, {
+    path: '/v1/completions', method: 'POST',
+    body: { model: 'bridge-claude-haiku-4.5-spark', prompt: 'say hi' },
+  });
+  {
+    const c = JSON.parse(r.body);
+    assert(r.status === 200 && c.object === 'text_completion' && c.id.startsWith('cmpl-'), '/v1/completions returns a text_completion object');
+    assert(c.choices[0].text === 'Hello there, general.' && c.choices[0].finish_reason === 'stop' && c.choices[0].logprobs === null,
+      'text_completion choice carries text + finish_reason + logprobs:null');
+    assert(c.usage && typeof c.usage.total_tokens === 'number', 'text_completion carries usage');
+  }
+  r = await request(P35, { path: '/v1/completions', method: 'POST', body: { model: 'bridge-claude-haiku-4.5-spark' } });
+  assert(r.status === 400, '/v1/completions requires a prompt');
+  r = await request(P35, { path: '/v1/completions', method: 'POST', body: { model: 'bridge-claude-haiku-4.5-spark', prompt: 'x', best_of: 3 } });
+  assert(r.status === 400 && errType(r) === 'unsupported_parameter', 'best_of != 1 rejected');
+  r = await request(P35, {
+    path: '/v1/completions', method: 'POST',
+    body: { model: 'bridge-claude-haiku-4.5-spark', prompt: 'x', stop: 'there' },
+  });
+  assert(JSON.parse(r.body).choices[0].text === 'Hello ', '/v1/completions honors stop (truncates before "there")');
+  r = await request(P35, {
+    path: '/v1/completions', method: 'POST',
+    body: { model: 'bridge-claude-haiku-4.5-spark', prompt: 'x', stream: true },
+  });
+  {
+    const chunks = parseSse(r.body);
+    assert(chunks.length > 0 && chunks.every((c) => c.object === 'text_completion'), 'streamed completions are text_completion chunks');
+    const text = chunks.map((c) => (c.choices[0] && c.choices[0].text) || '').join('');
+    assert(text === 'Hello there, general.' && /\[DONE\]/.test(r.body), 'streamed text reassembles and ends with [DONE]');
+  }
+
+  // Anthropic messages.
+  r = await request(P35, {
+    path: '/v1/messages', method: 'POST',
+    body: { model: 'bridge-claude-haiku-4.5-spark', max_tokens: 1024, messages: [{ role: 'user', content: 'hi' }] },
+  });
+  {
+    const m = JSON.parse(r.body);
+    assert(r.status === 200 && m.type === 'message' && m.role === 'assistant' && m.id.startsWith('msg_'), '/v1/messages returns an Anthropic message');
+    assert(Array.isArray(m.content) && m.content[0].type === 'text' && m.content[0].text === 'Hello there, general.', 'message content is a text block');
+    assert(m.stop_reason === 'end_turn' && m.usage && typeof m.usage.output_tokens === 'number', 'message carries stop_reason + usage');
+  }
+  // system + content-block input, and Anthropic max_tokens → stop_reason max_tokens.
+  r = await request(P35, {
+    path: '/v1/messages', method: 'POST',
+    body: { model: 'bridge-claude-haiku-4.5-spark', max_tokens: 2, system: 'be terse', messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }] },
+  });
+  {
+    const m = JSON.parse(r.body);
+    assert(r.status === 200 && m.stop_reason === 'max_tokens' && m.content[0].text.length === 8, 'Anthropic max_tokens caps output and maps stop_reason to max_tokens');
+  }
+  // Streaming: the Anthropic event sequence.
+  r = await request(P35, {
+    path: '/v1/messages', method: 'POST',
+    body: { model: 'bridge-claude-haiku-4.5-spark', max_tokens: 1024, stream: true, messages: [{ role: 'user', content: 'hi' }] },
+  });
+  {
+    const events = (r.body || '').split('\n\n').filter((b) => b.startsWith('event: ')).map((b) => b.slice(7).split('\n')[0]);
+    assert(events[0] === 'message_start' && events.includes('content_block_delta') && events[events.length - 1] === 'message_stop',
+      `Anthropic stream runs message_start → … → message_stop (got ${events.join(',')})`);
+    const deltas = (r.body || '').split('\n\n').filter((b) => b.includes('content_block_delta'))
+      .map((b) => { try { return JSON.parse(b.split('\ndata: ')[1]); } catch (_) { return null; } }).filter(Boolean);
+    assert(deltas.map((d) => d.delta.text).join('') === 'Hello there, general.', 'streamed text_delta blocks reassemble the reply');
+  }
+
+  // x-api-key auth (Anthropic clients) works when auth is enabled.
+  const P35b = 19745;
+  const CREDS35 = path.join(TMP, 'creds35.json');
+  const ADMIN35 = '3'.repeat(48);
+  fs.writeFileSync(CREDS35, JSON.stringify({ version: 3, keys: [{ name: 'admin', role: 'admin', keyHash: sha256(ADMIN35), createdAt: '2026-01-01T00:00:00Z' }] }));
+  await bootProvider(P35b, { CLAUDE_PATH: CLAUDE_C, GEMINI_PATH: AGY_STUB, BRIDGE_CREDENTIALS_FILE: CREDS35, BRIDGE_ROUTES_FILE: noFallbackRoutes('routes-35b.json') });
+  r = await request(P35b, {
+    path: '/v1/messages', method: 'POST', headers: { 'x-api-key': ADMIN35 },
+    body: { model: 'bridge-claude-haiku-4.5-spark', max_tokens: 10, messages: [{ role: 'user', content: 'hi' }] },
+  });
+  assert(r.status === 200 && JSON.parse(r.body).type === 'message', 'x-api-key authorizes /v1/messages');
+  r = await request(P35b, {
+    path: '/v1/messages', method: 'POST',
+    body: { model: 'bridge-claude-haiku-4.5-spark', max_tokens: 10, messages: [{ role: 'user', content: 'hi' }] },
+  });
+  {
+    const m = JSON.parse(r.body);
+    assert(r.status === 401 && m.type === 'error', 'unauthenticated /v1/messages → Anthropic-shaped 401 error');
+  }
+
   console.log(`\n# Result: ${passed} passed, ${failed} failed`);
   process.exit(failed === 0 ? 0 : 1);
 }
