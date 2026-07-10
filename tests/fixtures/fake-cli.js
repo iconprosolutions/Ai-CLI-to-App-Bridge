@@ -169,6 +169,9 @@ async function main() {
       process.stderr.write(process.env.FAKE_CLI_STDERR);
       process.exit(1);
     }
+    // agy's real quota-exhaustion behavior (verified live 2026-07-10): exit 0
+    // with NOTHING on stdout or stderr — the only evidence is its log file.
+    if (process.env.FAKE_CLI_SILENT) return;
     const i = simArgs.indexOf('--print');
     const prompt = i !== -1 ? String(simArgs[i + 1] || '') : '';
     const text = bakedText() || `[gemini] replied to "${prompt.trim().slice(0, 24)}"`;

@@ -2180,6 +2180,81 @@ async function main() {
     assert(r.status === 401 && m.type === 'error', 'unauthenticated /v1/messages → Anthropic-shaped 401 error');
   }
 
+  // ── agy silent quota exhaustion (exit 0, zero output) ───────────────────
+  // Verified live 2026-07-10: quota-exhausted agy prints NOTHING and exits 0;
+  // the only evidence is $HOME/.gemini/antigravity-cli/cli.log. The adapter
+  // must classify that as quota (never return an empty 200), which in turn
+  // drives the account breaker and the cross-model quotaFallback.
+  console.log('\n## agy silent quota exhaustion → classified, cross-model failover');
+  const agyQuotaHome = (tag) => {
+    const home = path.join(TMP, tag, 'gemini', 'g1');
+    fs.mkdirSync(path.join(home, '.gemini', 'antigravity-cli'), { recursive: true });
+    fs.writeFileSync(path.join(home, '.gemini', 'antigravity-cli', 'cli.log'),
+      'I0710 19:05:42 quota_manager.go:72] quotaRefreshLoop: starting\n'
+      + 'E0710 19:05:44 log.go:398] model unreachable: RESOURCE_EXHAUSTED (code 429): Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 0h2m5s.\n');
+    return home;
+  };
+  const acctsFor = (tag) => {
+    const f = path.join(TMP, `accounts-${tag}.json`);
+    fs.writeFileSync(f, JSON.stringify({ gemini: [{ name: 'g1', dir: `${tag}/gemini/g1` }] }));
+    return f;
+  };
+  const AGY_SILENT = writeStub('agy-silent.sh', 'agy-sim', { FAKE_CLI_SILENT: '1' });
+  const CLAUDE_FB = writeStub('claude-fb.sh', 'claude-sim', { FAKE_CLI_TEXT: 'claude covered for gemini' });
+
+  // (a) With quotaFallback (the shipped catalogue keeps its fallbacks —
+  // bootProvider's default copy strips them): the request transparently moves
+  // to the claude route and says so.
+  const P36 = 19750;
+  const shippedRoutes = path.join(TMP, 'routes-shipped-36.json');
+  fs.copyFileSync(path.join(REPO, 'packages', 'provider', 'routes.json'), shippedRoutes);
+  agyQuotaHome('acct36');
+  await bootProvider(P36, {
+    CLAUDE_PATH: CLAUDE_FB, GEMINI_PATH: AGY_SILENT,
+    BRIDGE_ACCOUNTS_FILE: acctsFor('acct36'), BRIDGE_ROUTES_FILE: shippedRoutes,
+  });
+  r = await request(P36, {
+    path: '/v1/chat/completions', method: 'POST',
+    body: { model: 'bridge-agy-gemini-3.5-flash-medium-pulse', messages: [{ role: 'user', content: 'hi' }] },
+  });
+  {
+    const c = JSON.parse(r.body || '{}');
+    assert(r.status === 200 && c.choices && c.choices[0].message.content.includes('claude covered'),
+      `silent gemini quota → answered by the claude quotaFallback (got ${r.status})`);
+    assert(c.bridge_rerouted && c.bridge_rerouted.reason === 'engine_exhausted' && /claude/.test(c.bridge_rerouted.to),
+      'reply is marked bridge_rerouted: engine_exhausted');
+  }
+
+  // (b) No fallback routes: a clean 429 with the log's reset as Retry-After —
+  // never an empty 200.
+  const P36b = 19760;
+  agyQuotaHome('acct36b');
+  await bootProvider(P36b, {
+    CLAUDE_PATH: CLAUDE_FB, GEMINI_PATH: AGY_SILENT,
+    BRIDGE_ACCOUNTS_FILE: acctsFor('acct36b'), BRIDGE_ROUTES_FILE: noFallbackRoutes('routes-36b.json'),
+  });
+  r = await request(P36b, {
+    path: '/v1/chat/completions', method: 'POST',
+    body: { model: 'bridge-agy-gemini-3.5-flash-medium-pulse', messages: [{ role: 'user', content: 'hi' }] },
+  });
+  assert(r.status === 429 && errType(r) === 'rate_limit_error', `silent quota without fallback → 429 rate_limit_error (got ${r.status})`);
+  assert(r.headers['retry-after'] === '125', `Retry-After parsed from the agy log's "Resets in" (got ${r.headers['retry-after']})`);
+  assert(/quota|exhausted/i.test(JSON.parse(r.body).error.message), '429 message names the quota exhaustion');
+
+  // (c) Silent with no log at all → 502 bad_output, still never an empty 200.
+  const P36c = 19770;
+  fs.mkdirSync(path.join(TMP, 'acct36c', 'gemini', 'g1'), { recursive: true });
+  await bootProvider(P36c, {
+    CLAUDE_PATH: CLAUDE_FB, GEMINI_PATH: AGY_SILENT,
+    BRIDGE_ACCOUNTS_FILE: acctsFor('acct36c'), BRIDGE_ROUTES_FILE: noFallbackRoutes('routes-36c.json'),
+  });
+  r = await request(P36c, {
+    path: '/v1/chat/completions', method: 'POST',
+    body: { model: 'bridge-agy-gemini-3.5-flash-medium-pulse', messages: [{ role: 'user', content: 'hi' }] },
+  });
+  assert(r.status === 502 && /no output/i.test(JSON.parse(r.body).error.message),
+    `silent run with no log → 502 "no output", not an empty 200 (got ${r.status})`);
+
   console.log(`\n# Result: ${passed} passed, ${failed} failed`);
   process.exit(failed === 0 ? 0 : 1);
 }

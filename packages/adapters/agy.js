@@ -1,5 +1,7 @@
 'use strict';
 
+const fs = require('fs');
+const path = require('path');
 const { runCli, BridgeError, createAnsiStripper, stripAnsi, collapseCarriageReturns } = require('@bridge/core');
 const { geminiIdentity } = require('./identity');
 
@@ -40,6 +42,47 @@ function classifyError(stderr, stdout) {
     return new BridgeError('model_not_found', 'The requested Gemini model is not available in this Antigravity session.', { detail: text.slice(0, 300) });
   }
   return null;
+}
+
+// "Resets in 2h3m57s" → seconds (for a Retry-After hint). Null if absent.
+function parseResetsIn(text) {
+  const m = /Resets in\s+(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?/i.exec(text);
+  if (!m || (!m[1] && !m[2] && !m[3])) return null;
+  return (Number(m[1] || 0) * 3600) + (Number(m[2] || 0) * 60) + Number(m[3] || 0);
+}
+
+// On quota exhaustion agy is COMPLETELY silent: exit 0, empty stdout, empty
+// stderr (verified live 2026-07-10). The only evidence is its own log file
+// ($HOME/.gemini/antigravity-cli/cli.log, a symlink to the newest log). When a
+// run produces no output, read the log tail and classify — an empty reply is
+// never a real answer, and returning it as a 200 poisons callers and skips the
+// breaker + cross-model failover that a 429 would trigger.
+function classifyEmptyOutput(home) {
+  let tail = '';
+  try {
+    const logPath = path.join(home, '.gemini', 'antigravity-cli', 'cli.log');
+    const fd = fs.openSync(logPath, 'r');
+    try {
+      const size = fs.fstatSync(fd).size;
+      const want = Math.min(size, 16 * 1024);
+      const buf = Buffer.alloc(want);
+      fs.readSync(fd, buf, 0, want, size - want);
+      tail = buf.toString('utf8');
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch (_) { /* no log — fall through to bad_output */ }
+
+  if (/RESOURCE_EXHAUSTED|quota reached|Individual quota reached/i.test(tail)) {
+    const retryAfterSec = parseResetsIn(tail);
+    return new BridgeError('quota',
+      `Antigravity quota for this Google account is exhausted.${retryAfterSec ? ` Resets in ~${Math.ceil(retryAfterSec / 60)} min.` : ''}`,
+      { detail: 'agy exited 0 with no output; cli.log shows RESOURCE_EXHAUSTED', ...(retryAfterSec ? { retryAfterSec } : {}) });
+  }
+  if (/authentication failed|please sign in|not signed in|token.*(expired|revoked)/i.test(tail)) {
+    return new BridgeError('auth', 'Antigravity is not signed in for this account. Complete the account login, then retry.', { detail: 'agy exited 0 with no output; cli.log shows an auth failure' });
+  }
+  return new BridgeError('bad_output', 'Antigravity returned no output for this request. Check the account on the dashboard (Probe) and retry.', { detail: 'agy exited 0 with empty stdout/stderr' });
 }
 
 function createAgyAdapter(opts = {}) {
@@ -104,6 +147,12 @@ function createAgyAdapter(opts = {}) {
       const finalText = collapseCarriageReturns(stripAnsi(run.text)).trim();
       const authErr = classifyError('', finalText);
       if (authErr && authErr.kind === 'auth' && finalText.length < 200) throw authErr;
+      // Silent failure: exit 0 with no output at all (quota exhaustion does
+      // this). Classify from the account's own agy log rather than handing an
+      // empty "answer" to the caller.
+      if (!finalText) {
+        throw classifyEmptyOutput((env && env.HOME) || process.env.HOME || '');
+      }
       return {
         text: finalText,
         usage: null, // agy reports no token counts — caller estimates
