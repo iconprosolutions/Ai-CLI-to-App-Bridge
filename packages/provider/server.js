@@ -194,7 +194,8 @@ const pool = createAccountPool({
     events.emit('account.change', ev);
     // A quota-tripped breaker is the freshest possible signal — re-poll that
     // account now so the dashboard (and Phase 2 selection) see real numbers.
-    if (ev.kind === 'breaker' && ev.breaker && ev.breaker.state === 'open' && ev.breaker.reason === 'quota') {
+    // Gate BOTH poll paths: air-gapped/test hosts must make zero quota fetches.
+    if (QUOTA_POLL && ev.kind === 'breaker' && ev.breaker && ev.breaker.state === 'open' && ev.breaker.reason === 'quota') {
       quota.pollSoon(ev.engine, ev.account);
     }
   },
@@ -203,6 +204,7 @@ const pool = createAccountPool({
 // Per-account subscription-usage snapshots (router spec §5). The poller is
 // advisory: any failure degrades one account's freshness, never dispatch.
 // BRIDGE_QUOTA_POLL=0 disables the interval (tests, air-gapped hosts).
+const QUOTA_POLL = process.env.BRIDGE_QUOTA_POLL !== '0';
 const quota = createQuotaService({
   pool,
   file: path.join(RUNTIME_DIR, 'quota-snapshots.json'),
@@ -211,7 +213,7 @@ const quota = createQuotaService({
   }),
   onChange: (ev) => events.emit('quota.change', ev),
 });
-if (process.env.BRIDGE_QUOTA_POLL !== '0') quota.start();
+if (QUOTA_POLL) quota.start();
 
 // Server-side interval health sampling — uptime no longer depends on how
 // many dashboard tabs are polling (audit M13).

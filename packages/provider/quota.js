@@ -175,7 +175,8 @@ function createQuotaService({
     try { tok = readAgyToken(acct.dir); } catch (_) { return; } // no token file yet
     const expired = tok.token && tok.token.expiry && (Date.parse(tok.token.expiry) - Date.now() < 5 * 60 * 1000);
     if (expired && typeof agyRefresh === 'function') {
-      try { await agyRefresh(acct); tok = readAgyToken(acct.dir); } catch (_) { /* poll with what we have */ }
+      try { await agyRefresh(acct); tok = readAgyToken(acct.dir); }
+      catch (err) { logger.error(`[quota] gemini:${acct.name} token refresh failed: ${err.message}`); }
     }
     const access = tok.token && tok.token.access_token;
     if (!access) return;
@@ -207,6 +208,9 @@ function createQuotaService({
     }
   }
 
+  // ponytail: no overlap guard — a sweep that outlives the 5-min interval can
+  // overlap the next one (idempotent records, bounded by per-call timeouts).
+  // Add an in-flight flag if account count grows past ~10.
   async function pollAll() {
     for (const engine of Object.keys(POLLERS)) {
       let accounts = [];
