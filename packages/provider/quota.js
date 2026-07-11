@@ -16,7 +16,7 @@ const CLAUDE_LABELS = { session: 'Session (5h)', weekly_all: 'Weekly' };
 // five_hour/seven_day(+seven_day_<model>) shape.
 function parseClaudeUsage(raw) {
   if (raw && Array.isArray(raw.limits)) {
-    return raw.limits.map((l) => {
+    return raw.limits.filter(Boolean).map((l) => {
       const scopeName = l && l.scope && l.scope.model && l.scope.model.display_name;
       return {
         kind: String((l && l.kind) || 'unknown'),

@@ -193,6 +193,10 @@ function ok(cond, msg) { assert(cond, msg); passed += 1; console.log(`  ok - ${m
     ok(newShape[1].label === 'Opus weekly' && newShape[1].resetsAt === Date.parse('2026-07-14T08:00:00Z'),
       'Q5: model-scoped weekly labeled from scope');
 
+    // Ragged payloads: null entries must vanish, not become phantom 0% rows.
+    const ragged = parseClaudeUsage({ limits: [null, { kind: 'session', group: 'session', percent: 10, resets_at: '2026-07-11T19:00:00Z' }] });
+    ok(ragged.length === 1 && ragged[0].kind === 'session', 'Q5: null limits[] entries are filtered, not phantom rows');
+
     // Legacy generation: top-level five_hour/seven_day (+ per-model keys).
     const legacy = parseClaudeUsage({
       five_hour: { utilization: 61, resets_at: '2026-07-11T17:00:00Z' },
