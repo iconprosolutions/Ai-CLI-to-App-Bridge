@@ -169,7 +169,7 @@ function createAccountPool({
           if (gate.allowed) return { ok: true, account: acct, trial: Boolean(gate.trial) };
         }
         // Assigned account unusable → the pool absorbs it (skip the failed pin).
-        return select(engine, { exclude: pin });
+        return select(engine, { exclude: pin, model, headroom, drainThresholds });
       }
       if (!acct) return { ok: false, status: 400, message: `Unknown ${engine} account "${pin}"` };
       if (!acct.enabled) return { ok: false, status: 503, message: `Account "${engine}:${pin}" is disabled.` };

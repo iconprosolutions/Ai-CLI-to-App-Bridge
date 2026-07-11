@@ -125,6 +125,25 @@ function ok(cond, msg) { assert(cond, msg); passed += 1; console.log(`  ok - ${m
     const healthyPrimary = { main: [{ group: 'weekly', kind: 'weekly_all', label: 'Weekly', percent: 20 }], alt: [{ group: 'weekly', kind: 'weekly_all', label: 'Weekly', percent: 10 }] };
     const s6b = p6.select('claude', { model: 'm', headroom: (e, n) => healthyPrimary[n] || null });
     ok(s6b.ok && s6b.account.name === 'main', 'H2: a healthy primary is still preferred even if not the lowest-scored');
+
+    // Soft-pin fallback must stay headroom-aware: when the assigned account is
+    // drained, the pool fallback picks the least-utilized account, not the
+    // round-robin first (review fix — the recursion previously dropped opts).
+    const { BridgeError } = require(path.join(REPO, 'packages/core/errors.js'));
+    const spFile = path.join(tmp, 'softpin.json');
+    fs.writeFileSync(spFile, JSON.stringify({ claude: [{ name: 'assigned', dir: 'assigned' }, { name: 'busy', dir: 'busy' }, { name: 'idle', dir: 'idle' }] }));
+    const p7 = createAccountPool({ file: spFile, baseDir: tmp, engines: ['claude'], watch: false });
+    const spScen = {
+      assigned: [{ group: 'weekly', kind: 'weekly_all', label: 'Weekly', percent: 97 }], // drained, but that alone doesn't stop the pin from serving
+      busy: [{ group: 'weekly', kind: 'weekly_all', label: 'Weekly', percent: 80 }],
+      idle: [{ group: 'weekly', kind: 'weekly_all', label: 'Weekly', percent: 5 }],
+    };
+    // Open the assigned account's breaker so the soft pin is truly unusable
+    // (drain alone doesn't disqualify a soft pin — it serves until it fails).
+    const selAssigned = p7.select('claude', { pin: 'assigned' });
+    p7.feedback('claude', selAssigned.account, new BridgeError('quota', 'exhausted'));
+    const s7 = p7.select('claude', { pin: 'assigned', pinMode: 'soft', model: 'm', headroom: (e, n) => spScen[n] });
+    ok(s7.ok && s7.account.name === 'idle', 'H2: soft-pin fallback stays headroom-aware (review fix)');
   }
 
   console.log(`\nheadroom.test.js: all ${passed} assertions passed`);
