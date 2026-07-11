@@ -37,7 +37,10 @@ function classifyError(stderr, stdout) {
   }
   if (text.includes('You have exhausted your capacity on this model')
     || text.includes('You have exhausted your quota on this model')) {
-    const until = agyCooldownUntilMs(text);
+    // stderr carries the real server error; stdout may be partial model prose
+    // that could coincidentally contain reset-like wording. Prefer stderr.
+    const fromStderr = agyCooldownUntilMs(String(stderr || ''));
+    const until = fromStderr !== undefined ? fromStderr : agyCooldownUntilMs(text);
     return new BridgeError('quota', 'Antigravity capacity for this model is exhausted. Retry later or use a Flash mode.', {
       detail: text.slice(0, 300),
       ...(until !== undefined ? { cooldownUntilMs: until } : {}),
@@ -49,11 +52,19 @@ function classifyError(stderr, stdout) {
   return null;
 }
 
-// "Resets in 2h3m57s" / "quota will reset after 146h52m11s" → seconds. Null if absent.
+// "Resets in 2h3m57s" / "quota will reset after 146h52m11s" → seconds.
+// The cli.log tail can hold several of these (one per failed run, freshest
+// LAST) plus digitless prose like "reset after some time" — take the last
+// match that actually carries digits. Null if none do.
 function parseResetsIn(text) {
-  const m = /(?:resets in|reset after)\s+(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?/i.exec(text);
-  if (!m || (!m[1] && !m[2] && !m[3])) return null;
-  return (Number(m[1] || 0) * 3600) + (Number(m[2] || 0) * 60) + Number(m[3] || 0);
+  const re = /\b(?:resets in|reset after)\s+(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?/gi;
+  let m;
+  let best = null;
+  while ((m = re.exec(text))) {
+    if (m[1] || m[2] || m[3]) best = m;
+  }
+  if (!best) return null;
+  return (Number(best[1] || 0) * 3600) + (Number(best[2] || 0) * 60) + Number(best[3] || 0);
 }
 
 // "baseline quota will refresh on 3/24/2026, 5:04:50 PM" → epoch ms (V8 parses
@@ -173,9 +184,10 @@ function createAgyAdapter(opts = {}) {
       // classifier above never fires on them — catch it here rather than
       // returning the error line as the model's "answer". Length guard: a
       // long real reply that merely mentions signing in must pass through.
+      // Quota gets the same treatment — a short quota-error line is never a real answer.
       const finalText = collapseCarriageReturns(stripAnsi(run.text)).trim();
-      const authErr = classifyError('', finalText);
-      if (authErr && authErr.kind === 'auth' && finalText.length < 200) throw authErr;
+      const stdoutErr = classifyError('', finalText);
+      if (stdoutErr && (stdoutErr.kind === 'auth' || stdoutErr.kind === 'quota') && finalText.length < 200) throw stdoutErr;
       // Silent failure: exit 0 with no output at all (quota exhaustion does
       // this). Classify from the account's own agy log rather than handing an
       // empty "answer" to the caller.

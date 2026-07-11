@@ -165,8 +165,12 @@ function ok(cond, msg) { assert(cond, msg); passed += 1; console.log(`  ok - ${m
 
     // Both server phrasings classify as quota with a deadline attached.
     const e1 = agyClassify('', 'RESOURCE_EXHAUSTED (code 429): You have exhausted your capacity on this model. Your quota will reset after 2s');
-    ok(e1 && e1.kind === 'quota' && e1.data.cooldownUntilMs >= Date.now() + 29_000,
-      'Q4: sub-30s reset floored to ≥30s');
+    ok(e1 && e1.kind === 'quota' && e1.data.cooldownUntilMs >= Date.now() + 29_000 && e1.data.cooldownUntilMs <= Date.now() + 31_000,
+      'Q4: sub-30s reset floored to ≥30s (and only ~30s)');
+    ok(parseResetsIn('Resets in 2h0m0s ... later ... Resets in 1h50m0s') === 1 * 3600 + 50 * 60,
+      'Q4: freshest (last) duration wins in a multi-event log tail');
+    ok(parseResetsIn('will reset after some time. Also: Resets in 2h3m57s') === 2 * 3600 + 3 * 60 + 57,
+      'Q4: digitless phrase does not shadow a real duration');
     const e2 = agyClassify('', 'You have exhausted your quota on this model.');
     ok(e2 && e2.kind === 'quota' && e2.data.cooldownUntilMs === undefined,
       'Q4: CLI-compiled quota string classifies, no fake deadline');
