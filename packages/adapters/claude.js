@@ -62,12 +62,19 @@ function parseClaudeResetMs(text, now = Date.now()) {
   return d.getTime();
 }
 
+// One quota-wording decision for all three classification sites (exit-time
+// stderr/stdout, mid-stream isApiErrorMessage events, result-line errors).
+// The server throttle explicitly says it is NOT the subscription limit —
+// retryable on the same account, never a quota signal.
+function isQuotaText(text) {
+  const s = String(text || '');
+  if (/not your usage limit/i.test(s)) return false;
+  return /usage limit|limit reached|limit will reset|rate limit|hit your \S+ limit/i.test(s);
+}
+
 function classifyError(stderr, stdout) {
   const text = [stderr, stdout].map((p) => String(p || '').trim()).filter(Boolean).join('\n');
-  // Server-side throttling explicitly says it is NOT the subscription limit —
-  // retryable on the same account, never a quota signal.
-  if (/not your usage limit/i.test(text)) return null;
-  if (/usage limit|limit reached|limit will reset|rate limit|hit your \S+ limit/i.test(text)) {
+  if (isQuotaText(text)) {
     const until = parseClaudeResetMs(text);
     return new BridgeError('quota', 'Claude subscription capacity is exhausted for now. Retry after the limit window resets.', {
       detail: text.slice(0, 300),
@@ -174,7 +181,8 @@ function createClaudeAdapter(opts = {}) {
       throw new BridgeError('bad_output', 'claude did not emit a stream-json result event', { detail: deltaText.slice(0, 200) });
     }
     if (apiError) {
-      const isQuota = apiError.error === 'rate_limit' || /hit your \S+ limit|usage limit/i.test(apiError.text);
+      const throttle = /not your usage limit/i.test(apiError.text);
+      const isQuota = !throttle && (apiError.error === 'rate_limit' || isQuotaText(apiError.text));
       const until = isQuota ? parseClaudeResetMs(apiError.text) : null;
       throw new BridgeError(isQuota ? 'quota' : 'bad_output',
         apiError.text || 'Claude reported an API error mid-stream',
@@ -183,7 +191,7 @@ function createClaudeAdapter(opts = {}) {
     if (resultLine.is_error) {
       const msg = String(resultLine.result || resultLine.subtype || 'Claude request failed');
       let kind = 'bad_output';
-      if (/usage limit|limit reached|rate limit/i.test(msg)) kind = 'quota';
+      if (isQuotaText(msg)) kind = 'quota';
       else if (/not logged in|please run \/login|authentication_failed|oauth token (?:expired|revoked)|invalid api key/i.test(msg)) kind = 'auth';
       const until = kind === 'quota' ? parseClaudeResetMs(msg) : null;
       throw new BridgeError(kind, msg, { ...(until ? { cooldownUntilMs: until } : {}) });
@@ -271,4 +279,4 @@ function createClaudeAdapter(opts = {}) {
   };
 }
 
-module.exports = { createClaudeAdapter, KNOWN_MODELS, parseClaudeResetMs, classifyError };
+module.exports = { createClaudeAdapter, KNOWN_MODELS, parseClaudeResetMs, classifyError, isQuotaText };

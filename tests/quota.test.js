@@ -136,6 +136,14 @@ function ok(cond, msg) { assert(cond, msg); passed += 1; console.log(`  ok - ${m
     const gate3 = sel3.account.breaker.allow();
     ok(gate3.allowed === false && gate3.retryInSec > 3600,
       `Q3: adapter-classified error drives the real breaker deadline (retry ${gate3.retryInSec}s)`);
+
+    // Throttle exclusion must hold at ALL classification sites — isQuotaText
+    // is the single decision the mid-stream and result-line branches share.
+    const { isQuotaText } = require(path.join(REPO, 'packages/adapters/claude.js'));
+    ok(isQuotaText('API Error: Server is temporarily limiting requests (not your usage limit)') === false,
+      'Q3: throttle text is not quota despite containing "usage limit"');
+    ok(isQuotaText('Your rate limit has been reached, limit will reset at 5pm') === true,
+      'Q3: broad limit wording classifies as quota');
   }
 
   console.log(`\nquota.test.js: all ${passed} assertions passed`);
