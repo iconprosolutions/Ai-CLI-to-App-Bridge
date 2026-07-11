@@ -88,6 +88,7 @@ function createQuotaService({
   pool,
   file,
   pollMinutes = Number(process.env.QUOTA_POLL_MINUTES) || 5,
+  backoffBaseMs = Number(process.env.QUOTA_BACKOFF_BASE_MS) || 60_000,
   fetchImpl = globalThis.fetch,
   // Production: run `agy models` under the account HOME so the CLI refreshes
   // its own token file (no Google OAuth client secret in our code). Injected
@@ -99,6 +100,7 @@ function createQuotaService({
 } = {}) {
   const snapshots = new Map(); // 'engine:name' → { limits, takenAt, source, error }
   const reactive = new Set(); // accounts degraded at runtime (403 scope)
+  const backoff = new Map(); // 'engine:name' → { until: epochMs, streak: n }
   const soonTimers = new Map();
   let interval = null;
   let persistTimer = null;
@@ -201,10 +203,19 @@ function createQuotaService({
     && acct.usageSource !== 'reactive' && !reactive.has(`${engine}:${acct.name}`);
 
   async function pollOne(engine, name) {
+    const key = `${engine}:${name}`;
+    const bo = backoff.get(key);
+    if (bo && Date.now() < bo.until) return; // still backing off
     const acct = pool.accounts(engine).find((a) => a.name === name);
     if (!acct || !pollable(engine, acct) || !POLLERS[engine]) return;
-    try { await POLLERS[engine](acct); } catch (err) {
-      logger.error(`[quota] ${engine}:${name} poll failed: ${err.message}`);
+    try {
+      await POLLERS[engine](acct);
+      backoff.delete(key); // success clears any backoff
+    } catch (err) {
+      const streak = ((bo && bo.streak) || 0) + 1;
+      const wait = Math.min(backoffBaseMs * 2 ** (streak - 1), 30 * 60_000);
+      backoff.set(key, { until: Date.now() + wait, streak });
+      logger.error(`[quota] ${engine}:${name} poll failed (backoff ${Math.round(wait / 1000)}s): ${err.message}`);
     }
   }
 
@@ -258,6 +269,7 @@ function createQuotaService({
     flushPersist();
     for (const t of soonTimers.values()) clearTimeout(t);
     soonTimers.clear();
+    backoff.clear();
   }
 
   return { start, stop, pollAll, pollSoon, get };

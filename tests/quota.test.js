@@ -314,5 +314,28 @@ function ok(cond, msg) { assert(cond, msg); passed += 1; console.log(`  ok - ${m
     ok(sweeps === 0, `Q6: stop() cancels the pending first sweep (${sweeps} sweeps fired)`);
   }
 
+  console.log('\n## Q7 — quota service: per-account poll backoff');
+  {
+    const { createQuotaService } = require(path.join(REPO, 'packages/provider/quota.js'));
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'q7-'));
+    const dir = path.join(tmp, 'c'); fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, '.credentials.json'), JSON.stringify({ claudeAiOauth: { accessToken: 't' } }));
+    const pool = { accounts: (e) => e === 'claude' ? [{ engine: 'claude', name: 'c', dir, enabled: true, needsLogin: false, usageSource: 'oauth' }] : [] };
+
+    let calls = 0;
+    const svc = createQuotaService({
+      pool, file: path.join(tmp, 's.json'),
+      fetchImpl: async () => { calls += 1; return { ok: false, status: 429, json: async () => ({}) }; },
+      backoffBaseMs: 50, // small for the test
+    });
+    await svc.pollAll();
+    ok(calls === 1, 'Q7: first poll attempts the fetch');
+    await svc.pollAll();
+    ok(calls === 1, 'Q7: a 429 puts the account in backoff — the immediate next sweep skips it');
+    await new Promise((r) => setTimeout(r, 70));
+    await svc.pollAll();
+    ok(calls === 2, 'Q7: after the backoff window elapses, the account is polled again');
+  }
+
   console.log(`\nquota.test.js: all ${passed} assertions passed`);
 })().catch((err) => { console.error(err); process.exit(1); });
