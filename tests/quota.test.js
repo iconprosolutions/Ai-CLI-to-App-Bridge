@@ -150,5 +150,27 @@ function ok(cond, msg) { assert(cond, msg); passed += 1; console.log(`  ok - ${m
       'Q3: broad limit wording classifies as quota');
   }
 
+  console.log('\n## Q4 — agy adapter: extended reset grammar');
+  {
+    const { parseResetsIn, parseBaselineRefreshMs, classifyError: agyClassify } =
+      require(path.join(REPO, 'packages/adapters/agy.js'));
+
+    ok(parseResetsIn('Resets in 2h3m57s') === 2 * 3600 + 3 * 60 + 57, 'Q4: "Resets in" grammar still parses');
+    ok(parseResetsIn('Your quota will reset after 146h52m11s.') === 146 * 3600 + 52 * 60 + 11,
+      'Q4: "reset after <GoDuration>" parses');
+    ok(parseResetsIn('nothing here') === null, 'Q4: no duration → null');
+
+    const b = parseBaselineRefreshMs("Your plan's baseline quota will refresh on 3/24/2026, 5:04:50 PM");
+    ok(b === new Date('2026-03-24T17:04:50').getTime(), 'Q4: baseline refresh date parses (local)');
+
+    // Both server phrasings classify as quota with a deadline attached.
+    const e1 = agyClassify('', 'RESOURCE_EXHAUSTED (code 429): You have exhausted your capacity on this model. Your quota will reset after 2s');
+    ok(e1 && e1.kind === 'quota' && e1.data.cooldownUntilMs >= Date.now() + 29_000,
+      'Q4: sub-30s reset floored to ≥30s');
+    const e2 = agyClassify('', 'You have exhausted your quota on this model.');
+    ok(e2 && e2.kind === 'quota' && e2.data.cooldownUntilMs === undefined,
+      'Q4: CLI-compiled quota string classifies, no fake deadline');
+  }
+
   console.log(`\nquota.test.js: all ${passed} assertions passed`);
 })().catch((err) => { console.error(err); process.exit(1); });

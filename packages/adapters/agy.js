@@ -35,8 +35,13 @@ function classifyError(stderr, stdout) {
   if (/authentication failed|please sign in|not signed in|sign in to continue/i.test(text)) {
     return new BridgeError('auth', 'Antigravity is not signed in for this account. Complete the account login, then retry.', { detail: text.slice(0, 300) });
   }
-  if (text.includes('You have exhausted your capacity on this model')) {
-    return new BridgeError('quota', 'Antigravity capacity for this model is exhausted. Retry later or use a Flash mode.', { detail: text.slice(0, 300) });
+  if (text.includes('You have exhausted your capacity on this model')
+    || text.includes('You have exhausted your quota on this model')) {
+    const until = agyCooldownUntilMs(text);
+    return new BridgeError('quota', 'Antigravity capacity for this model is exhausted. Retry later or use a Flash mode.', {
+      detail: text.slice(0, 300),
+      ...(until !== undefined ? { cooldownUntilMs: until } : {}),
+    });
   }
   if (text.includes('Requested entity was not found')) {
     return new BridgeError('model_not_found', 'The requested Gemini model is not available in this Antigravity session.', { detail: text.slice(0, 300) });
@@ -44,11 +49,30 @@ function classifyError(stderr, stdout) {
   return null;
 }
 
-// "Resets in 2h3m57s" → seconds (for a Retry-After hint). Null if absent.
+// "Resets in 2h3m57s" / "quota will reset after 146h52m11s" → seconds. Null if absent.
 function parseResetsIn(text) {
-  const m = /Resets in\s+(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?/i.exec(text);
+  const m = /(?:resets in|reset after)\s+(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?/i.exec(text);
   if (!m || (!m[1] && !m[2] && !m[3])) return null;
   return (Number(m[1] || 0) * 3600) + (Number(m[2] || 0) * 60) + Number(m[3] || 0);
+}
+
+// "baseline quota will refresh on 3/24/2026, 5:04:50 PM" → epoch ms (V8 parses
+// this US-locale form directly). The weekly-baseline lockout deadline.
+function parseBaselineRefreshMs(text) {
+  const m = /baseline quota will refresh on\s+([\d/]+,\s*[\d: ]+[AP]M)/i.exec(text);
+  if (!m) return null;
+  const t = Date.parse(m[1]);
+  return Number.isFinite(t) ? t : null;
+}
+
+// Deadline from any agy quota text: prefer the rolling-window duration
+// (floored to 30s — the server has a known "reset after 1s" loop bug),
+// else the weekly baseline date. Undefined when neither parses.
+function agyCooldownUntilMs(text) {
+  const sec = parseResetsIn(text);
+  if (sec != null) return Date.now() + Math.max(sec, 30) * 1000;
+  const baseline = parseBaselineRefreshMs(text);
+  return baseline != null ? baseline : undefined;
 }
 
 // On quota exhaustion agy is COMPLETELY silent: exit 0, empty stdout, empty
@@ -75,9 +99,14 @@ function classifyEmptyOutput(home) {
 
   if (/RESOURCE_EXHAUSTED|quota reached|Individual quota reached/i.test(tail)) {
     const retryAfterSec = parseResetsIn(tail);
+    const until = agyCooldownUntilMs(tail);
     return new BridgeError('quota',
       `Antigravity quota for this Google account is exhausted.${retryAfterSec ? ` Resets in ~${Math.ceil(retryAfterSec / 60)} min.` : ''}`,
-      { detail: 'agy exited 0 with no output; cli.log shows RESOURCE_EXHAUSTED', ...(retryAfterSec ? { retryAfterSec } : {}) });
+      {
+        detail: 'agy exited 0 with no output; cli.log shows RESOURCE_EXHAUSTED',
+        ...(retryAfterSec ? { retryAfterSec } : {}),
+        ...(until !== undefined ? { cooldownUntilMs: until } : {}),
+      });
   }
   if (/authentication failed|please sign in|not signed in|token.*(expired|revoked)/i.test(tail)) {
     return new BridgeError('auth', 'Antigravity is not signed in for this account. Complete the account login, then retry.', { detail: 'agy exited 0 with no output; cli.log shows an auth failure' });
@@ -198,4 +227,4 @@ function createAgyAdapter(opts = {}) {
   };
 }
 
-module.exports = { createAgyAdapter, CANDIDATE_MODELS };
+module.exports = { createAgyAdapter, CANDIDATE_MODELS, parseResetsIn, parseBaselineRefreshMs, classifyError };
