@@ -16,6 +16,7 @@ function planOrbitImport({ orbitAccounts, existing = {}, skipEmails = DEFAULT_SK
   const skip = new Set(skipEmails.map((e) => e.toLowerCase()));
   const existingClaude = (existing.claude || []).slice();
   const used = new Set(existingClaude.map((a) => a.name));
+  const importedEmails = new Set(existingClaude.filter((a) => a.orbitEmail).map((a) => a.orbitEmail.toLowerCase()));
   const imported = [];
   const skipped = [];
 
@@ -23,6 +24,7 @@ function planOrbitImport({ orbitAccounts, existing = {}, skipEmails = DEFAULT_SK
     if (acc.provider !== 'claude') { skipped.push({ id: acc.id, email: acc.email, reason: `provider ${acc.provider}, not claude` }); continue; }
     if (acc.source !== 'oauth') { skipped.push({ id: acc.id, email: acc.email, reason: `source ${acc.source}, no vaulted login` }); continue; }
     if (skip.has(String(acc.email).toLowerCase())) { skipped.push({ id: acc.id, email: acc.email, reason: 'daily driver — skip (use setup-token)' }); continue; }
+    if (importedEmails.has(String(acc.email).toLowerCase())) { skipped.push({ id: acc.id, email: acc.email, reason: 'already imported' }); continue; }
     if (!hasVaultBlob(acc.id)) { skipped.push({ id: acc.id, email: acc.email, reason: 'no vault blob (log in once while Orbit runs, then re-import)' }); continue; }
 
     let name = localpart(acc.email);
@@ -32,7 +34,7 @@ function planOrbitImport({ orbitAccounts, existing = {}, skipEmails = DEFAULT_SK
     imported.push({ name, dir: `accounts/claude/${name}`, usageSource: 'oauth', email: acc.email, blobFromVaultId: acc.id });
   }
 
-  const accountsJson = { ...existing, claude: existingClaude.concat(imported.map((a) => ({ name: a.name, dir: a.dir, usageSource: a.usageSource }))) };
+  const accountsJson = { ...existing, claude: existingClaude.concat(imported.map((a) => ({ name: a.name, dir: a.dir, usageSource: a.usageSource, orbitEmail: a.email }))) };
   return { imported, skipped, accountsJson };
 }
 

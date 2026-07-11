@@ -245,6 +245,21 @@ function ok(cond, msg) { assert(cond, msg); passed += 1; console.log(`  ok - ${m
       skipEmails: [], hasVaultBlob: () => true,
     });
     ok(plan2.imported[0].name === 'main-2', `H4: name collision de-conflicted (${plan2.imported[0].name})`);
+
+    // Re-run idempotency: an account already imported (matched by orbitEmail)
+    // is skipped, not duplicated under a suffixed name (review fix).
+    const rerun = planOrbitImport({
+      orbitAccounts: [
+        { id: 'uuid-1', email: 'dev1a@silentresponder.org', provider: 'claude', source: 'oauth' },
+        { id: 'uuid-9', email: 'fresh@silentresponder.org', provider: 'claude', source: 'oauth' },
+      ],
+      existing: { claude: [{ name: 'dev1a', dir: 'accounts/claude/dev1a', orbitEmail: 'dev1a@silentresponder.org' }] },
+      skipEmails: [], hasVaultBlob: () => true,
+    });
+    ok(rerun.imported.length === 1 && rerun.imported[0].name === 'fresh',
+      'H4: re-run skips already-imported email, imports only the new account');
+    ok(rerun.skipped.some((s) => s.email === 'dev1a@silentresponder.org' && /already imported/.test(s.reason)),
+      'H4: already-imported skip carries its reason');
   }
 
   console.log(`\nheadroom.test.js: all ${passed} assertions passed`);
