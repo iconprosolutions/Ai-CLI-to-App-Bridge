@@ -261,9 +261,9 @@ function ok(cond, msg) { assert(cond, msg); passed += 1; console.log(`  ok - ${m
     const fetchImpl = async (url, opts) => {
       calls.push({ url, auth: opts.headers.Authorization });
       if (url.includes('api.anthropic.com')) {
-        return { ok: true, status: 200, json: async () => ({ five_hour: { utilization: 40, resets_at: '2026-07-11T17:00:00Z' } }) };
+        return { ok: true, status: 200, json: async () => ({ five_hour: { utilization: 40, resets_at: new Date(Date.now() + 3600_000).toISOString() } }) };
       }
-      return { ok: true, status: 200, json: async () => ({ groups: [{ displayName: 'Gemini Models', buckets: [{ bucketId: 'five_hour', remaining: { remainingFraction: 0.5 }, resetTime: '2026-07-11T18:00:00Z' }] }] }) };
+      return { ok: true, status: 200, json: async () => ({ groups: [{ displayName: 'Gemini Models', buckets: [{ bucketId: 'five_hour', remaining: { remainingFraction: 0.5 }, resetTime: new Date(Date.now() + 3600_000).toISOString() }] }] }) };
     };
 
     const events = [];
