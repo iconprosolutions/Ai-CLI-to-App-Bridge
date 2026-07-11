@@ -226,5 +226,72 @@ function ok(cond, msg) { assert(cond, msg); passed += 1; console.log(`  ok - ${m
     ok(eff[0].percent === 0 && eff[0].fresh === true, 'Q5: past reset ⇒ fresh window');
   }
 
+  console.log('\n## Q6 — quota service: polling, degradation, persistence');
+  {
+    const { createQuotaService } = require(path.join(REPO, 'packages/provider/quota.js'));
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'q6-quota-'));
+
+    // Fake pool: two claude accounts (one reactive) + one gemini account.
+    const mkDir = (name) => { const d = path.join(tmp, name); fs.mkdirSync(d, { recursive: true }); return d; };
+    const claudeMain = mkDir('claude-main');
+    fs.writeFileSync(path.join(claudeMain, '.credentials.json'),
+      JSON.stringify({ claudeAiOauth: { accessToken: 'tok-main' } }));
+    const agyDir = mkDir('agy-a');
+    fs.mkdirSync(path.join(agyDir, '.gemini', 'antigravity-cli'), { recursive: true });
+    fs.writeFileSync(path.join(agyDir, '.gemini', 'antigravity-cli', 'antigravity-oauth-token'),
+      JSON.stringify({ token: { access_token: 'g-tok', expiry: new Date(Date.now() + 3600_000).toISOString() } }));
+    const fakePool = {
+      accounts: (engine) => engine === 'claude'
+        ? [
+          { engine: 'claude', name: 'main', dir: claudeMain, enabled: true, needsLogin: false, usageSource: 'oauth' },
+          { engine: 'claude', name: 'shared', dir: mkDir('claude-shared'), enabled: true, needsLogin: false, usageSource: 'reactive' },
+        ]
+        : [{ engine: 'gemini', name: 'a', dir: agyDir, enabled: true, needsLogin: false, usageSource: 'oauth' }],
+    };
+
+    const calls = [];
+    const fetchImpl = async (url, opts) => {
+      calls.push({ url, auth: opts.headers.Authorization });
+      if (url.includes('api.anthropic.com')) {
+        return { ok: true, status: 200, json: async () => ({ five_hour: { utilization: 40, resets_at: '2026-07-11T17:00:00Z' } }) };
+      }
+      return { ok: true, status: 200, json: async () => ({ groups: [{ displayName: 'Gemini Models', buckets: [{ bucketId: 'five_hour', remaining: { remainingFraction: 0.5 }, resetTime: '2026-07-11T18:00:00Z' }] }] }) };
+    };
+
+    const events = [];
+    const svc = createQuotaService({
+      pool: fakePool, file: path.join(tmp, 'snap.json'), fetchImpl,
+      onChange: (ev) => events.push(ev),
+    });
+    await svc.pollAll();
+
+    ok(calls.some((c) => c.url.includes('api.anthropic.com') && c.auth === 'Bearer tok-main'),
+      'Q6: claude oauth account polled with its own token');
+    ok(!calls.some((c) => c.auth === 'Bearer undefined'), 'Q6: reactive account never polled');
+    ok(calls.some((c) => c.url.includes('cloudcode-pa.googleapis.com') && c.auth === 'Bearer g-tok'),
+      'Q6: agy account polled with the token-file access token');
+
+    const got = svc.get('claude', 'main');
+    ok(got && got.limits[0].percent === 40 && got.source === 'oauth', 'Q6: snapshot readable via get()');
+    ok(svc.get('claude', 'shared') === null, 'Q6: reactive account has no snapshot');
+    ok(events.length >= 2, `Q6: onChange fired per polled account (${events.length})`);
+
+    // 403 on the usage endpoint degrades the account to reactive (scope).
+    const svc403 = createQuotaService({
+      pool: fakePool, file: path.join(tmp, 'snap2.json'),
+      fetchImpl: async () => ({ ok: false, status: 403, json: async () => ({}) }),
+    });
+    await svc403.pollAll();
+    const deg = svc403.get('claude', 'main');
+    ok(deg === null || deg.source === 'reactive', 'Q6: 403 degrades the account to reactive');
+
+    // Persistence: a new instance reads the snapshot file back. The write is
+    // debounced ~1s, so give it time to land before the second instance loads.
+    await new Promise((r) => setTimeout(r, 1300));
+    const svc2 = createQuotaService({ pool: fakePool, file: path.join(tmp, 'snap.json'), fetchImpl });
+    const back = svc2.get('claude', 'main');
+    ok(back && back.limits[0].kind === 'session', 'Q6: snapshots survive a restart via the file');
+  }
+
   console.log(`\nquota.test.js: all ${passed} assertions passed`);
 })().catch((err) => { console.error(err); process.exit(1); });
