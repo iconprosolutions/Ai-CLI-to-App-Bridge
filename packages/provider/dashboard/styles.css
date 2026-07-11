@@ -198,3 +198,13 @@ select:disabled{opacity:.45}
 .vv.off{color:var(--on-dark-soft)}
 .livebtn .pl.dead{background:var(--down-d);animation:none}
 .abtn.busy{opacity:.5;pointer-events:none}
+
+/* Accounts tab — per-window quota bars (router Phase 1) */
+.qbars { margin-top: 8px; display: grid; gap: 4px; }
+.qrow { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.qlabel { min-width: 110px; color: var(--body); }
+.qbar { flex: 1; height: 6px; border-radius: 3px; background: var(--hairline); overflow: hidden; }
+.qfill { display: block; height: 100%; border-radius: 3px; background: var(--ok); }
+.qfill.warn { background: var(--warn); }
+.qfill.crit { background: var(--down); }
+.qpct { min-width: 36px; text-align: right; font-variant-numeric: tabular-nums; }

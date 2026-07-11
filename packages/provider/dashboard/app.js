@@ -101,7 +101,7 @@
   function connectEvents() {
     try {
       es = new EventSource('/dashboard/events' + (key() ? '?key=' + encodeURIComponent(key()) : ''));
-      ['request.start', 'request.end', 'breaker.change', 'engine.health', 'capture.change', 'account.change', 'keys.change', 'users.change'].forEach(function (t) {
+      ['request.start', 'request.end', 'breaker.change', 'engine.health', 'capture.change', 'account.change', 'quota.change', 'keys.change', 'users.change'].forEach(function (t) {
         es.addEventListener(t, throttledRefresh);
       });
       es.onopen = function () { setLive(true); if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } };
@@ -281,6 +281,33 @@
   }
 
   // ── Accounts ──────────────────────────────────────────────────────────
+  function fmtEta(ts) {
+    var ms = ts - Date.now();
+    if (ms <= 0) return 'now';
+    var m = Math.round(ms / 60000);
+    return m < 60 ? 'in ' + m + 'm' : m < 2880 ? 'in ' + Math.round(m / 60) + 'h' : 'in ' + Math.round(m / 1440) + 'd';
+  }
+  function quotaBars(a) {
+    var q = a.quota;
+    // No snapshot at all: reactive accounts say why; others show nothing yet.
+    if (!q) {
+      return a.usageSource === 'reactive' ? '<div class="sub2">usage: reactive (no polling)</div>' : '';
+    }
+    var rows = (q.limits || []).map(function (l) {
+      var pct = Math.max(0, Math.min(100, Math.round(l.percent)));
+      var cls = pct >= 90 ? ' crit' : pct >= 70 ? ' warn' : '';
+      var reset = l.resetsAt ? 'resets ' + fmtEta(l.resetsAt) : '';
+      return '<div class="qrow"><span class="qlabel">' + esc(l.label) + '</span>'
+        + '<span class="qbar"><span class="qfill' + cls + '" style="width:' + pct + '%"></span></span>'
+        + '<span class="qpct">' + pct + '%</span> <span class="sub2">' + esc(reset) + '</span></div>';
+    }).join('');
+    // Meta line ALWAYS renders when a snapshot exists — an auth-stale account
+    // with an empty limits array must still show its error badge (review note
+    // from the quota-service task).
+    var meta = (q.source || 'polled') + (q.staleMinutes != null ? ' · ' + q.staleMinutes + 'm ago' : '')
+      + (q.error ? ' · ' + q.error : '');
+    return '<div class="qbars">' + rows + '<div class="sub2">' + esc(meta) + '</div></div>';
+  }
   function accountState(a) {
     if (!a.enabled) return { cls: 'down', label: 'Disabled' };
     if (a.needsLogin) return { cls: 'down', label: 'Needs login' };
@@ -320,6 +347,7 @@
           + '<span class="k">Usage</span><span class="sub2">' + (u ? ftok(u.promptTokens + u.completionTokens) + ' tok · $' + (u.apiEquivalentUsd || 0).toFixed(2) + ' · ' + fmt(u.requests) + ' calls' : 'none in range') + '</span>'
           + '<span class="k">Config</span><span class="sub2 mono" style="word-break:break-all">' + (a.implicit ? 'ambient environment (no isolation)' : esc(a.dir)) + '</span>'
           + '</div>'
+          + quotaBars(a)
           + (a.needsLogin ? '<div class="loginbox"><span class="eyebrow">Log in once under this account, then Probe:</span><code id="' + esc(loginId) + '">' + esc(loginCmd) + '</code><button class="abtn" data-copy="' + esc(loginId) + '">Copy</button></div>' : '')
           + '<div class="eactions">'
           + '<button class="abtn primary" data-act="acct-probe" data-engine="' + esc(e) + '" data-name="' + esc(a.name) + '">Probe</button>'
