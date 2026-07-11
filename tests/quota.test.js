@@ -117,6 +117,10 @@ function ok(cond, msg) { assert(cond, msg); passed += 1; console.log(`  ok - ${m
 
     ok(parseClaudeResetMs('no reset info here', now) === null, 'Q3: unparseable → null');
 
+    // Prose after the reset clause must not poison the parse ("monthly" ≠ Monday).
+    const t5 = parseClaudeResetMs('resets 3:45pm. Note: monthly usage unaffected', now);
+    ok(t5 === new Date('2026-07-11T15:45:00').getTime(), 'Q3: trailing prose does not fake a weekday');
+
     // classifyError: quota errors carry the deadline…
     const qe = classifyError('', "You've hit your Opus limit · resets 3:45pm");
     ok(qe && qe.kind === 'quota' && Number.isFinite(qe.data.cooldownUntilMs),
@@ -132,7 +136,7 @@ function ok(cond, msg) { assert(cond, msg); passed += 1; console.log(`  ok - ${m
     fs.writeFileSync(path.join(tmp3, 'accounts.json'), JSON.stringify({ claude: [{ name: 'm', dir: 'm' }] }));
     const pool3 = createAccountPool({ file: path.join(tmp3, 'accounts.json'), baseDir: tmp3, engines: ['claude'], watch: false });
     const sel3 = pool3.select('claude', {});
-    pool3.feedback('claude', sel3.account, classifyError('', "You've hit your session limit · resets Mon 12:00am"));
+    pool3.feedback('claude', sel3.account, classifyError('', `Claude AI usage limit reached|${Math.floor((Date.now() + 2 * 3600 * 1000) / 1000)}`));
     const gate3 = sel3.account.breaker.allow();
     ok(gate3.allowed === false && gate3.retryInSec > 3600,
       `Q3: adapter-classified error drives the real breaker deadline (retry ${gate3.retryInSec}s)`);

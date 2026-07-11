@@ -24,6 +24,7 @@ const MODEL_ALIASES = {
 
 const WEEKDAYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
 const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+const NOT_MY_LIMIT_RE = /not your usage limit/i;
 
 // Parse a reset instant out of Claude limit-error text. Two generations:
 // legacy "…usage limit reached|<epoch>" and current human wording
@@ -35,7 +36,7 @@ function parseClaudeResetMs(text, now = Date.now()) {
   const s = String(text || '');
   const epoch = /\|(\d{10,13})\b/.exec(s);
   if (epoch) { const n = Number(epoch[1]); return n < 1e12 ? n * 1000 : n; }
-  const m = /resets?\s+(?:at\s+)?([^·\n()]+)/i.exec(s);
+  const m = /resets?\s+(?:at\s+)?([^·\n().,]+)/i.exec(s);
   if (!m) return null;
   const phrase = m[1].trim().toLowerCase();
   const t = /(\d{1,2})(?::(\d{2}))?\s*([ap]m)/.exec(phrase);
@@ -68,7 +69,7 @@ function parseClaudeResetMs(text, now = Date.now()) {
 // retryable on the same account, never a quota signal.
 function isQuotaText(text) {
   const s = String(text || '');
-  if (/not your usage limit/i.test(s)) return false;
+  if (NOT_MY_LIMIT_RE.test(s)) return false;
   return /usage limit|limit reached|limit will reset|rate limit|hit your \S+ limit/i.test(s);
 }
 
@@ -177,16 +178,16 @@ function createClaudeAdapter(opts = {}) {
     });
     if (buffer.trim()) handleLine(buffer);
 
-    if (!resultLine) {
-      throw new BridgeError('bad_output', 'claude did not emit a stream-json result event', { detail: deltaText.slice(0, 200) });
-    }
     if (apiError) {
-      const throttle = /not your usage limit/i.test(apiError.text);
+      const throttle = NOT_MY_LIMIT_RE.test(apiError.text);
       const isQuota = !throttle && (apiError.error === 'rate_limit' || isQuotaText(apiError.text));
       const until = isQuota ? parseClaudeResetMs(apiError.text) : null;
       throw new BridgeError(isQuota ? 'quota' : 'bad_output',
         apiError.text || 'Claude reported an API error mid-stream',
         { ...(until ? { cooldownUntilMs: until } : {}) });
+    }
+    if (!resultLine) {
+      throw new BridgeError('bad_output', 'claude did not emit a stream-json result event', { detail: deltaText.slice(0, 200) });
     }
     if (resultLine.is_error) {
       const msg = String(resultLine.result || resultLine.subtype || 'Claude request failed');
