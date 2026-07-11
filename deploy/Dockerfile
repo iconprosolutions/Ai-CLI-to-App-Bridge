@@ -2,7 +2,7 @@
 #
 # Both engines run here: claude (Claude Code CLI, npm) and gemini (Antigravity
 # `agy`, whose official installer ships a linux-amd64 build). agy auth is
-# file-based under a per-account HOME (.gemini/oauth_creds.json) — onboard a
+# file-based under a per-account HOME (.gemini/antigravity-cli/antigravity-oauth-token) — onboard a
 # gemini account by copying credentials logged in elsewhere (see DEPLOY-NAS.md);
 # there is no in-container browser login. If agy is ever absent the gemini engine
 # just reports "down" and claude routes keep working.

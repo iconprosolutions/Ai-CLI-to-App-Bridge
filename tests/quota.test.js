@@ -148,6 +148,14 @@ function ok(cond, msg) { assert(cond, msg); passed += 1; console.log(`  ok - ${m
       'Q3: throttle text is not quota despite containing "usage limit"');
     ok(isQuotaText('Your rate limit has been reached, limit will reset at 5pm') === true,
       'Q3: broad limit wording classifies as quota');
+
+    // First-strike Retry-After: the request that discovers the deadline must
+    // report it precisely, not a generic 60s (final-review fix).
+    const { httpFor } = require(path.join(REPO, 'packages/core/errors.js'));
+    const firstStrike = classifyError('', `Claude AI usage limit reached|${Math.floor((Date.now() + 2 * 3600 * 1000) / 1000)}`);
+    const mapped = httpFor(firstStrike);
+    ok(mapped.retryAfterSec > 7000 && mapped.retryAfterSec <= 7200,
+      `Q3: first-strike Retry-After derives from the parsed deadline (${mapped.retryAfterSec}s)`);
   }
 
   console.log('\n## Q4 — agy adapter: extended reset grammar');

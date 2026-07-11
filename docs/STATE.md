@@ -13,8 +13,9 @@ last-updated: '2026-07-11T09:50:00.000Z'
   SSE `quota.change`, per-account `quota` in `/dashboard/status`;
   `usageSource: oauth|reactive` per account (reactive = setup-token accounts,
   never polled). (2) Breakers: quota trips on FIRST failure and cools down
-  until the parsed reset instant (clamped 30s-8d; sources: usage-poll
-  resets_at → error-text parse → 15-min fallback). (3) Adapter detection
+  until the parsed reset instant (clamped 30s-8d; sources: error-text parse →
+  15-min fallback; poll-derived resets_at feeds the dashboard only — wiring
+  it into breaker correction is Phase 2). (3) Adapter detection
   fixes: claude parses both limit-error generations + catches mid-stream
   `isApiErrorMessage` limits (upstream #68816) + excludes "not your usage
   limit" server throttles via shared `isQuotaText`; agy parses "reset after

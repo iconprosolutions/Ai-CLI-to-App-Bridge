@@ -41,7 +41,18 @@ function httpFor(err) {
   const kind = err instanceof BridgeError ? err.kind : null;
   switch (kind) {
     case 'quota':
-      return { status: 429, type: 'rate_limit_error', param: null, retryAfterSec: err.retryAfterSec || 60 };
+      return {
+        status: 429,
+        type: 'rate_limit_error',
+        param: null,
+        // The request that DISCOVERS a cooldown deadline should report it
+        // precisely, not a generic 60s — subsequent requests get the precise
+        // value from the breaker either way.
+        retryAfterSec: err.retryAfterSec
+          || (err.data && Number.isFinite(err.data.cooldownUntilMs) && err.data.cooldownUntilMs > Date.now()
+            ? Math.ceil((err.data.cooldownUntilMs - Date.now()) / 1000)
+            : 60),
+      };
     case 'timeout':
       return { status: 504, type: 'upstream_timeout', param: null, retryAfterSec: null };
     case 'model_not_found':

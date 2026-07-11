@@ -29,9 +29,10 @@ const NOT_MY_LIMIT_RE = /not your usage limit/i;
 // Parse a reset instant out of Claude limit-error text. Two generations:
 // legacy "…usage limit reached|<epoch>" and current human wording
 // ("resets 3:45pm", "resets Mon 12:00am", "resets Jul 14 at 4pm (Europe/Berlin)").
-// Returns epoch ms or null. Times are read in THIS process's zone —
-// ponytail: good enough; the quota service's authoritative resets_at
-// (Task 6) corrects any drift on the next poll.
+// Returns epoch ms or null.
+// ponytail: good enough — times are read in THIS process's zone, so a tz-suffixed
+// wording can drift hours on a UTC host; bounded by the breaker clamp. Phase 2
+// wires poll-derived resets_at to correct open breakers.
 function parseClaudeResetMs(text, now = Date.now()) {
   const s = String(text || '');
   const epoch = /\|(\d{10,13})\b/.exec(s);
