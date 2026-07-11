@@ -1,14 +1,15 @@
 'use strict';
 
-// Per-engine circuit breaker. Opens on consecutive quota (2) or timeout (3)
-// failures so a known-exhausted engine fails fast with Retry-After instead
-// of spawning doomed CLI runs and burning retries. Half-open admits exactly
-// one trial after the cool-down; its outcome closes or reopens the circuit.
+// Per-engine circuit breaker. Opens on the first quota failure or 3
+// consecutive timeout failures so a known-exhausted engine fails fast with
+// Retry-After instead of spawning doomed CLI runs and burning retries.
+// Half-open admits exactly one trial after the cool-down; its outcome closes
+// or reopens the circuit.
 function createBreaker({
   engine,
-  quotaThreshold = 2,
+  quotaThreshold = 1, // a parsed limit error is definitive, not flaky
   timeoutThreshold = 3,
-  quotaCooldownMs = 15 * 60 * 1000,
+  quotaCooldownMs = 15 * 60 * 1000, // fallback when no reset signal parsed
   timeoutCooldownMs = 2 * 60 * 1000,
   onChange = null,
 } = {}) {
@@ -19,6 +20,12 @@ function createBreaker({
   let openedAt = 0;
   let cooldownMs = 0;
   let trialInFlight = false;
+
+  // Reset-precise deadlines are clamped: never trust a sub-30s reset (agy has
+  // a server-side bug that loops "reset after 1s"), never park an account for
+  // more than 8 days (longest observed weekly-baseline lockout, plus slack).
+  const MIN_UNTIL_MS = 30 * 1000;
+  const MAX_UNTIL_MS = 8 * 24 * 3600 * 1000;
 
   const change = (next) => {
     if (state === next) return;
@@ -54,7 +61,7 @@ function createBreaker({
     }
   }
 
-  function recordFailure(kind) {
+  function recordFailure(kind, opts = {}) {
     trialInFlight = false;
     if (kind === 'quota') {
       quotaStreak += 1;
@@ -73,6 +80,10 @@ function createBreaker({
     if (state === 'half-open' || tripQuota || tripTimeout) {
       reason = state === 'half-open' ? (kind || reason) : (tripQuota ? 'quota' : 'timeout');
       cooldownMs = reason === 'quota' ? quotaCooldownMs : timeoutCooldownMs;
+      // A quota error that names its reset instant cools exactly until then.
+      if (reason === 'quota' && Number.isFinite(opts.until)) {
+        cooldownMs = Math.min(Math.max(opts.until - Date.now(), MIN_UNTIL_MS), MAX_UNTIL_MS);
+      }
       openedAt = Date.now();
       change('open');
     }

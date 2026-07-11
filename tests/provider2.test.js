@@ -805,10 +805,8 @@ async function main() {
   const { createBreaker } = require(path.join(REPO, 'packages', 'provider', 'breaker.js'));
   const b = createBreaker({ engine: 'claude', quotaCooldownMs: 200 });
   b.recordFailure('quota');
-  assert(b.allow().allowed === true, 'one quota failure keeps circuit closed');
-  b.recordFailure('quota');
   const denied = b.allow();
-  assert(denied.allowed === false && denied.retryInSec >= 1, 'second consecutive quota opens the circuit');
+  assert(denied.allowed === false && denied.retryInSec >= 1, 'a single quota failure opens the circuit (quota is definitive)');
   await new Promise((rr) => setTimeout(rr, 250));
   const trial = b.allow();
   assert(trial.allowed === true && trial.trial === true, 'cooldown elapsed → half-open admits one trial');
