@@ -111,16 +111,19 @@ function createQuotaService({
     }
   } catch (err) { logger.error(`[quota] snapshot file unreadable, starting empty: ${err.message}`); }
 
+  const flushPersist = () => {
+    if (!file) return;
+    try {
+      const tmp = `${file}.${crypto.randomBytes(4).toString('hex')}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify(Object.fromEntries(snapshots)));
+      fs.renameSync(tmp, file);
+    } catch (err) { logger.error(`[quota] persist failed: ${err.message}`); }
+  };
+
   const persist = () => {
     if (!file) return;
     clearTimeout(persistTimer);
-    persistTimer = setTimeout(() => {
-      try {
-        const tmp = `${file}.${crypto.randomBytes(4).toString('hex')}.tmp`;
-        fs.writeFileSync(tmp, JSON.stringify(Object.fromEntries(snapshots)));
-        fs.renameSync(tmp, file);
-      } catch (err) { logger.error(`[quota] persist failed: ${err.message}`); }
-    }, 1000);
+    persistTimer = setTimeout(flushPersist, 1000);
     persistTimer.unref();
   };
 
@@ -248,6 +251,7 @@ function createQuotaService({
     clearTimeout(firstSweep);
     firstSweep = null;
     clearTimeout(persistTimer);
+    flushPersist();
     for (const t of soonTimers.values()) clearTimeout(t);
     soonTimers.clear();
   }

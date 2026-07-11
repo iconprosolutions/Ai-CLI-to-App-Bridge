@@ -79,6 +79,9 @@ async function bootProvider(port, env) {
   }
   process.env.BRIDGE_ROUTES_FILE = routesCopy;
   process.env.BRIDGE_CREDENTIALS_FILE = path.join(TMP, `creds-${port}.json`);
+  // Booted test servers must never run the interval poller — a test that ever
+  // seeds a real-looking credential file must not reach the network.
+  process.env.BRIDGE_QUOTA_POLL = '0';
   Object.assign(process.env, env);
   require(SERVER);
   process.env = oldEnv;
@@ -969,6 +972,8 @@ async function main() {
     assert(Array.isArray(st.accounts.claude) && st.accounts.claude.length === 2
       && st.accounts.gemini.length === 1 && st.accounts.claude[0].needsLogin === false,
     'status exposes the account pool');
+    assert(Object.prototype.hasOwnProperty.call(st.accounts.claude[0], 'quota'),
+      'status accounts carry a quota field (null until first poll)');
   }
 
   // Signed-in identity surfaces per account from its config dir. Write a

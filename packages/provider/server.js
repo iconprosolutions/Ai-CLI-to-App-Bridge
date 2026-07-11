@@ -7,11 +7,12 @@ const cors = require('cors');
 
 const {
   httpFor, BridgeError, createSmoothPacer, installGracefulShutdown, intEnv, strEnv,
-  extractJson, assertJsonSchema,
+  extractJson, assertJsonSchema, runCli,
 } = require('@bridge/core');
 const { createClaudeAdapter, createAgyAdapter } = require('@bridge/adapters');
 const { createRouteRegistry } = require('./routes');
 const { createAccountPool } = require('./accounts');
+const { createQuotaService } = require('./quota');
 const { createKeyStore, validateLimits } = require('./keys');
 const { createLimitGuard } = require('./limits');
 const { createUserStore } = require('./users');
@@ -191,8 +192,26 @@ const pool = createAccountPool({
     if (ev.kind === 'breaker') console.log(`[breaker] ${ev.engine}:${ev.account} → ${ev.breaker.state}${ev.breaker.reason ? ` (${ev.breaker.reason})` : ''}`);
     if (ev.kind === 'needs-login') console.warn(`[accounts] ${ev.engine}:${ev.account} needs login`);
     events.emit('account.change', ev);
+    // A quota-tripped breaker is the freshest possible signal — re-poll that
+    // account now so the dashboard (and Phase 2 selection) see real numbers.
+    if (ev.kind === 'breaker' && ev.breaker && ev.breaker.state === 'open' && ev.breaker.reason === 'quota') {
+      quota.pollSoon(ev.engine, ev.account);
+    }
   },
 });
+
+// Per-account subscription-usage snapshots (router spec §5). The poller is
+// advisory: any failure degrades one account's freshness, never dispatch.
+// BRIDGE_QUOTA_POLL=0 disables the interval (tests, air-gapped hosts).
+const quota = createQuotaService({
+  pool,
+  file: path.join(RUNTIME_DIR, 'quota-snapshots.json'),
+  agyRefresh: (acct) => runCli(process.env.GEMINI_PATH || process.env.AGY_PATH || 'agy', ['models'], {
+    timeoutMs: 15_000, maxBytes: 256 * 1024, env: { ...process.env, HOME: acct.dir },
+  }),
+  onChange: (ev) => events.emit('quota.change', ev),
+});
+if (process.env.BRIDGE_QUOTA_POLL !== '0') quota.start();
 
 // Server-side interval health sampling — uptime no longer depends on how
 // many dashboard tabs are polling (audit M13).
@@ -591,6 +610,7 @@ app.get('/dashboard/status', dashboardGate, async (req, res) => {
     for (const a of accountsSnap[e]) {
       const acct = pool.accounts(e).find((x) => x.name === a.name);
       try { a.identity = adapters[e].identity(pool.envFor(e, acct)); } catch (_) { a.identity = null; }
+      a.quota = quota.get(e, a.name);
     }
   }
   const origin = `${req.protocol}://${req.get('host')}`;
@@ -1459,5 +1479,16 @@ Promise.all([ledger.aggregate('today'), ledger.aggregate('month')])
 
 // A bridge dying must never orphan a quota-burning CLI run (audit H7).
 installGracefulShutdown({ server });
+// installGracefulShutdown (shared @bridge/core helper) owns the CLI-child
+// reap; quota's own teardown (flush the pending snapshot write, clear
+// pollers) is bridge-local, so it's a sibling listener on the same signals
+// rather than a change to the shared helper. Guarded like the helper's own
+// shutdownInstalled flag — server.js is require()'d fresh per boot in the
+// test harness, and each reload must not stack another pair of listeners.
+if (!globalThis.__bridgeQuotaShutdownHooked) {
+  globalThis.__bridgeQuotaShutdownHooked = true;
+  process.on('SIGTERM', () => quota.stop());
+  process.on('SIGINT', () => quota.stop());
+}
 
 module.exports = { app, server };
