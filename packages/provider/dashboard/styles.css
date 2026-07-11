@@ -208,3 +208,7 @@ select:disabled{opacity:.45}
 .qfill.warn { background: var(--warn); }
 .qfill.crit { background: var(--down); }
 .qpct { min-width: 36px; text-align: right; font-variant-numeric: tabular-nums; }
+
+/* Overview — fleet headroom summary (router Phase 2) */
+.fleet { display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0; }
+.fleetcard { display: flex; flex-direction: column; gap: 2px; padding: 8px 12px; border: 1px solid var(--hairline); border-radius: 8px; min-width: 180px; }

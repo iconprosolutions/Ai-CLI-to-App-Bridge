@@ -259,6 +259,36 @@
     $('ov-feed').innerHTML = (activeRows + doneRows) || '<div class="empty">No calls yet</div>';
   }
 
+  // Fleet headroom summary (router Phase 2): per-engine best account, how many
+  // windows still have room, and the soonest reset among the tight ones.
+  function renderFleet() {
+    var s = state.status;
+    if (!s || !s.accounts) { $('ov-fleet').innerHTML = ''; return; }
+    var cards = Object.keys(s.accounts).map(function (e) {
+      var accts = s.accounts[e] || [];
+      var withQ = accts.filter(function (a) { return a.quota && a.quota.limits && a.quota.limits.length; });
+      if (!withQ.length) return '<div class="fleetcard"><span class="eyebrow">' + esc(e) + '</span><span class="sub2">no usage data yet</span></div>';
+      // Best = lowest max-window utilization; count windows under 90%; soonest reset among tight ones.
+      var best = null, bestPct = 101, freeWin = 0, totWin = 0, nextReset = Infinity;
+      withQ.forEach(function (a) {
+        var mx = 0;
+        a.quota.limits.forEach(function (l) {
+          totWin += 1;
+          var p = Math.max(0, Math.min(100, Math.round(Number(l.percent) || 0)));
+          if (p < 90) freeWin += 1;
+          if (p > mx) mx = p;
+          if (l.resetsAt && p >= 90 && l.resetsAt < nextReset) nextReset = l.resetsAt;
+        });
+        if (mx < bestPct) { bestPct = mx; best = a; }
+      });
+      var resetTxt = nextReset < Infinity ? ' · next reset ' + fmtEta(nextReset) : '';
+      return '<div class="fleetcard"><span class="eyebrow">' + esc(e) + '</span>'
+        + '<span class="idmail">best: ' + esc(best ? best.name : '—') + ' (' + bestPct + '%)</span> '
+        + '<span class="sub2">' + freeWin + '/' + totWin + ' windows free' + esc(resetTxt) + '</span></div>';
+    }).join('');
+    $('ov-fleet').innerHTML = cards;
+  }
+
   // ── Routes ────────────────────────────────────────────────────────────
   function routeCalls(routeId) {
     var pr = (state.status.telemetry.perRoute || []).find(function (r) { return r.routeId === routeId; });
@@ -678,7 +708,7 @@
   function renderAll() {
     if (!state.status) return;
     renderHeader();
-    if (state.view === 'overview') { renderBanner(); renderEngines(); renderTiles(); renderFeed(); }
+    if (state.view === 'overview') { renderBanner(); renderEngines(); renderTiles(); renderFeed(); renderFleet(); }
     if (state.view === 'routes') renderRoutes();
     if (state.view === 'accounts') renderAccounts();
     if (state.view === 'tester') renderTesterRoutes();
