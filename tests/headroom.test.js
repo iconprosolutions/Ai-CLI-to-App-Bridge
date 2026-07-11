@@ -52,6 +52,79 @@ function ok(cond, msg) { assert(cond, msg); passed += 1; console.log(`  ok - ${m
     ok(isDrained([{ group: 'weekly', kind: 'weekly_all', label: 'Weekly', percent: 96 }], 'm') === true, 'H1: weekly ≥95 → drained');
     ok(isDrained([{ group: 'weekly', kind: 'weekly_scoped', label: 'Opus weekly', percent: 99 }], 'claude-sonnet-4-6') === false, 'H1: an exhausted Opus window does NOT drain a sonnet request');
     ok(isDrained([{ group: 'session', kind: 'session', label: 's', percent: 50 }, { group: 'weekly', kind: 'weekly_all', label: 'Weekly', percent: 50 }], 'm') === false, 'H1: mid-usage not drained');
+
+    // Boundary exactness: >= at 90/95, just-under stays undrained.
+    ok(isDrained([{ group: 'session', kind: 'session', label: 's', percent: 90 }], 'm') === true, 'H1: session exactly 90 → drained');
+    ok(isDrained([{ group: 'session', kind: 'session', label: 's', percent: 89.9 }], 'm') === false, 'H1: session 89.9 → not drained');
+    ok(isDrained([{ group: 'weekly', kind: 'weekly_all', label: 'W', percent: 95 }], 'm') === true, 'H1: weekly exactly 95 → drained');
+    ok(isDrained([{ group: 'weekly', kind: 'weekly_all', label: 'W', percent: 94.9 }], 'm') === false, 'H1: weekly 94.9 → not drained');
+    // The threshold override Task 2 threads through select().
+    ok(isDrained([{ group: 'session', kind: 'session', label: 's', percent: 60 }], 'm', { sessionMax: 50 }) === true, 'H1: sessionMax override respected');
+  }
+
+  console.log('\n## H2 — headroom-aware select()');
+  {
+    const { createAccountPool } = require(path.join(REPO, 'packages/provider/accounts.js'));
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'h2-'));
+    const mk = (names) => {
+      const file = path.join(tmp, `${names.join('-')}.json`);
+      fs.writeFileSync(file, JSON.stringify({ claude: names.map((n) => ({ name: n, dir: n })) }));
+      return createAccountPool({ file, baseDir: tmp, engines: ['claude'], watch: false });
+    };
+
+    // Headroom map keyed by account name → effective limits array (or null).
+    const scen = {
+      a: [{ group: 'weekly', kind: 'weekly_all', label: 'Weekly', percent: 80 }],
+      b: [{ group: 'weekly', kind: 'weekly_all', label: 'Weekly', percent: 10 }],
+      c: [{ group: 'weekly', kind: 'weekly_all', label: 'Weekly', percent: 40 }],
+    };
+    const headroom = (engine, name) => scen[name] || null;
+
+    // Least-utilized account wins regardless of round-robin order.
+    const p1 = mk(['a', 'b', 'c']);
+    const s1 = p1.select('claude', { model: 'claude-sonnet-4-6', headroom });
+    ok(s1.ok && s1.account.name === 'b', `H2: lowest-utilization account chosen (got ${s1.account && s1.account.name})`);
+
+    // With NO headroom fn, selection is the old round-robin (first eligible).
+    const p2 = mk(['a', 'b', 'c']);
+    const s2 = p2.select('claude', {});
+    ok(s2.ok && s2.account.name === 'a', 'H2: no headroom fn → round-robin (unchanged legacy behavior)');
+
+    // Drain threshold: a 96%-weekly account is skipped while others have room.
+    const drainScen = {
+      a: [{ group: 'weekly', kind: 'weekly_all', label: 'Weekly', percent: 96 }],
+      b: [{ group: 'weekly', kind: 'weekly_all', label: 'Weekly', percent: 70 }],
+    };
+    const p3 = mk(['a', 'b']);
+    const s3 = p3.select('claude', { model: 'm', headroom: (e, n) => drainScen[n] || null });
+    ok(s3.ok && s3.account.name === 'b', 'H2: drained account (96%) skipped for a non-drained one');
+
+    // All drained → least-utilized still serves (never refuse existing capacity).
+    const allDrain = {
+      a: [{ group: 'weekly', kind: 'weekly_all', label: 'Weekly', percent: 99 }],
+      b: [{ group: 'weekly', kind: 'weekly_all', label: 'Weekly', percent: 96 }],
+    };
+    const p4 = mk(['a', 'b']);
+    const s4 = p4.select('claude', { model: 'm', headroom: (e, n) => allDrain[n] || null });
+    ok(s4.ok && s4.account.name === 'b', 'H2: all drained → least-utilized (96%) still serves');
+
+    // Unknown (null) accounts score neutral 50: chosen over a 60% account,
+    // skipped in favor of a 20% account.
+    const mixScen = { a: null, b: [{ group: 'weekly', kind: 'weekly_all', label: 'Weekly', percent: 60 }] };
+    const p5 = mk(['a', 'b']);
+    const s5 = p5.select('claude', { model: 'm', headroom: (e, n) => mixScen[n] });
+    ok(s5.ok && s5.account.name === 'a', 'H2: unknown (neutral 50) beats a known 60%-used account');
+
+    // A drained primary spills to the pool; a healthy primary is preferred.
+    const prFile = path.join(tmp, 'primary.json');
+    fs.writeFileSync(prFile, JSON.stringify({ claude: [{ name: 'main', dir: 'main', primary: true }, { name: 'alt', dir: 'alt' }] }));
+    const p6 = createAccountPool({ file: prFile, baseDir: tmp, engines: ['claude'], watch: false });
+    const drainedPrimary = { main: [{ group: 'weekly', kind: 'weekly_all', label: 'Weekly', percent: 97 }], alt: [{ group: 'weekly', kind: 'weekly_all', label: 'Weekly', percent: 30 }] };
+    const s6 = p6.select('claude', { model: 'm', headroom: (e, n) => drainedPrimary[n] || null });
+    ok(s6.ok && s6.account.name === 'alt', 'H2: a drained primary spills to the pool');
+    const healthyPrimary = { main: [{ group: 'weekly', kind: 'weekly_all', label: 'Weekly', percent: 20 }], alt: [{ group: 'weekly', kind: 'weekly_all', label: 'Weekly', percent: 10 }] };
+    const s6b = p6.select('claude', { model: 'm', headroom: (e, n) => healthyPrimary[n] || null });
+    ok(s6b.ok && s6b.account.name === 'main', 'H2: a healthy primary is still preferred even if not the lowest-scored');
   }
 
   console.log(`\nheadroom.test.js: all ${passed} assertions passed`);

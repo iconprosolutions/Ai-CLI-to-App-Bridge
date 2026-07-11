@@ -15,6 +15,7 @@ const NEUTRAL_SCORE = 50;
 // A model-scoped weekly window ("Opus weekly") applies to a request only when
 // its leading word (the model family) appears in the route's model string.
 // weekly_all and session windows always apply.
+// Assumes display_name is a bare model name ('Opus'), never an engine name — an engine-wide scoped label would shadow weekly_all.
 function scopedApplies(limit, model) {
   if (!limit || limit.kind !== 'weekly_scoped') return true;
   const family = String(limit.label || '').split(/\s+/)[0].toLowerCase();
@@ -29,7 +30,7 @@ function headroomScore(limits, model) {
   if (!limits || !limits.length) return NEUTRAL_SCORE;
   const weekly = limits.filter((l) => l.group === 'weekly' && scopedApplies(l, model)).map((l) => Number(l.percent) || 0);
   const session = limits.filter((l) => l.group === 'session').map((l) => Number(l.percent) || 0);
-  const w = weekly.length ? Math.max(...weekly) : 0;
+  const w = weekly.length ? Math.round(Math.max(...weekly)) : 0;
   const s = session.length ? Math.max(...session) : 0;
   return w + s / 1000;
 }
@@ -156,7 +157,7 @@ function createAccountPool({
   // pinMode 'hard' (default): a pinned request fails loud if its account can't
   // take it. pinMode 'soft': the pin is a *preference* — an app's assigned
   // account — and an unusable assignment falls back to the rest of the pool.
-  function select(engine, { pin = null, pinMode = 'hard', exclude = null } = {}) {
+  function select(engine, { pin = null, pinMode = 'hard', exclude = null, model = null, headroom = null, drainThresholds } = {}) {
     const eng = state[engine];
     if (!eng) return { ok: false, status: 400, message: `Unknown engine "${engine}"` };
 
@@ -180,23 +181,56 @@ function createAccountPool({
       return { ok: true, account: acct, trial: Boolean(gate.trial) };
     }
 
-    // Primary preference: the designated main account takes traffic while it
-    // is healthy AND has a free CLI slot; overflow and outages spill to the
-    // rest of the pool (rotation below naturally skips a broken primary).
-    const primary = eng.accounts.find((a) => a.primary && eligible(a) && a.name !== exclude);
-    if (primary && primary.semaphore.active < maxSlots) {
+    // ── Unpinned selection ────────────────────────────────────────────────
+    const eligibleAccts = eng.accounts.filter((a) => eligible(a) && a.name !== exclude);
+    if (!eligibleAccts.length) {
+      return { ok: false, status: 503, message: `No usable ${engine} account (all disabled or logged out).` };
+    }
+
+    // Primary preference: still first choice while healthy, NOT drained, and
+    // with a free CLI slot; a drained or full primary spills to the pool.
+    const primary = eligibleAccts.find((a) => a.primary);
+    if (primary && primary.semaphore.active < maxSlots
+      && !(headroom && isDrained(headroom(engine, primary.name), model, drainThresholds))) {
       const gate = primary.breaker.allow();
       if (gate.allowed) return { ok: true, account: primary, trial: Boolean(gate.trial) };
     }
 
-    const n = eng.accounts.length;
+    // Order candidates. With a headroom fn (Phase 2): non-drained first, then
+    // ascending bottleneck score, then round-robin distance as the tiebreak —
+    // unless EVERY eligible account is drained, in which case drain rank is
+    // dropped so the least-utilized still serves (never refuse real capacity).
+    // Without a headroom fn: the original cursor-relative round-robin order.
+    let ordered;
+    if (headroom) {
+      const scored = eligibleAccts.map((a) => ({
+        a,
+        drained: isDrained(headroom(engine, a.name), model, drainThresholds),
+        score: headroomScore(headroom(engine, a.name), model),
+        dist: (eng.accounts.indexOf(a) - eng.cursor + eng.accounts.length) % eng.accounts.length,
+      }));
+      const allDrained = scored.every((x) => x.drained);
+      scored.sort((x, y) =>
+        (allDrained ? 0 : ((x.drained ? 1 : 0) - (y.drained ? 1 : 0)))
+        || (x.score - y.score)
+        || (x.dist - y.dist));
+      ordered = scored.map((x) => x.a);
+    } else {
+      const n = eng.accounts.length;
+      ordered = [];
+      for (let i = 0; i < n; i += 1) {
+        const acct = eng.accounts[(eng.cursor + i) % n];
+        if (eligible(acct) && acct.name !== exclude) ordered.push(acct);
+      }
+    }
+
+    // Gate the chosen order on breakers; first account whose circuit admits
+    // wins and advances the cursor. Track the soonest reopen for the 429 hint.
     let soonest = null;
-    for (let i = 0; i < n; i += 1) {
-      const acct = eng.accounts[(eng.cursor + i) % n];
-      if (!eligible(acct) || acct.name === exclude) continue;
+    for (const acct of ordered) {
       const gate = acct.breaker.allow();
       if (gate.allowed) {
-        eng.cursor = (eng.cursor + i + 1) % n;
+        eng.cursor = (eng.accounts.indexOf(acct) + 1) % eng.accounts.length;
         return { ok: true, account: acct, trial: Boolean(gate.trial) };
       }
       if (gate.retryInSec && (soonest === null || gate.retryInSec < soonest)) soonest = gate.retryInSec;
