@@ -957,13 +957,14 @@ async function main() {
     path: '/v1/chat/completions', method: 'POST', headers: { Authorization: 'Bearer adm15' },
     body: { model, messages: [{ role: 'user', content: 'hi' }] },
   });
-  await call15('bridge-claude-haiku-4.5-spark');
+  r = await call15('bridge-claude-haiku-4.5-spark');
   await call15('bridge-claude-haiku-4.5-spark');
   await call15('bridge-agy-gemini-3.5-flash-medium-pulse');
   const envLines15 = fs.readFileSync(ENVLOG15, 'utf8').trim().split('\n').map(JSON.parse);
   const claudeDirs = new Set(envLines15.filter((l) => l.argv.includes('-p')).map((l) => l.CLAUDE_CONFIG_DIR).filter(Boolean));
   assert(claudeDirs.size === 2 && [...claudeDirs].every((d) => /acct\/claude\/w[12]$/.test(d)),
     `rotation spans both claude account config dirs (got ${[...claudeDirs].join(', ')})`);
+  assert(r.status === 200, 'headroom wiring: multi-account claude dispatch still succeeds with no snapshots (neutral scoring)');
   const agyHomes = envLines15.filter((l) => l.argv.includes('--print')).map((l) => l.HOME);
   assert(agyHomes.length === 1 && /acct\/gemini\/g1$/.test(agyHomes[0]), 'agy spawn HOME redirected to account dir');
   r = await request(P15, { path: '/dashboard/status' });

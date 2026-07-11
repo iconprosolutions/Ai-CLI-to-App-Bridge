@@ -211,9 +211,25 @@ const quota = createQuotaService({
   agyRefresh: (acct) => runCli(process.env.GEMINI_PATH || process.env.AGY_PATH || 'agy', ['models'], {
     timeoutMs: 15_000, maxBytes: 256 * 1024, env: { ...process.env, HOME: acct.dir },
   }),
-  onChange: (ev) => events.emit('quota.change', ev),
+  onChange: (ev) => {
+    events.emit('quota.change', ev);
+    // A fresh poll can retire a quota breaker whose parsed deadline was wrong.
+    if (ev.limits) pool.refreshQuotaBreaker(ev.engine, ev.account, ev.limits);
+  },
 });
 if (QUOTA_POLL) quota.start();
+
+// Headroom source for account selection (router spec §6): the account's
+// effective quota windows, or null when there's no snapshot or it's too stale
+// to trust (older than 3 poll intervals) — a null makes the scorer treat the
+// account as neutral rather than falsely healthy.
+const QUOTA_POLL_MINUTES = Number(process.env.QUOTA_POLL_MINUTES) || 5;
+const HEADROOM_STALE_MIN = QUOTA_POLL_MINUTES * 3;
+const headroomFor = (engine, name) => {
+  const q = quota.get(engine, name);
+  if (!q || q.staleMinutes > HEADROOM_STALE_MIN) return null;
+  return q.limits;
+};
 
 // Server-side interval health sampling — uptime no longer depends on how
 // many dashboard tabs are polling (audit M13).
@@ -910,7 +926,7 @@ async function chatCompletion(req, res) {
   // Soft pins ("this app's assigned account, but fail over when exhausted")
   // only exist on keys; route pins stay hard.
   const pinMode = (keyPin && pin === keyPin && req.auth.pinMode === 'soft') ? 'soft' : 'hard';
-  let sel = pool.select(route.engine, { pin, pinMode });
+  let sel = pool.select(route.engine, { pin, pinMode, model: route.model, headroom: headroomFor });
   if (!sel.ok) {
     // Cross-model failover before spawning anything: the engine's whole pool
     // is exhausted (429: all cooling down) or out of service (503: all
@@ -920,7 +936,7 @@ async function chatCompletion(req, res) {
     const fb = (!pin || pinMode === 'soft') && route.quotaFallback ? registry.resolve(route.quotaFallback) : null;
     if (fb && fb.enabled !== false && !enginesDisabled[fb.engine]
       && Buffer.byteLength(prompt, 'utf8') <= engineCap(fb.engine)) {
-      const alt = pool.select(fb.engine, {});
+      const alt = pool.select(fb.engine, { model: fb.model, headroom: headroomFor });
       if (alt.ok) {
         rerouted = { from: route.id, to: fb.id, reason: 'engine_exhausted' };
         console.log(`[req ${reqId}] ${route.engine} pool unavailable (${sel.status}) → cross-model reroute ${route.id} → ${fb.id}`);
@@ -1025,7 +1041,7 @@ async function chatCompletion(req, res) {
         // they fail loud. Un-pinned and soft-pinned requests move on.
         if ((!pin || pinMode === 'soft') && FAILOVER_KINDS.has(kind) && canFailover() && !clientAborted) {
           pool.feedback(route.engine, sel.account, err);
-          const next = pool.select(route.engine, { exclude: sel.account.name });
+          const next = pool.select(route.engine, { exclude: sel.account.name, model: route.model, headroom: headroomFor });
           if (next.ok) {
             release();
             release = await next.account.semaphore.acquire(ac.signal);
@@ -1044,7 +1060,7 @@ async function chatCompletion(req, res) {
           const fb = kind === 'quota' && route.quotaFallback ? registry.resolve(route.quotaFallback) : null;
           if (fb && fb.enabled !== false && !enginesDisabled[fb.engine]
             && Buffer.byteLength(fullPrompt, 'utf8') <= engineCap(fb.engine)) {
-            const alt = pool.select(fb.engine, {});
+            const alt = pool.select(fb.engine, { model: fb.model, headroom: headroomFor });
             if (alt.ok) {
               release();
               release = await alt.account.semaphore.acquire(ac.signal);

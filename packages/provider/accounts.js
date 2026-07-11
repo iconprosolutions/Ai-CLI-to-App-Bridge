@@ -286,6 +286,29 @@ function createAccountPool({
     for (const a of (state[engine] ? state[engine].accounts : [])) a.breaker.reset();
   }
 
+  // Phase 2 poll→breaker correction: when a fresh usage snapshot shows an
+  // account is no longer near ANY limit, clear a breaker that was opened for
+  // quota — the parsed reset deadline may have been wrong (e.g. a timezone-
+  // naive error string on a UTC host) and the real numbers say it has capacity
+  // now. CONSERVATIVE by design: unlike selection's model-scoped isDrained,
+  // this counts every window (session + all weekly, scoped or not) so we never
+  // reopen an account while any bucket is still hot. Returns true only when it
+  // actually cleared something.
+  function refreshQuotaBreaker(engine, name, limits) {
+    const acct = state[engine] && state[engine].accounts.find((a) => a.name === name);
+    if (!acct) return false;
+    const st = acct.breaker.status();
+    if (st.state === 'closed' || st.reason !== 'quota') return false;
+    if (!limits || !limits.length) return false; // no data → trust the deadline
+    const hot = limits.some((l) => {
+      const p = Number(l.percent) || 0;
+      return l.group === 'session' ? p >= 90 : p >= 95;
+    });
+    if (hot) return false;
+    acct.breaker.reset();
+    return true;
+  }
+
   // Runtime enable/disable, mirroring engine-level disable. In-memory: an
   // accounts.json reload reasserts the file's `enabled` value (file is truth).
   function setEnabled(engine, name, enabled) {
@@ -332,7 +355,7 @@ function createAccountPool({
   }
 
   return {
-    select, envFor, feedback, clearNeedsLogin, resetBreakers, setEnabled, engineBreakerStatus, snapshot,
+    select, envFor, feedback, clearNeedsLogin, resetBreakers, refreshQuotaBreaker, setEnabled, engineBreakerStatus, snapshot,
     inflight: (engine) => sums(engine, 'active'),
     queued: (engine) => sums(engine, 'queued'),
     accounts: (engine) => (state[engine] ? state[engine].accounts.slice() : []),

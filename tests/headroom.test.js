@@ -166,5 +166,30 @@ function ok(cond, msg) { assert(cond, msg); passed += 1; console.log(`  ok - ${m
     ok(second.account.name === 'y', 'H2: busy best account spills the burst to the next-best');
   }
 
+  console.log('\n## H3 — refreshQuotaBreaker (poll corrects a wrong deadline)');
+  {
+    const { createAccountPool, headroomScore } = require(path.join(REPO, 'packages/provider/accounts.js'));
+    const { BridgeError } = require(path.join(REPO, 'packages/core/errors.js'));
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'h3-'));
+    const file = path.join(tmp, 'a.json');
+    fs.writeFileSync(file, JSON.stringify({ claude: [{ name: 'x', dir: 'x' }] }));
+    const pool = createAccountPool({ file, baseDir: tmp, engines: ['claude'], watch: false });
+    const sel = pool.select('claude', {});
+    // Trip a quota breaker with an 8-hour deadline (simulating a wrong parse).
+    pool.feedback('claude', sel.account, new BridgeError('quota', 'limit', { cooldownUntilMs: Date.now() + 8 * 3600 * 1000 }));
+    ok(pool.select('claude', {}).ok === false, 'H3: account is cooling after the quota trip');
+
+    // A fresh poll shows the account is NOT drained → the quota breaker clears.
+    const changed = pool.refreshQuotaBreaker('claude', 'x', [{ group: 'weekly', kind: 'weekly_all', label: 'Weekly', percent: 5, fresh: true }]);
+    ok(changed === true, 'H3: refreshQuotaBreaker returns true when it cleared a quota breaker');
+    ok(pool.select('claude', {}).ok === true, 'H3: account is usable again after the correction');
+
+    // It must NOT clear a still-drained account, nor a non-quota breaker.
+    const sel2 = pool.select('claude', {});
+    pool.feedback('claude', sel2.account, new BridgeError('quota', 'limit', { cooldownUntilMs: Date.now() + 3600 * 1000 }));
+    const noClear = pool.refreshQuotaBreaker('claude', 'x', [{ group: 'weekly', kind: 'weekly_all', label: 'Weekly', percent: 98 }]);
+    ok(noClear === false && pool.select('claude', {}).ok === false, 'H3: a still-drained account is NOT cleared');
+  }
+
   console.log(`\nheadroom.test.js: all ${passed} assertions passed`);
 })().catch((err) => { console.error(err); process.exit(1); });
