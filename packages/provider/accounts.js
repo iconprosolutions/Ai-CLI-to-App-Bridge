@@ -203,15 +203,23 @@ function createAccountPool({
     // Without a headroom fn: the original cursor-relative round-robin order.
     let ordered;
     if (headroom) {
-      const scored = eligibleAccts.map((a) => ({
-        a,
-        drained: isDrained(headroom(engine, a.name), model, drainThresholds),
-        score: headroomScore(headroom(engine, a.name), model),
-        dist: (eng.accounts.indexOf(a) - eng.cursor + eng.accounts.length) % eng.accounts.length,
-      }));
+      const scored = eligibleAccts.map((a) => {
+        const h = headroom(engine, a.name); // hoisted — was computed twice per candidate
+        return {
+          a,
+          drained: isDrained(h, model, drainThresholds),
+          // Accounts with all CLI slots taken rank behind free ones — a burst
+          // must spill across the pool, not queue behind one "best" account
+          // while others idle (queueing happens AFTER selection).
+          busy: a.semaphore.active >= maxSlots,
+          score: headroomScore(h, model),
+          dist: (eng.accounts.indexOf(a) - eng.cursor + eng.accounts.length) % eng.accounts.length,
+        };
+      });
       const allDrained = scored.every((x) => x.drained);
       scored.sort((x, y) =>
         (allDrained ? 0 : ((x.drained ? 1 : 0) - (y.drained ? 1 : 0)))
+        || ((x.busy ? 1 : 0) - (y.busy ? 1 : 0))
         || (x.score - y.score)
         || (x.dist - y.dist));
       ordered = scored.map((x) => x.a);

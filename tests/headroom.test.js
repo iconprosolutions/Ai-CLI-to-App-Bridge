@@ -144,6 +144,26 @@ function ok(cond, msg) { assert(cond, msg); passed += 1; console.log(`  ok - ${m
     p7.feedback('claude', selAssigned.account, new BridgeError('quota', 'exhausted'));
     const s7 = p7.select('claude', { pin: 'assigned', pinMode: 'soft', model: 'm', headroom: (e, n) => spScen[n] });
     ok(s7.ok && s7.account.name === 'idle', 'H2: soft-pin fallback stays headroom-aware (review fix)');
+
+    // Cold start: no snapshots anywhere → all score neutral-50 → the dist
+    // tiebreak must degrade to round-robin, not herd on index 0.
+    const p8 = mk(['a', 'b', 'c']);
+    const cold = (n) => { const r = []; for (let i = 0; i < n; i += 1) { const s = p8.select('claude', { model: 'm', headroom: () => null }); r.push(s.account.name); } return r; };
+    ok(cold(2).join(',') === 'a,b', 'H2: equal scores degrade to round-robin by cursor distance');
+
+    // Busy spill: the best-scored account with all slots taken ranks behind a
+    // free account — a burst spreads across the pool instead of queueing.
+    const p9 = mk(['x', 'y']);
+    const busyScen = {
+      x: [{ group: 'weekly', kind: 'weekly_all', label: 'Weekly', percent: 5 }],
+      y: [{ group: 'weekly', kind: 'weekly_all', label: 'Weekly', percent: 60 }],
+    };
+    const hb = (e, n) => busyScen[n];
+    const first = p9.select('claude', { model: 'm', headroom: hb });
+    ok(first.account.name === 'x', 'H2: best-scored account chosen when free');
+    first.account.semaphore.acquire(); // occupy x's only CLI slot
+    const second = p9.select('claude', { model: 'm', headroom: hb });
+    ok(second.account.name === 'y', 'H2: busy best account spills the burst to the next-best');
   }
 
   console.log(`\nheadroom.test.js: all ${passed} assertions passed`);
