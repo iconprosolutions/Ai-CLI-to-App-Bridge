@@ -7,6 +7,45 @@ const { createSemaphore } = require('./semaphore');
 
 const NAME_RE = /^[A-Za-z0-9._-]+$/;
 
+// ── Headroom scoring (router Phase 2) ─────────────────────────────────────
+// An account with no snapshot (or a stale one the caller filtered out) scores
+// NEUTRAL — it neither hogs traffic nor gets starved before we know its state.
+const NEUTRAL_SCORE = 50;
+
+// A model-scoped weekly window ("Opus weekly") applies to a request only when
+// its leading word (the model family) appears in the route's model string.
+// weekly_all and session windows always apply.
+function scopedApplies(limit, model) {
+  if (!limit || limit.kind !== 'weekly_scoped') return true;
+  const family = String(limit.label || '').split(/\s+/)[0].toLowerCase();
+  return Boolean(family) && String(model || '').toLowerCase().includes(family);
+}
+
+// Bottleneck utilization (0-100+) for a request against one account: the
+// most-consumed applicable WEEKLY window dominates; the busiest session window
+// contributes a sub-integer tiebreak so among equal-weekly accounts the one
+// with more session headroom is preferred. null/empty → NEUTRAL_SCORE.
+function headroomScore(limits, model) {
+  if (!limits || !limits.length) return NEUTRAL_SCORE;
+  const weekly = limits.filter((l) => l.group === 'weekly' && scopedApplies(l, model)).map((l) => Number(l.percent) || 0);
+  const session = limits.filter((l) => l.group === 'session').map((l) => Number(l.percent) || 0);
+  const w = weekly.length ? Math.max(...weekly) : 0;
+  const s = session.length ? Math.max(...session) : 0;
+  return w + s / 1000;
+}
+
+// An account is "drained" for a request when a window it depends on is at/near
+// its limit: session ≥ sessionMax OR any applicable weekly ≥ weeklyMax. Drained
+// accounts are skipped unless ALL eligible accounts are drained. Unknown → not
+// drained (we don't strand capacity we can't measure).
+function isDrained(limits, model, { sessionMax = 90, weeklyMax = 95 } = {}) {
+  if (!limits || !limits.length) return false;
+  const weekly = limits.filter((l) => l.group === 'weekly' && scopedApplies(l, model));
+  const session = limits.filter((l) => l.group === 'session');
+  return session.some((l) => (Number(l.percent) || 0) >= sessionMax)
+    || weekly.some((l) => (Number(l.percent) || 0) >= weeklyMax);
+}
+
 // Validate a parsed accounts.json: { claude: [{name, dir, enabled?, primary?}], gemini: [...] }.
 // Same philosophy as routes.json — throw precisely at boot, keep last good on reload.
 function validateAccounts(data) {
@@ -260,4 +299,4 @@ function createAccountPool({
   };
 }
 
-module.exports = { createAccountPool, validateAccounts };
+module.exports = { createAccountPool, validateAccounts, headroomScore, isDrained, scopedApplies, NEUTRAL_SCORE };
