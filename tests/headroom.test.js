@@ -202,5 +202,50 @@ function ok(cond, msg) { assert(cond, msg); passed += 1; console.log(`  ok - ${m
     ok(clearedT === false && poolT.select('claude', {}).ok === false, 'H3: fresh numbers never clear a timeout breaker');
   }
 
+  console.log('\n## H4 — Orbit import planner');
+  {
+    const { planOrbitImport } = require(path.join(REPO, 'packages/provider/orbit-import.js'));
+
+    // Orbit accounts: claude oauth ones become bridge accounts; codex/manual
+    // and the skip-listed daily-drivers are excluded.
+    const orbit = [
+      { id: 'uuid-1', email: 'dev1a@silentresponder.org', provider: 'claude', source: 'oauth' },
+      { id: 'uuid-2', email: 'dev2b@silentresponder.org', provider: 'claude', source: 'oauth' },
+      { id: 'uuid-3', email: 'waqar@iconprosolutions.com', provider: 'claude', source: 'oauth' }, // daily driver → skip
+      { id: 'uuid-4', email: 'hello@x.com', provider: 'codex', source: 'oauth' }, // wrong provider
+      { id: 'uuid-5', email: 'x@y.org', provider: 'claude', source: 'manual' }, // no vaulted blob
+    ];
+    const plan = planOrbitImport({
+      orbitAccounts: orbit,
+      existing: { claude: [{ name: 'main', dir: 'accounts/claude/main' }] },
+      skipEmails: ['waqar@iconprosolutions.com', 'waqar@unitedtf.org'],
+      hasVaultBlob: (id) => id !== 'uuid-5', // uuid-5 has no keychain blob
+    });
+
+    const names = plan.imported.map((a) => a.name).sort();
+    ok(names.length === 2 && names.includes('dev1a') && names.includes('dev2b'),
+      `H4: only claude+oauth+vaulted+non-skipped accounts imported (${names.join(',')})`);
+    ok(plan.skipped.some((s) => s.email === 'waqar@iconprosolutions.com' && /daily driver|skip/i.test(s.reason)),
+      'H4: daily-driver skipped with a reason');
+    ok(plan.skipped.some((s) => s.email === 'hello@x.com' && /provider/i.test(s.reason)), 'H4: non-claude skipped');
+    ok(plan.skipped.some((s) => s.id === 'uuid-5' && /vault|blob|login/i.test(s.reason)), 'H4: no-blob account skipped');
+
+    // Each imported account: unique name (email localpart, de-collided),
+    // dir under accounts/claude/, usageSource oauth, preserves existing 'main'.
+    const imp = plan.imported.find((a) => a.name === 'dev1a');
+    ok(imp.dir === 'accounts/claude/dev1a' && imp.usageSource === 'oauth' && imp.blobFromVaultId === 'uuid-1',
+      'H4: imported account has dir/usageSource/vault-id wiring');
+    ok(plan.accountsJson.claude.some((a) => a.name === 'main'), 'H4: existing accounts preserved');
+    ok(plan.accountsJson.claude.filter((a) => a.name === 'dev1a').length === 1, 'H4: no duplicate account rows');
+
+    // Name collision with an existing account gets a numeric suffix.
+    const plan2 = planOrbitImport({
+      orbitAccounts: [{ id: 'u', email: 'main@x.com', provider: 'claude', source: 'oauth' }],
+      existing: { claude: [{ name: 'main', dir: 'accounts/claude/main' }] },
+      skipEmails: [], hasVaultBlob: () => true,
+    });
+    ok(plan2.imported[0].name === 'main-2', `H4: name collision de-conflicted (${plan2.imported[0].name})`);
+  }
+
   console.log(`\nheadroom.test.js: all ${passed} assertions passed`);
 })().catch((err) => { console.error(err); process.exit(1); });
