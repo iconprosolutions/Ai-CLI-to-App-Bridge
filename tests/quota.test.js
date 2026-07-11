@@ -47,5 +47,48 @@ function ok(cond, msg) { assert(cond, msg); passed += 1; console.log(`  ok - ${m
     ok(b5.allow().allowed === true, 'Q1: two timeouts stay closed (threshold 3 unchanged)');
   }
 
+  console.log('\n## Q2 — account pool: usageSource + cooldown pass-through');
+  {
+    const { createAccountPool, validateAccounts } = require(path.join(REPO, 'packages/provider/accounts.js'));
+    const { BridgeError } = require(path.join(REPO, 'packages/core/errors.js'));
+
+    // usageSource validates: absent OK, 'oauth'/'reactive' OK, junk rejected.
+    validateAccounts({ claude: [{ name: 'a', dir: 'x' }, { name: 'b', dir: 'y', usageSource: 'reactive' }] });
+    ok(true, 'Q2: usageSource absent/reactive accepted');
+    let threw = false;
+    try { validateAccounts({ claude: [{ name: 'a', dir: 'x', usageSource: 'push' }] }); }
+    catch (e) { threw = /usageSource/.test(e.message); }
+    ok(threw, 'Q2: unknown usageSource rejected with a precise message');
+
+    // feedback() forwards cooldownUntilMs to the account breaker.
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'q2-accounts-'));
+    const file = path.join(tmp, 'accounts.json');
+    fs.writeFileSync(file, JSON.stringify({ claude: [{ name: 'main', dir: 'main' }, { name: 'alt', dir: 'alt', usageSource: 'reactive' }] }));
+    const pool = createAccountPool({ file, baseDir: tmp, engines: ['claude'], watch: false });
+    const snap = pool.snapshot();
+    ok(snap.claude[0].usageSource === 'oauth' && snap.claude[1].usageSource === 'reactive',
+      'Q2: snapshot carries usageSource (default oauth)');
+
+    const sel = pool.select('claude', { pin: 'main' });
+    const until = Date.now() + 45 * 60 * 1000;
+    pool.feedback('claude', sel.account, new BridgeError('quota', 'limit', { cooldownUntilMs: until }));
+    const gate = sel.account.breaker.allow();
+    ok(gate.allowed === false && gate.retryInSec > 40 * 60,
+      `Q2: feedback passes the deadline through (retry ${gate.retryInSec}s)`);
+
+    // Half-open re-failure with a deadline (review fold-in from Task 1): a
+    // trial that fails with a fresh deadline must cool until THAT deadline.
+    const { createBreaker } = require(path.join(REPO, 'packages/provider/breaker.js'));
+    const hb = createBreaker({ engine: 'claude:ho', quotaCooldownMs: 50 });
+    hb.recordFailure('quota'); // opens with 50ms fallback
+    await new Promise((r) => setTimeout(r, 80));
+    const trial = hb.allow(); // half-open trial
+    ok(trial.allowed === true && trial.trial === true, 'Q2: half-open admits the trial');
+    hb.recordFailure('quota', { until: Date.now() + 20 * 60 * 1000 });
+    const regate = hb.allow();
+    ok(regate.allowed === false && regate.retryInSec > 15 * 60,
+      `Q2: half-open re-failure honors the new deadline (retry ${regate.retryInSec}s)`);
+  }
+
   console.log(`\nquota.test.js: all ${passed} assertions passed`);
 })().catch((err) => { console.error(err); process.exit(1); });

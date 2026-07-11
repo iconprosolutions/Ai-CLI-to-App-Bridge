@@ -22,6 +22,9 @@ function validateAccounts(data) {
       if (seen.has(a.name)) throw new Error(`accounts.json: duplicate ${engine} account name "${a.name}"`);
       seen.add(a.name);
       if (typeof a.dir !== 'string' || !a.dir) throw new Error(`accounts.json: ${engine}/${a.name} needs a "dir"`);
+      if (a.usageSource !== undefined && !['oauth', 'reactive'].includes(a.usageSource)) {
+        throw new Error(`accounts.json: ${engine}/${a.name} "usageSource" must be "oauth" or "reactive"`);
+      }
       if (a.primary === true) primaries += 1;
     }
     if (primaries > 1) throw new Error(`accounts.json: "${engine}" has ${primaries} primary accounts — mark at most one`);
@@ -55,6 +58,10 @@ function createAccountPool({
       enabled: def.enabled !== false,
       primary: def.primary === true,
       implicit: Boolean(def.implicit),
+      // 'oauth' → the quota service polls this account's provider usage
+      // endpoint; 'reactive' → never poll (setup-token / shared credentials),
+      // quota knowledge comes only from parsed limit errors.
+      usageSource: def.usageSource || 'oauth',
       needsLogin: false,
       breaker: createBreaker({
         engine: `${engine}:${def.name}`,
@@ -77,7 +84,7 @@ function createAccountPool({
         cursor: state[engine] ? state[engine].cursor : 0,
         accounts: defs.map((def) => {
           const old = prev.find((p) => p.name === def.name && p.dir === (def.dir ? path.resolve(baseDir, def.dir) : null));
-          if (old) { old.enabled = def.enabled !== false; old.primary = def.primary === true; return old; } // keep breaker/needsLogin state
+          if (old) { old.enabled = def.enabled !== false; old.primary = def.primary === true; old.usageSource = def.usageSource || 'oauth'; return old; } // keep breaker/needsLogin state
           return makeAccount(engine, def);
         }),
       };
@@ -183,7 +190,9 @@ function createAccountPool({
       }
       return;
     }
-    account.breaker.recordFailure(err.kind);
+    account.breaker.recordFailure(err.kind, {
+      until: err.data && Number.isFinite(err.data.cooldownUntilMs) ? err.data.cooldownUntilMs : undefined,
+    });
   }
 
   function clearNeedsLogin(engine, name) {
@@ -231,6 +240,7 @@ function createAccountPool({
         implicit: a.implicit,
         enabled: a.enabled,
         primary: a.primary === true,
+        usageSource: a.usageSource,
         needsLogin: a.needsLogin,
         breaker: a.breaker.status(),
         inflight: a.semaphore.active,

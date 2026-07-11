@@ -23,6 +23,10 @@ class BridgeError extends Error {
     super(message);
     this.name = 'BridgeError';
     this.kind = kind;
+    // Raw opts, kept verbatim so callers can read ad-hoc fields (e.g. the
+    // quota cooldown deadline an adapter parsed off a reset header) without
+    // this constructor having to know every field name up front.
+    this.data = opts;
     if (opts.detail !== undefined) this.detail = opts.detail;
     if (opts.retryAfterSec !== undefined) this.retryAfterSec = opts.retryAfterSec;
     // Optional fine-grained tag within a kind (e.g. 'prompt_overflow' inside
