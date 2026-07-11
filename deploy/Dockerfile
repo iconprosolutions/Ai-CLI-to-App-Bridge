@@ -19,9 +19,15 @@ RUN npm install -g @anthropic-ai/claude-code
 # The Antigravity CLI provides the `gemini` engine binary. The official installer
 # detects linux/amd64 and downloads the matching build; --dir puts it on PATH for
 # all users. Pinned to the current line via the installer's own manifest.
+#
+# agy < 1.1.1 exits 0 with EMPTY output on server errors in --print mode — the
+# bridge's quota detection is blind on those builds. Fail the build rather
+# than ship a blind image.
 RUN curl -fsSL https://antigravity.google/cli/install.sh | bash -s -- --dir /usr/local/bin \
     && test -x /usr/local/bin/agy \
-    && /usr/local/bin/agy --version
+    && /usr/local/bin/agy --version \
+    && AGY_V=$(/usr/local/bin/agy --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1) \
+    && printf '%s\n1.1.1\n' "$AGY_V" | sort -V | head -1 | grep -qx '1.1.1'
 
 WORKDIR /app
 

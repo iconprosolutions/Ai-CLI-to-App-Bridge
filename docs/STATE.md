@@ -1,10 +1,33 @@
 ---
-last-updated: '2026-07-04T18:45:00.000Z'
+last-updated: '2026-07-11T09:50:00.000Z'
 ---
 # AI CLI Bridge State
 
 ## Current Status
 
+- **Router Phase 1 shipped (2026-07-11): quota intelligence + reset-precise
+  breakers.** (1) `packages/provider/quota.js` — per-account usage snapshots
+  via free provider endpoints (claude `api/oauth/usage` w/ oauth-scope
+  accounts, agy `retrieveUserQuotaSummary` w/ CLI-driven token refresh), 5-min
+  poller + `pollSoon` on breaker-open, persisted to `quota-snapshots.json`,
+  SSE `quota.change`, per-account `quota` in `/dashboard/status`;
+  `usageSource: oauth|reactive` per account (reactive = setup-token accounts,
+  never polled). (2) Breakers: quota trips on FIRST failure and cools down
+  until the parsed reset instant (clamped 30s-8d; sources: usage-poll
+  resets_at → error-text parse → 15-min fallback). (3) Adapter detection
+  fixes: claude parses both limit-error generations + catches mid-stream
+  `isApiErrorMessage` limits (upstream #68816) + excludes "not your usage
+  limit" server throttles via shared `isQuotaText`; agy parses "reset after
+  <dur>"/"baseline refresh on <date>" grammars (floored vs the 1s-loop server
+  bug), freshest-log-entry wins, quota-on-stdout guard. (4) Dashboard
+  Accounts tab: per-window usage bars (percent/reset ETA/staleness/source/error).
+  (5) Dockerfile now FAILS the build on agy <1.1.1 (1.0.16 swallows
+  print-mode errors — NAS was blind to agy quota exhaustion; **NAS needs an
+  image rebuild to pick this up**). Tests: 48-assertion quota suite +
+  provider2 at 366; full chain green. Spec:
+  `docs/superpowers/specs/2026-07-11-multi-model-router-design.md`; plan:
+  `docs/superpowers/plans/2026-07-11-router-phase-1-quota-intel.md`. Phase 2
+  next: headroom-aware dispatch + Orbit account import.
 - **SaaS polish round shipped + live (2026-07-04 night).** (1) Keys are
   presented OpenRouter-style as `sk-bridge-<48hex>` (verify strips the prefix;
   bare legacy keys keep working). (2) Signed-in sessions authorize `/v1`
@@ -157,6 +180,10 @@ Nothing blocked.
 
 ## Up Next
 
+- **Router Phase 2 next**: headroom-aware dispatch + Orbit account import,
+  then Phase 3 (codex engine), Phase 4 (auto-routes/rules/per-key flags),
+  Phase 5 (NAS deploy round) — all per
+  `docs/superpowers/specs/2026-07-11-multi-model-router-design.md`.
 - **Deployed and live** — the NAS deploy, account onboarding, and Hermes cutover
   all completed 2026-07-04 (see Current Status). Remaining: decide PR/merge of
   `feat/dashboard-overhaul` into main.
