@@ -1,10 +1,50 @@
 ---
-last-updated: '2026-07-11T09:50:00.000Z'
+last-updated: '2026-07-11T23:49:00.000Z'
 ---
 # AI CLI Bridge State
 
 ## Current Status
 
+- **Router Phase 2 shipped (2026-07-11): headroom-aware dispatch + Orbit
+  import.** (1) Unpinned selection now orders candidates by bottleneck
+  utilization — the worst applicable weekly window dominates, busiest
+  session is a sub-integer tiebreak; model-scoped windows (e.g. "Opus
+  weekly") count only for their model family. Drained accounts (session
+  ≥90% / weekly ≥95%) sort last unless every eligible account is drained
+  (then least-utilized still serves); busy accounts (no free CLI slot) rank
+  behind free ones so bursts spill across the pool; unknown/stale snapshots
+  score neutral (50); no headroom fn passed → legacy round-robin (existing
+  tests unaffected); a drained primary spills to the pool, a healthy one is
+  still preferred; soft-pin fallback stays headroom-aware. All four
+  `server.js` `pool.select()` call sites (primary dispatch, cross-engine
+  fallback ×2, mid-dispatch failover) now pass `model`+`headroom`. (2)
+  `quota.change` → `pool.refreshQuotaBreaker`: a fresh, clean poll (never an
+  error-bearing or stale-beyond-3-poll-intervals snapshot) retires a quota
+  breaker whose parsed reset deadline was wrong; conservative — any
+  still-hot window (session ≥90 / weekly ≥95, unscoped) blocks the clear;
+  timeout breakers are never poll-cleared. (3) Per-account exponential poll
+  backoff on fetch failure (60s base ×2, 30min cap, cleared on success;
+  `QUOTA_BACKOFF_BASE_MS`) — keeps a failing endpoint from being hammered
+  across N accounts once Orbit multiplies the fleet. (4) Orbit import:
+  `scripts/import-orbit-accounts.js` (`--dry-run`/`--runtime`/`--skip`/
+  `--orbit-db`) reads Orbit's SQLite DB + keychain vault and registers
+  Claude accounts into `accounts.json`. Live dry-run against the operator's
+  real `~/.claudeos/claudeos.db` verified: 5 dev-fleet accounts importable
+  (dev1a, dev1b, dev1c, dev2b, dev3b); daily drivers
+  (`waqar@iconprosolutions.com`, `waqar@unitedtf.org`) skipped for separate
+  `claude setup-token` onboarding; re-runs are idempotent (new `orbitEmail`
+  field on each imported account skips already-imported ones on the next
+  pass — verified). **Operator TODO: run the script WITHOUT `--dry-run` on
+  the Mac when ready, then rsync the new account dirs + `accounts.json` to
+  the NAS.** (5) Dashboard Overview gains a fleet headroom summary (best
+  account per engine, windows free, next reset). Tests: `quota.test.js`
+  grew to 52 assertions (Q7 backoff); new `headroom.test.js` at 46
+  assertions (H1 scoring, H2 select(), H3 refreshQuotaBreaker, H4 Orbit
+  planner); full chain now **8 suites / 758 assertions, all green**; `npm
+  run check` clean. Spec:
+  `docs/superpowers/specs/2026-07-11-multi-model-router-design.md` §6
+  (headroom-aware dispatch) / §9 (dashboard & import tooling); plan:
+  `docs/superpowers/plans/2026-07-11-router-phase-2-headroom-dispatch.md`.
 - **Router Phase 1 shipped (2026-07-11): quota intelligence + reset-precise
   breakers.** (1) `packages/provider/quota.js` — per-account usage snapshots
   via free provider endpoints (claude `api/oauth/usage` w/ oauth-scope
@@ -181,10 +221,14 @@ Nothing blocked.
 
 ## Up Next
 
-- **Router Phase 2 next**: headroom-aware dispatch + Orbit account import,
-  then Phase 3 (codex engine), Phase 4 (auto-routes/rules/per-key flags),
-  Phase 5 (NAS deploy round) — all per
-  `docs/superpowers/specs/2026-07-11-multi-model-router-design.md`.
+- **Router Phase 3 next**: codex engine (persistent app-server, spec §4),
+  then Phase 4 (auto-routes/rules/per-key routing flags, spec §8), then
+  Phase 5 (NAS deploy round + live smokes against real headroom data) — all
+  per `docs/superpowers/specs/2026-07-11-multi-model-router-design.md`.
+- Operator TODO carried from Phase 2: run
+  `node scripts/import-orbit-accounts.js` WITHOUT `--dry-run` on the Mac,
+  then rsync the new `accounts/claude/<name>/.credentials.json` dirs +
+  updated `accounts.json` to the NAS.
 - **Deployed and live** — the NAS deploy, account onboarding, and Hermes cutover
   all completed 2026-07-04 (see Current Status). Remaining: decide PR/merge of
   `feat/dashboard-overhaul` into main.
