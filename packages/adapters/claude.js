@@ -22,10 +22,57 @@ const MODEL_ALIASES = {
   'claude-subscription-opus-4.8': 'claude-opus-4-8',
 };
 
+const WEEKDAYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
+const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+
+// Parse a reset instant out of Claude limit-error text. Two generations:
+// legacy "…usage limit reached|<epoch>" and current human wording
+// ("resets 3:45pm", "resets Mon 12:00am", "resets Jul 14 at 4pm (Europe/Berlin)").
+// Returns epoch ms or null. Times are read in THIS process's zone —
+// ponytail: good enough; the quota service's authoritative resets_at
+// (Task 6) corrects any drift on the next poll.
+function parseClaudeResetMs(text, now = Date.now()) {
+  const s = String(text || '');
+  const epoch = /\|(\d{10,13})\b/.exec(s);
+  if (epoch) { const n = Number(epoch[1]); return n < 1e12 ? n * 1000 : n; }
+  const m = /resets?\s+(?:at\s+)?([^·\n()]+)/i.exec(s);
+  if (!m) return null;
+  const phrase = m[1].trim().toLowerCase();
+  const t = /(\d{1,2})(?::(\d{2}))?\s*([ap]m)/.exec(phrase);
+  if (!t) return null;
+  const hour = (Number(t[1]) % 12) + (t[3] === 'pm' ? 12 : 0);
+  const minute = Number(t[2] || 0);
+  const d = new Date(now);
+  d.setSeconds(0, 0);
+  const mon = new RegExp(`\\b(${MONTHS.join('|')})[a-z]*\\s+(\\d{1,2})\\b`).exec(phrase);
+  const wd = new RegExp(`\\b(${WEEKDAYS.join('|')})[a-z]*\\b`).exec(phrase);
+  if (mon) {
+    d.setMonth(MONTHS.indexOf(mon[1]), Number(mon[2]));
+    d.setHours(hour, minute);
+    if (d.getTime() <= now) d.setFullYear(d.getFullYear() + 1);
+  } else if (wd) {
+    d.setHours(hour, minute);
+    let delta = (WEEKDAYS.indexOf(wd[1]) - d.getDay() + 7) % 7;
+    if (delta === 0 && d.getTime() <= now) delta = 7;
+    d.setDate(d.getDate() + delta);
+  } else {
+    d.setHours(hour, minute);
+    if (d.getTime() <= now) d.setDate(d.getDate() + 1);
+  }
+  return d.getTime();
+}
+
 function classifyError(stderr, stdout) {
   const text = [stderr, stdout].map((p) => String(p || '').trim()).filter(Boolean).join('\n');
-  if (/usage limit|limit reached|limit will reset|rate limit/i.test(text)) {
-    return new BridgeError('quota', 'Claude subscription capacity is exhausted for now. Retry after the limit window resets.', { detail: text.slice(0, 300) });
+  // Server-side throttling explicitly says it is NOT the subscription limit —
+  // retryable on the same account, never a quota signal.
+  if (/not your usage limit/i.test(text)) return null;
+  if (/usage limit|limit reached|limit will reset|rate limit|hit your \S+ limit/i.test(text)) {
+    const until = parseClaudeResetMs(text);
+    return new BridgeError('quota', 'Claude subscription capacity is exhausted for now. Retry after the limit window resets.', {
+      detail: text.slice(0, 300),
+      ...(until ? { cooldownUntilMs: until } : {}),
+    });
   }
   if (text.includes("There's an issue with the selected model") || text.includes('deprecated and will reach end-of-life')) {
     return new BridgeError('model_not_found', 'The requested Claude model is not available in this Claude Code install.', { detail: text.slice(0, 300) });
@@ -81,6 +128,7 @@ function createClaudeAdapter(opts = {}) {
     let buffer = '';
     let deltaText = '';
     let resultLine = null;
+    let apiError = null;
     const handleLine = (line) => {
       if (!line.trim()) return;
       let obj;
@@ -93,6 +141,12 @@ function createClaudeAdapter(opts = {}) {
           deltaText += ev.delta.text;
           if (typeof onDelta === 'function') onDelta(ev.delta.text);
         }
+      } else if (obj.type === 'assistant' && obj.isApiErrorMessage) {
+        // A mid-stream limit arrives as a synthetic assistant turn whose
+        // stop_reason looks like a clean completion (claude-code#68816) —
+        // isApiErrorMessage is the only reliable flag.
+        const blocks = (obj.message && obj.message.content) || [];
+        apiError = { error: String(obj.error || ''), text: blocks.map((b) => (b && b.text) || '').join(' ').trim() };
       } else if (obj.type === 'result') {
         resultLine = obj;
       }
@@ -119,12 +173,20 @@ function createClaudeAdapter(opts = {}) {
     if (!resultLine) {
       throw new BridgeError('bad_output', 'claude did not emit a stream-json result event', { detail: deltaText.slice(0, 200) });
     }
+    if (apiError) {
+      const isQuota = apiError.error === 'rate_limit' || /hit your \S+ limit|usage limit/i.test(apiError.text);
+      const until = isQuota ? parseClaudeResetMs(apiError.text) : null;
+      throw new BridgeError(isQuota ? 'quota' : 'bad_output',
+        apiError.text || 'Claude reported an API error mid-stream',
+        { ...(until ? { cooldownUntilMs: until } : {}) });
+    }
     if (resultLine.is_error) {
       const msg = String(resultLine.result || resultLine.subtype || 'Claude request failed');
       let kind = 'bad_output';
       if (/usage limit|limit reached|rate limit/i.test(msg)) kind = 'quota';
       else if (/not logged in|please run \/login|authentication_failed|oauth token (?:expired|revoked)|invalid api key/i.test(msg)) kind = 'auth';
-      throw new BridgeError(kind, msg);
+      const until = kind === 'quota' ? parseClaudeResetMs(msg) : null;
+      throw new BridgeError(kind, msg, { ...(until ? { cooldownUntilMs: until } : {}) });
     }
     const u = resultLine.usage || {};
     return {
@@ -209,4 +271,4 @@ function createClaudeAdapter(opts = {}) {
   };
 }
 
-module.exports = { createClaudeAdapter, KNOWN_MODELS };
+module.exports = { createClaudeAdapter, KNOWN_MODELS, parseClaudeResetMs, classifyError };

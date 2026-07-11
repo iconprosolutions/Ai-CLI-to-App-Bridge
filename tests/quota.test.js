@@ -90,5 +90,53 @@ function ok(cond, msg) { assert(cond, msg); passed += 1; console.log(`  ok - ${m
       `Q2: half-open re-failure honors the new deadline (retry ${regate.retryInSec}s)`);
   }
 
+  console.log('\n## Q3 — claude adapter: reset parsing + throttle exclusion');
+  {
+    const { parseClaudeResetMs, classifyError } = require(path.join(REPO, 'packages/adapters/claude.js'));
+    const now = new Date('2026-07-11T14:00:00').getTime(); // local 2pm
+
+    // Legacy pipe-epoch format (seconds).
+    ok(parseClaudeResetMs('Claude AI usage limit reached|1754298000', now) === 1754298000 * 1000,
+      'Q3: legacy |epoch parses (seconds → ms)');
+
+    // Current wording, same-day time.
+    const t1 = parseClaudeResetMs("You've hit your session limit · resets 3:45pm", now);
+    ok(t1 === new Date('2026-07-11T15:45:00').getTime(), 'Q3: "resets 3:45pm" → today 3:45pm');
+
+    // A time already past rolls to tomorrow.
+    const t2 = parseClaudeResetMs("You've hit your session limit · resets 1pm", now);
+    ok(t2 === new Date('2026-07-12T13:00:00').getTime(), 'Q3: past time rolls to tomorrow');
+
+    // Weekday wording (2026-07-11 is a Saturday; "Mon" → 2026-07-13).
+    const t3 = parseClaudeResetMs("You've hit your weekly limit · resets Mon 12:00am", now);
+    ok(t3 === new Date('2026-07-13T00:00:00').getTime(), 'Q3: weekday phrase → next Monday midnight');
+
+    // Month-day wording with a timezone suffix to ignore.
+    const t4 = parseClaudeResetMs("You've hit your weekly limit · resets Jul 14 at 4pm (Europe/Berlin)", now);
+    ok(t4 === new Date('2026-07-14T16:00:00').getTime(), 'Q3: "Mon DD at Npm" parses (tz suffix ignored)');
+
+    ok(parseClaudeResetMs('no reset info here', now) === null, 'Q3: unparseable → null');
+
+    // classifyError: quota errors carry the deadline…
+    const qe = classifyError('', "You've hit your Opus limit · resets 3:45pm");
+    ok(qe && qe.kind === 'quota' && Number.isFinite(qe.data.cooldownUntilMs),
+      'Q3: classifyError attaches cooldownUntilMs');
+    // …and the server throttle is NOT quota.
+    ok(classifyError('', 'API Error: Server is temporarily limiting requests (not your usage limit)') === null,
+      'Q3: "not your usage limit" throttle excluded from quota');
+
+    // Integration seam (Task 2 review fold-in): an ADAPTER-produced error must
+    // flow through pool.feedback() into the account breaker's deadline path.
+    const { createAccountPool } = require(path.join(REPO, 'packages/provider/accounts.js'));
+    const tmp3 = fs.mkdtempSync(path.join(os.tmpdir(), 'q3-adapter-'));
+    fs.writeFileSync(path.join(tmp3, 'accounts.json'), JSON.stringify({ claude: [{ name: 'm', dir: 'm' }] }));
+    const pool3 = createAccountPool({ file: path.join(tmp3, 'accounts.json'), baseDir: tmp3, engines: ['claude'], watch: false });
+    const sel3 = pool3.select('claude', {});
+    pool3.feedback('claude', sel3.account, classifyError('', "You've hit your session limit · resets Mon 12:00am"));
+    const gate3 = sel3.account.breaker.allow();
+    ok(gate3.allowed === false && gate3.retryInSec > 3600,
+      `Q3: adapter-classified error drives the real breaker deadline (retry ${gate3.retryInSec}s)`);
+  }
+
   console.log(`\nquota.test.js: all ${passed} assertions passed`);
 })().catch((err) => { console.error(err); process.exit(1); });
