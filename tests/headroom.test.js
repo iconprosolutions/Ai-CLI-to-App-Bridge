@@ -168,7 +168,7 @@ function ok(cond, msg) { assert(cond, msg); passed += 1; console.log(`  ok - ${m
 
   console.log('\n## H3 — refreshQuotaBreaker (poll corrects a wrong deadline)');
   {
-    const { createAccountPool, headroomScore } = require(path.join(REPO, 'packages/provider/accounts.js'));
+    const { createAccountPool } = require(path.join(REPO, 'packages/provider/accounts.js'));
     const { BridgeError } = require(path.join(REPO, 'packages/core/errors.js'));
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'h3-'));
     const file = path.join(tmp, 'a.json');
@@ -189,6 +189,17 @@ function ok(cond, msg) { assert(cond, msg); passed += 1; console.log(`  ok - ${m
     pool.feedback('claude', sel2.account, new BridgeError('quota', 'limit', { cooldownUntilMs: Date.now() + 3600 * 1000 }));
     const noClear = pool.refreshQuotaBreaker('claude', 'x', [{ group: 'weekly', kind: 'weekly_all', label: 'Weekly', percent: 98 }]);
     ok(noClear === false && pool.select('claude', {}).ok === false, 'H3: a still-drained account is NOT cleared');
+
+    // A breaker opened for TIMEOUT (not quota) must never be poll-cleared —
+    // fresh usage numbers say nothing about a hung CLI.
+    const toFile = path.join(tmp, 'to.json');
+    fs.writeFileSync(toFile, JSON.stringify({ claude: [{ name: 't', dir: 't' }] }));
+    const poolT = createAccountPool({ file: toFile, baseDir: tmp, engines: ['claude'], watch: false, breakerOpts: { timeoutThreshold: 1, timeoutCooldownMs: 60_000 } });
+    const selT = poolT.select('claude', {});
+    poolT.feedback('claude', selT.account, new BridgeError('timeout', 'hung'));
+    ok(poolT.select('claude', {}).ok === false, 'H3: timeout breaker is open');
+    const clearedT = poolT.refreshQuotaBreaker('claude', 't', [{ group: 'weekly', kind: 'weekly_all', label: 'W', percent: 5, fresh: true }]);
+    ok(clearedT === false && poolT.select('claude', {}).ok === false, 'H3: fresh numbers never clear a timeout breaker');
   }
 
   console.log(`\nheadroom.test.js: all ${passed} assertions passed`);

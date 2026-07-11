@@ -214,7 +214,9 @@ const quota = createQuotaService({
   onChange: (ev) => {
     events.emit('quota.change', ev);
     // A fresh poll can retire a quota breaker whose parsed deadline was wrong.
-    if (ev.limits) pool.refreshQuotaBreaker(ev.engine, ev.account, ev.limits);
+    // Only clean, current numbers may retire a breaker — an error-bearing
+    // snapshot recycles OLD limits (auth-stale/scope) and is not evidence.
+    if (ev.limits && !ev.error) pool.refreshQuotaBreaker(ev.engine, ev.account, ev.limits);
   },
 });
 if (QUOTA_POLL) quota.start();
@@ -227,7 +229,7 @@ const QUOTA_POLL_MINUTES = Number(process.env.QUOTA_POLL_MINUTES) || 5;
 const HEADROOM_STALE_MIN = QUOTA_POLL_MINUTES * 3;
 const headroomFor = (engine, name) => {
   const q = quota.get(engine, name);
-  if (!q || q.staleMinutes > HEADROOM_STALE_MIN) return null;
+  if (!q || q.error || q.staleMinutes > HEADROOM_STALE_MIN) return null;
   return q.limits;
 };
 
