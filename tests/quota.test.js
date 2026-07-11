@@ -176,5 +176,51 @@ function ok(cond, msg) { assert(cond, msg); passed += 1; console.log(`  ok - ${m
       'Q4: CLI-compiled quota string classifies, no fake deadline');
   }
 
+  console.log('\n## Q5 — quota parsers (claude oauth/usage + agy quota summary)');
+  {
+    const { parseClaudeUsage, parseAgyQuotaSummary, effective } =
+      require(path.join(REPO, 'packages/provider/quota.js'));
+
+    // New payload generation: generic limits[] array.
+    const newShape = parseClaudeUsage({
+      limits: [
+        { kind: 'session', group: 'session', percent: 42, severity: 'normal', resets_at: '2026-07-11T19:00:00Z' },
+        { kind: 'weekly_scoped', group: 'weekly', percent: 80, scope: { model: { display_name: 'Opus' } }, resets_at: '2026-07-14T08:00:00Z' },
+      ],
+    });
+    ok(newShape.length === 2 && newShape[0].percent === 42 && newShape[0].label === 'Session (5h)',
+      'Q5: claude limits[] shape parses');
+    ok(newShape[1].label === 'Opus weekly' && newShape[1].resetsAt === Date.parse('2026-07-14T08:00:00Z'),
+      'Q5: model-scoped weekly labeled from scope');
+
+    // Legacy generation: top-level five_hour/seven_day (+ per-model keys).
+    const legacy = parseClaudeUsage({
+      five_hour: { utilization: 61, resets_at: '2026-07-11T17:00:00Z' },
+      seven_day: { utilization: 33, resets_at: '2026-07-14T08:00:00Z' },
+      seven_day_opus: { utilization: 90, resets_at: '2026-07-14T08:00:00Z' },
+    });
+    ok(legacy.length === 3 && legacy[0].kind === 'session' && legacy[2].kind === 'weekly_scoped',
+      'Q5: claude legacy shape parses incl. seven_day_<model>');
+
+    // agy quota summary: remainingFraction (0..1 remaining) → percent used.
+    const agy = parseAgyQuotaSummary({
+      groups: [{
+        displayName: 'Gemini Models',
+        buckets: [
+          { bucketId: 'five_hour', displayName: 'Five hour', remaining: { remainingFraction: 0.25 }, resetTime: '2026-07-11T18:00:00Z' },
+          { bucketId: 'weekly', displayName: 'Weekly', remaining: { remainingFraction: 0.9 }, resetTime: '2026-07-15T00:00:00Z' },
+        ],
+      }],
+    });
+    ok(agy.length === 2 && agy[0].percent === 75 && agy[0].group === 'session',
+      'Q5: agy five-hour bucket → 75% used, session group');
+    ok(agy[1].percent === 10 && agy[1].label === 'Gemini Models · Weekly',
+      'Q5: agy weekly bucket labeled by family');
+
+    // effective(): a window whose reset passed reads as fresh (0%).
+    const eff = effective([{ kind: 'session', group: 'session', label: 'x', percent: 99, resetsAt: Date.now() - 1000 }]);
+    ok(eff[0].percent === 0 && eff[0].fresh === true, 'Q5: past reset ⇒ fresh window');
+  }
+
   console.log(`\nquota.test.js: all ${passed} assertions passed`);
 })().catch((err) => { console.error(err); process.exit(1); });
