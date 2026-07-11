@@ -102,6 +102,7 @@ function createQuotaService({
   const soonTimers = new Map();
   let interval = null;
   let persistTimer = null;
+  let firstSweep = null;
 
   // ── persistence ─────────────────────────────────────────────────────────
   try {
@@ -235,8 +236,8 @@ function createQuotaService({
 
   function start() {
     if (interval) return;
-    const first = setTimeout(() => { pollAll(); }, 5000);
-    first.unref();
+    firstSweep = setTimeout(() => { pollAll(); }, 5000);
+    firstSweep.unref();
     interval = setInterval(pollAll, Math.max(1, pollMinutes) * 60_000);
     interval.unref();
   }
@@ -244,6 +245,8 @@ function createQuotaService({
   function stop() {
     clearInterval(interval);
     interval = null;
+    clearTimeout(firstSweep);
+    firstSweep = null;
     clearTimeout(persistTimer);
     for (const t of soonTimers.values()) clearTimeout(t);
     soonTimers.clear();

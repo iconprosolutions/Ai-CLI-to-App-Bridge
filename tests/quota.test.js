@@ -291,6 +291,19 @@ function ok(cond, msg) { assert(cond, msg); passed += 1; console.log(`  ok - ${m
     const svc2 = createQuotaService({ pool: fakePool, file: path.join(tmp, 'snap.json'), fetchImpl });
     const back = svc2.get('claude', 'main');
     ok(back && back.limits[0].kind === 'session', 'Q6: snapshots survive a restart via the file');
+
+    // stop() within the first 5s must cancel the initial sweep — a service
+    // stopped at shutdown must never fire network calls afterwards.
+    let sweeps = 0;
+    const svcStop = createQuotaService({
+      pool: { accounts: () => { sweeps += 1; return []; } },
+      file: path.join(tmp, 'snap3.json'),
+      fetchImpl: async () => { throw new Error('must not fetch'); },
+    });
+    svcStop.start();
+    svcStop.stop();
+    await new Promise((r) => setTimeout(r, 5300));
+    ok(sweeps === 0, `Q6: stop() cancels the pending first sweep (${sweeps} sweeps fired)`);
   }
 
   console.log(`\nquota.test.js: all ${passed} assertions passed`);
