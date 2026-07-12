@@ -1,0 +1,10 @@
+{
+  "name": "@bridge/adapters",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Engine adapters for ai-cli-bridge: claude (stream-json) and agy (Antigravity).",
+  "main": "index.js",
+  "dependencies": {
+    "@bridge/core": "0.1.0"
+  }
+}

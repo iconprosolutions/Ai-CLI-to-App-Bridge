@@ -1,0 +1,13 @@
+{
+  "name": "@bridge/provider",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Consolidated OpenAI-compatible provider: /v1 served through in-process engine adapters.",
+  "main": "server.js",
+  "dependencies": {
+    "@bridge/adapters": "0.1.0",
+    "@bridge/core": "0.1.0",
+    "cors": "^2.8.5",
+    "express": "^4.21.2"
+  }
+}

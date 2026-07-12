@@ -12,9 +12,19 @@ services:
     ports:
       - "${CLAUDE_PORT:-9002}:9002"
     environment:
+      # Containers must accept connections from the docker network / port map;
+      # bare-metal runs default to loopback-only.
+      - BIND_HOST=0.0.0.0
       - CLAUDE_MODEL=${CLAUDE_MODEL:-}
       - AGENCY_NAME=${AGENCY_NAME:-Your Agency}
       - TEAM_MEMBERS=${TEAM_MEMBERS:-Team Member or Client}
+      # Shared secret for the HTTP API. Leave blank ONLY for local dev.
+      # When set, callers must send `Authorization: Bearer <key>`.
+      - BRIDGE_API_KEY=${BRIDGE_API_KEY:-}
+      # Optional CORS allowlist + CLI execution limits (see .env.example).
+      - CORS_ORIGINS=${CORS_ORIGINS:-}
+      - CLI_TIMEOUT_MS=${CLI_TIMEOUT_MS:-}
+      - MAX_CLI_OUTPUT_BYTES=${MAX_CLI_OUTPUT_BYTES:-}
     volumes:
       # Persist context files (client notes, agency context) on the host
       - ./claude-bridge/contexts:/app/contexts
@@ -23,9 +33,9 @@ services:
     restart: unless-stopped
 
   # ──────────────────────────────────────────────────────────────
-  # Gemini CLI Bridge  →  http://<this-machine-ip>:9003
-  # Wraps the Gemini CLI (gemini -p) as an HTTP service.
-  # Auth: mounts ~/.gemini from the host. The CLI must already be
+  # Gemini/Antigravity Bridge  →  http://<this-machine-ip>:9003
+  # Wraps the Antigravity CLI (agy --print) as an HTTP service.
+  # Auth: mounts local CLI credentials from the host. The CLI must already be
   #       installed and authenticated on the host machine.
   # ──────────────────────────────────────────────────────────────
   gemini-bridge:
@@ -34,12 +44,54 @@ services:
     ports:
       - "${GEMINI_PORT:-9003}:9003"
     environment:
-      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.5-flash}
+      # Containers must accept connections from the docker network / port map;
+      # bare-metal runs default to loopback-only.
+      - BIND_HOST=0.0.0.0
+      - GEMINI_MODEL=${GEMINI_MODEL:-Gemini 3.5 Flash (Low)}
       - AGENCY_NAME=${AGENCY_NAME:-Your Agency}
       - TEAM_MEMBERS=${TEAM_MEMBERS:-Team Member or Client}
+      # Shared secret for the HTTP API. Leave blank ONLY for local dev.
+      # When set, callers must send `Authorization: Bearer <key>`.
+      - BRIDGE_API_KEY=${BRIDGE_API_KEY:-}
+      # Optional CORS allowlist + CLI execution limits (see .env.example).
+      - CORS_ORIGINS=${CORS_ORIGINS:-}
+      - CLI_TIMEOUT_MS=${CLI_TIMEOUT_MS:-}
+      - MAX_CLI_OUTPUT_BYTES=${MAX_CLI_OUTPUT_BYTES:-}
     volumes:
       # Persist context files on the host
       - ./gemini-bridge/contexts:/app/contexts
-      # Gemini CLI OAuth credentials from the host (CLI must be authenticated)
+      # Antigravity/Gemini CLI credentials from the host (CLI must be authenticated)
       - ${HOME}/.gemini:/root/.gemini:ro
+    restart: unless-stopped
+
+  # ──────────────────────────────────────────────────────────────
+  # Provider Bridge  →  http://<this-machine-ip>:9010
+  # OpenAI-style HTTP facade for Waqar's own apps. Routes requests to
+  # the Claude and Gemini HTTP bridges over the compose network — never
+  # spawns the CLIs directly. Hermes keeps using the MCP delegate.
+  # Auth: requires Authorization: Bearer <PROVIDER_API_KEY> on /v1/*.
+  #       Falls back to BRIDGE_API_KEY for local single-key setups.
+  # ──────────────────────────────────────────────────────────────
+  provider-bridge:
+    build: ./provider-bridge
+    container_name: provider-bridge
+    ports:
+      - "${PROVIDER_PORT:-9010}:9010"
+    environment:
+      # Containers must accept connections from the docker network / port map;
+      # bare-metal runs default to loopback-only.
+      - BIND_HOST=0.0.0.0
+      # Incoming auth for /v1/* endpoints. Falls back to BRIDGE_API_KEY.
+      - PROVIDER_API_KEY=${PROVIDER_API_KEY:-}
+      # Also used as the outgoing bearer token when calling the bridges.
+      - BRIDGE_API_KEY=${BRIDGE_API_KEY:-}
+      # Inside compose, reach the sibling bridges by service name.
+      - CLAUDE_BRIDGE_URL=http://claude-bridge:9002
+      - GEMINI_BRIDGE_URL=http://gemini-bridge:9003
+      - PROVIDER_MAX_CONCURRENT_PER_ENGINE=${PROVIDER_MAX_CONCURRENT_PER_ENGINE:-1}
+      - PROVIDER_UPSTREAM_TIMEOUT_MS=${PROVIDER_UPSTREAM_TIMEOUT_MS:-}
+      - CORS_ORIGINS=${CORS_ORIGINS:-}
+    depends_on:
+      - claude-bridge
+      - gemini-bridge
     restart: unless-stopped

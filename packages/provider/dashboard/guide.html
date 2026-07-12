@@ -1,0 +1,456 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI CLI Bridge · Operator Guide</title>
+<style>
+  :root{
+    --canvas:#ffffff; --canvas-dark:#010120;
+    --hairline:#ebebeb; --dark-soft:#26263a; --dark-fill:#313641;
+    --ink:#000000; --body:#717182; --faint:#999999; --on-dark:#ffffff; --on-dark-soft:#b9bcd6;
+    --orange:#fc4c02; --magenta:#ef2cc1; --peri:#bdbbff; --mint:#c8f6f9;
+    --tint-mint:#dff7fb; --tint-peri:#ecebff; --tint-peach:#ffe7d8;
+    --grad:linear-gradient(96deg,#fc4c02,#ef2cc1 54%,#bdbbff);
+    --ok:#1a7f4b; --warn:#b2590a; --down:#c0392b;
+    --ok-d:#3ddc84; --warn-d:#f5b53d; --down-d:#ff6b6b;
+    --r-xs:3.25px; --r-sm:4px; --r-md:8px;
+    --sans:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',sans-serif;
+    --mono:ui-monospace,'SF Mono',SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  html,body{margin:0;padding:0}
+  body{background:var(--canvas);color:var(--ink);font-family:var(--sans);font-size:15px;line-height:1.5;letter-spacing:-.011em;-webkit-font-smoothing:antialiased}
+  .mono{font-family:var(--mono)}
+  a{color:inherit}
+
+  /* ── Header band ─────────────────────────── */
+  .shell{background:var(--canvas-dark);color:var(--on-dark)}
+  .shell .inner{max-width:1180px;margin:0 auto;padding:0 32px}
+  .shell-top{display:flex;align-items:center;gap:12px;padding:16px 0 12px;flex-wrap:wrap}
+  .logo-dot{width:10px;height:10px;border-radius:9999px;background:var(--grad);flex:0 0 auto}
+  .wordmark{font-family:var(--mono);text-transform:uppercase;letter-spacing:.12em;font-size:11px;font-weight:500}
+  .wordmark small{opacity:.55;letter-spacing:.08em}
+  .spacer{flex:1}
+  .backlink{font-family:var(--mono);font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--on-dark-soft);text-decoration:none;background:var(--dark-soft);border:1px solid var(--dark-fill);border-radius:var(--r-sm);padding:6px 12px}
+  .backlink:hover{color:var(--on-dark)}
+  .hero{max-width:1180px;margin:0 auto;padding:14px 32px 30px}
+  .hero .eyebrow{color:var(--on-dark-soft);margin-bottom:14px}
+  .hero h1{font-size:40px;font-weight:500;letter-spacing:-.02em;line-height:1.1;margin:0 0 14px;max-width:20ch}
+  .hero p{font-size:17px;line-height:1.5;color:var(--on-dark-soft);margin:0;max-width:62ch}
+  .hero p b{color:var(--on-dark);font-weight:500}
+
+  .eyebrow{font-family:var(--mono);text-transform:uppercase;font-size:11px;font-weight:500;letter-spacing:.055em;color:var(--body)}
+
+  /* ── Layout: sticky nav + content ─────────── */
+  .layout{max-width:1180px;margin:0 auto;padding:0 32px;display:grid;grid-template-columns:210px 1fr;gap:44px;align-items:start}
+  nav.toc{position:sticky;top:20px;padding-top:40px}
+  nav.toc .tl{font-family:var(--mono);text-transform:uppercase;font-size:9.5px;font-weight:500;letter-spacing:.1em;color:var(--faint);margin-bottom:12px}
+  nav.toc ol{list-style:none;margin:0;padding:0;counter-reset:t}
+  nav.toc li{counter-increment:t;margin:0}
+  nav.toc a{display:flex;gap:9px;text-decoration:none;color:var(--body);font-size:13px;padding:6px 0;border-bottom:1px solid transparent;line-height:1.3}
+  nav.toc a::before{content:counter(t,decimal-leading-zero);font-family:var(--mono);font-size:10px;color:var(--faint);flex:0 0 auto;padding-top:1px}
+  nav.toc a:hover{color:var(--ink)}
+  main.doc{min-width:0;padding-top:40px;padding-bottom:20px}
+
+  section{padding-top:14px;margin-bottom:40px;border-top:1px solid var(--hairline)}
+  section:first-of-type{border-top:none}
+  section > .eyebrow{margin-bottom:8px}
+  h2{font-size:26px;font-weight:500;letter-spacing:-.02em;margin:0 0 14px;line-height:1.15}
+  h3{font-size:16px;font-weight:500;margin:24px 0 8px}
+  p{margin:0 0 12px}
+  p.lede{font-size:16px;color:var(--body)}
+  ul,ol.steps{margin:0 0 14px;padding-left:0;list-style:none}
+  ol.steps{counter-reset:s}
+  ol.steps > li{counter-increment:s;position:relative;padding:2px 0 14px 34px;margin:0}
+  ol.steps > li::before{content:counter(s);position:absolute;left:0;top:0;width:22px;height:22px;border-radius:var(--r-sm);background:var(--ink);color:var(--on-dark);font-family:var(--mono);font-size:11px;font-weight:600;display:flex;align-items:center;justify-content:center}
+  ul.dash{padding-left:0}
+  ul.dash li{position:relative;padding:0 0 8px 18px}
+  ul.dash li::before{content:"—";position:absolute;left:0;color:var(--faint);font-family:var(--mono)}
+  b,strong{font-weight:500}
+  code{font-family:var(--mono);font-size:.86em;background:var(--hairline);border-radius:3px;padding:1px 5px}
+  .rid{font-family:var(--mono);font-size:.82em;background:var(--tint-peri);border-radius:3px;padding:1px 5px;white-space:nowrap}
+
+  /* code blocks — dark, like connect tab */
+  pre.code{margin:0 0 14px;padding:14px 16px;font-family:var(--mono);font-size:12px;line-height:1.7;color:#d8dcf2;background:var(--canvas-dark);border:1px solid var(--dark-soft);border-radius:var(--r-sm);white-space:pre;overflow-x:auto}
+  pre.code .c{color:var(--on-dark-soft);opacity:.7}
+  pre.code .k{color:var(--peri)}
+  pre.code .s{color:var(--mint)}
+
+  /* callout */
+  .callout{border:1px solid #f0d4b8;background:#fdf4e7;border-radius:var(--r-sm);padding:14px 16px;margin:0 0 16px}
+  .callout .ct{font-family:var(--mono);font-size:9.5px;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:var(--warn);display:block;margin-bottom:6px}
+  .callout p{margin:0}
+  .callout code{background:#f5e6cf}
+
+  /* tint tiles for route picker */
+  .cards{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:0 0 16px}
+  .rcard{border-radius:var(--r-sm);padding:16px 18px;border:1px solid transparent}
+  .rcard.mint{background:var(--tint-mint)} .rcard.peri{background:var(--tint-peri)} .rcard.peach{background:var(--tint-peach)}
+  .rcard .rn{font-family:var(--mono);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;display:block;margin-bottom:6px}
+  .rcard .rid2{font-family:var(--mono);font-size:11px;display:block;margin-bottom:8px;overflow-wrap:anywhere}
+  .rcard .rd{font-size:13px;color:#333;line-height:1.4}
+
+  /* tables */
+  .scrollx{overflow-x:auto;margin:0 0 16px;border:1px solid var(--hairline);border-radius:var(--r-sm)}
+  table{border-collapse:collapse;width:100%;min-width:520px}
+  th,td{text-align:left;padding:10px 14px;border-bottom:1px solid var(--hairline);vertical-align:top;font-size:13px}
+  th{background:var(--hairline);font-family:var(--mono);font-size:9.5px;font-weight:500;text-transform:uppercase;letter-spacing:.08em;color:var(--body);white-space:nowrap}
+  tr:last-child td{border-bottom:none}
+  td code{font-size:.92em}
+  .grp-works td:first-child,.grp-lim td:first-child,.grp-no td:first-child{white-space:nowrap}
+  td.tag{font-family:var(--mono);font-size:9.5px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;width:1%}
+  .t-ok{color:var(--ok)} .t-lim{color:var(--warn)} .t-no{color:var(--down)}
+
+  /* status badges inline */
+  .sb{font-family:var(--mono);font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;padding:2px 8px;border-radius:var(--r-sm);white-space:nowrap;display:inline-block}
+  .sb.ok{color:var(--ok);background:#e8f5ee} .sb.warn{color:var(--warn);background:#fbeede} .sb.down{color:var(--down);background:#fae9e7} .sb.idle{color:var(--body);background:var(--hairline)}
+
+  /* tab-by-tab blocks */
+  .tabblock{border:1px solid var(--hairline);border-radius:var(--r-sm);padding:18px 20px;margin:0 0 12px}
+  .tabblock h3{margin:0 0 4px;font-size:16px}
+  .tabblock .sub{font-family:var(--mono);font-size:10px;text-transform:uppercase;letter-spacing:.05em;color:var(--faint);margin-bottom:10px}
+  .tabblock p{margin:0 0 8px;font-size:14px}
+  .tabblock ul.dash li{font-size:13.5px}
+
+  /* diagram */
+  .diagram{border:1px solid var(--dark-soft);background:var(--canvas-dark);border-radius:var(--r-sm);padding:20px 18px;margin:0 0 14px;overflow-x:auto}
+  .diagram pre{margin:0;font-family:var(--mono);font-size:12px;line-height:1.6;color:#dfe2f5;white-space:pre}
+  .diagram pre .hl{color:var(--mint)}
+  .diagram pre .hp{color:var(--peri)}
+  .diagram pre .ho{color:var(--warn-d)}
+
+  .foot{max-width:1180px;margin:0 auto;padding:26px 32px 10px;border-top:1px solid var(--hairline);display:flex;justify-content:space-between;flex-wrap:wrap;gap:10px;font-family:var(--mono);font-size:9.5px;text-transform:uppercase;letter-spacing:.08em;color:var(--faint)}
+  .stencil{font-weight:500;letter-spacing:-.04em;color:var(--hairline);font-size:clamp(48px,13vw,150px);line-height:.9;text-align:center;padding:16px 0 34px;user-select:none;overflow:hidden}
+
+  @media(max-width:860px){
+    .layout{grid-template-columns:1fr;gap:0}
+    nav.toc{position:static;padding-top:24px;border-bottom:1px solid var(--hairline);padding-bottom:18px}
+    nav.toc ol{columns:2;column-gap:20px}
+    main.doc{padding-top:24px}
+    .cards{grid-template-columns:1fr}
+    .hero h1{font-size:30px}
+  }
+  @media(max-width:600px){
+    .shell .inner,.hero,.layout,.foot{padding-left:16px;padding-right:16px}
+    nav.toc ol{columns:1}
+  }
+  @media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
+</style>
+</head>
+<body>
+
+<header class="shell">
+  <div class="inner">
+    <div class="shell-top">
+      <span class="logo-dot"></span><span class="wordmark">AI CLI Bridge <small>· Operator Guide</small></span>
+      <span class="spacer"></span>
+      <a class="backlink" href="/dashboard/">← Dashboard</a>
+    </div>
+  </div>
+  <div class="hero">
+    <div class="eyebrow">Owner runbook · localhost :9011</div>
+    <h1>Run your CLI subscriptions like an API.</h1>
+    <p>This is the practical, top-to-bottom guide to operating the bridge on your own machine — <b>start it, connect an app, read the dashboard, and fix it when it misbehaves</b>. Every command, route id, and file path here is the real one.</p>
+  </div>
+</header>
+
+<div class="layout">
+  <nav class="toc">
+    <div class="tl">On this page</div>
+    <ol>
+      <li><a href="#what">What this is</a></li>
+      <li><a href="#start">Start it</a></li>
+      <li><a href="#first-run">First-run checklist</a></li>
+      <li><a href="#connect">Connect an app</a></li>
+      <li><a href="#tabs">The dashboard, tab by tab</a></li>
+      <li><a href="#matrix">What it can &amp; can't do</a></li>
+      <li><a href="#breaks">When something breaks</a></li>
+      <li><a href="#hood">Under the hood in 60s</a></li>
+    </ol>
+  </nav>
+
+  <main class="doc">
+
+    <!-- 1 ─────────────────────────────────────── -->
+    <section id="what">
+      <div class="eyebrow">01 · The pitch</div>
+      <h2>What this is</h2>
+      <p class="lede">One process wraps your flat-rate CLI subscriptions — <code>claude</code> (Claude Code) and <code>agy</code> (Google Antigravity) — behind a single OpenAI-compatible endpoint at <code>/v1</code>. Any tool that speaks the OpenAI API (Hermes, the OpenAI SDKs, curl, Cursor, LibreChat…) calls those subscriptions as if they were paid API models — streaming, tool calls, JSON mode, per-user usage accounting. It runs like a self-hosted OpenRouter, except the traffic rides <b>your subscriptions</b> instead of metered API credits.</p>
+      <p>It is a small multi-user product: you sign in, teammates you create sign in, everyone mints their own <code>sk-bridge-…</code> API keys per app with their own rate/token limits, and the admin steers accounts, routes, and users from the control center. Live for the team at <code>https://bridge.iconprosolutions.com</code> (LAN: <code>http://192.168.1.10:9011</code>).</p>
+    </section>
+
+    <!-- 2 ─────────────────────────────────────── -->
+    <section id="start">
+      <div class="eyebrow">02 · Sign in</div>
+      <h2>Get in</h2>
+      <ol class="steps">
+        <li>
+          <p style="margin-bottom:6px">Open the control center and <b>sign in</b>. First boot creates an <code>admin</code> user; its one-time password is printed in the container log:</p>
+          <pre class="code">open https://bridge.iconprosolutions.com/dashboard/
+<span class="c"># admin password (first boot only):</span>
+docker logs ai-cli-bridge | grep <span class="s">'dashboard login'</span></pre>
+          <p style="font-size:13px;color:var(--body);margin:0">Change it right away from the profile panel. Sign-in gives you a session cookie — the whole dashboard, the Tester, and admin actions work off that. No key-pasting needed.</p>
+        </li>
+        <li>
+          <p style="margin-bottom:6px">The server itself runs as a Docker container on the NAS (rebuild/upgrade):</p>
+          <pre class="code"><span class="c"># on the NAS, in ~/ai-cli-bridge</span>
+docker compose -f deploy/docker-compose.yml up -d --build</pre>
+        </li>
+      </ol>
+      <p style="font-size:13px;color:var(--body)">The runtime state — users, keys, account logins, usage ledger — all lives in the single <code>data/runtime/</code> volume. Back that one directory up and you have everything. Deploy details: <code>docs/DEPLOY-NAS.md</code>.</p>
+    </section>
+
+    <!-- 3 ─────────────────────────────────────── -->
+    <section id="first-run">
+      <div class="eyebrow">03 · Do this first</div>
+      <h2>First-run checklist</h2>
+      <div class="callout">
+        <span class="ct">Signed in = authorized</span>
+        <p>Once you're logged in, the Tester and every admin button work off your session — nothing to paste. (If you're scripting <code>/admin</code> from outside a browser, an admin <code>sk-bridge-…</code> key in the Connect tab's key field is the fallback.)</p>
+      </div>
+      <ol class="steps">
+        <li><b>Confirm your accounts are signed in.</b> On the <b>Accounts</b> tab each engine card should read <span class="sb ok">READY</span> with a signed-in identity. Add more with the guided browser login (see §Accounts below).</li>
+        <li><b>Fire a test prompt in the Tester.</b> Pick a route, type a one-liner, send. A streamed reply confirms login, routing, and the CLI spawn all work end-to-end.</li>
+        <li><b>Mint a key for your first app.</b> Connect tab → name it → copy the <code>sk-bridge-…</code> secret once. That's what external tools authenticate with.</li>
+        <li><b>Create your teammates.</b> Users tab → add each person; they sign in and mint their own keys, metered separately.</li>
+      </ol>
+    </section>
+
+    <!-- 4 ─────────────────────────────────────── -->
+    <section id="connect">
+      <div class="eyebrow">04 · Integration</div>
+      <h2>Connect an app</h2>
+      <p>Point any OpenAI-compatible client at the bridge with three things:</p>
+      <pre class="code"><span class="k">Base URL</span>   https://bridge.iconprosolutions.com/v1   <span class="c"># LAN: http://192.168.1.10:9011/v1</span>
+<span class="k">API key</span>    sk-bridge-…               <span class="c"># mint it: Connect tab (you) or your profile (teammates)</span>
+<span class="k">Header</span>     X-App-Id: your-app        <span class="c"># optional — splits usage by app</span></pre>
+      <p>Keys are minted in the dashboard, shown once, and carry your limits — treat them like OpenRouter keys. The <code>X-App-Id</code> header further splits the Usage tab by app.</p>
+
+      <h3>Hermes</h3>
+      <p>Register a provider named <span class="rid">ai-cli-bridge</span> pointing at <code>http://127.0.0.1:9011/v1</code>, and put the key in <code>~/.hermes/.env</code> as <code>AI_CLI_BRIDGE_API_KEY</code>:</p>
+      <pre class="code"><span class="c"># ~/.hermes/.env</span>
+AI_CLI_BRIDGE_API_KEY=<span class="s">&lt;your-key&gt;</span>
+
+<span class="c"># smoke test:</span>
+hermes -z <span class="s">"Reply with exactly: ok"</span> --provider ai-cli-bridge \
+  -m bridge-agy-gemini-3.5-flash-medium-pulse -t <span class="s">""</span></pre>
+      <p style="font-size:13px;color:var(--body)">Text and tool-JSON calls work over Hermes; keep tool-heavy agentic loops on a native provider (see the limitations below).</p>
+
+      <h3>Raw curl</h3>
+      <pre class="code">curl http://127.0.0.1:9011/v1/chat/completions \
+  -H <span class="s">"Authorization: Bearer $KEY"</span> \
+  -H <span class="s">"Content-Type: application/json"</span> \
+  -H <span class="s">"X-App-Id: scratch"</span> \
+  -d <span class="s">'{"model":"bridge-claude-sonnet-4.6-northstar",
+       "stream":true,
+       "messages":[{"role":"user","content":"Say hi"}]}'</span></pre>
+
+      <h3>The six routes — and when to pick each</h3>
+      <p>Aliases like <code>bridge-fast</code> / <code>bridge-smart</code> still resolve, but the canonical ids are:</p>
+      <div class="cards">
+        <div class="rcard mint">
+          <span class="rn">Pulse · default</span>
+          <span class="rid2">bridge-agy-gemini-3.5-flash-medium-pulse</span>
+          <span class="rd">Balanced, fast Gemini. Your everyday default for app calls.</span>
+        </div>
+        <div class="rcard mint">
+          <span class="rn">Forge · faster reasoning</span>
+          <span class="rid2">bridge-agy-gemini-3.5-flash-high-forge</span>
+          <span class="rd">Stronger fast reasoning, still Gemini Flash.</span>
+        </div>
+        <div class="rcard peri">
+          <span class="rn">Atlas · long context</span>
+          <span class="rid2">bridge-agy-gemini-3.1-pro-high-atlas</span>
+          <span class="rd">Gemini Pro for long context and broad project scans.</span>
+        </div>
+        <div class="rcard peach">
+          <span class="rn">Spark · quick Claude</span>
+          <span class="rid2">bridge-claude-haiku-4.5-spark</span>
+          <span class="rd">Claude Haiku — fast, cheap Claude responses.</span>
+        </div>
+        <div class="rcard peach">
+          <span class="rn">Northstar · coding / planning</span>
+          <span class="rid2">bridge-claude-sonnet-4.6-northstar</span>
+          <span class="rd">Claude Sonnet — coding, planning, careful reasoning.</span>
+        </div>
+        <div class="rcard peach">
+          <span class="rn">Oracle · hard reasoning</span>
+          <span class="rid2">bridge-claude-opus-4.5-oracle</span>
+          <span class="rd">Claude Opus for the hard stuff, when your Claude limits allow.</span>
+        </div>
+      </div>
+      <p style="font-size:13px;color:var(--body)">Rule of thumb: Gemini routes (Pulse/Forge/Atlas) are cheap and fast with estimated token counts; Claude routes (Spark/Northstar/Oracle) give real token usage and better tool/JSON reliability. Long conversations belong on Claude routes — Gemini prompts are capped at 200&nbsp;KB.</p>
+    </section>
+
+    <!-- 5 ─────────────────────────────────────── -->
+    <section id="tabs">
+      <div class="eyebrow">05 · The control center</div>
+      <h2>The dashboard, tab by tab</h2>
+
+      <div class="tabblock">
+        <h3>Overview</h3>
+        <div class="sub">Is it safe to fire work right now?</div>
+        <p>Per-engine cards with breaker state, quota reason, slots/queue depth, and 24&nbsp;h uptime. The header verdicts summarize everything as <span class="sb ok">READY</span> / <span class="sb warn">BUSY</span> / <span class="sb warn">BLOCKED</span> / <span class="sb down">DOWN</span> / <span class="sb idle">OFF</span>.</p>
+        <ul class="dash">
+          <li><b>Breaker states:</b> <b>closed</b> = healthy, requests flow. <b>open</b> = quota recently exhausted (2 consecutive failures) — requests fail fast with no CLI spawn until the cool-down. <b>half-open</b> = one trial request is allowed through; success closes it again.</li>
+          <li><b>Alert banner</b> appears whenever a circuit is open, with the retry countdown.</li>
+          <li><b>Reset breaker</b> clears an open circuit immediately if you don't want to wait out the 15-minute window.</li>
+          <li><b>Kill-run</b> terminates a stuck in-flight CLI process (SIGTERM → SIGKILL); it's logged as an abort and never counts against engine health.</li>
+        </ul>
+      </div>
+
+      <div class="tabblock">
+        <h3>Routes</h3>
+        <div class="sub">Edit the model catalogue</div>
+        <p>Toggle, add, or delete routes. Edits persist to <code>routes.json</code> and <b>hot-apply with no restart</b>.</p>
+        <ul class="dash">
+          <li><b>Probe</b> lists each engine's live catalogue for free — <b>quota-free, no completions run</b>.</li>
+        </ul>
+      </div>
+
+      <div class="tabblock">
+        <h3>Accounts</h3>
+        <div class="sub">The credential pool — one card per signed-in subscription</div>
+        <p>Each engine holds one or more accounts; requests round-robin across them with automatic quota failover and per-account circuit breakers.</p>
+        <ul class="dash">
+          <li><b>Add an account (no terminal):</b> for <b>claude</b>, use the guided browser login — click <b>Generate login link</b>, approve at claude.ai signed in as that account, paste the code back; the bridge exchanges it and the account joins the pool. For <b>gemini</b>, sign in with <code>agy</code> on any machine with a browser and paste the token-file contents (Google's login can't be relayed through the web app).</li>
+          <li><b>Make primary:</b> the ★ primary account takes traffic while it's healthy and has a free slot; overflow and outages spill to the rest. Per engine.</li>
+          <li><b>Rename</b> moves the account (and repoints any keys pinned to it); <b>Probe</b> confirms it answers; <b>Disable</b> pulls it from rotation.</li>
+        </ul>
+      </div>
+
+      <div class="tabblock">
+        <h3>Users</h3>
+        <div class="sub">Your team — admin only</div>
+        <p>Create logins (role <b>user</b> or <b>admin</b>), set each user's default key limits, reset passwords, disable or delete (which revokes their keys). Each row shows that user's keys and today/month usage.</p>
+        <ul class="dash">
+          <li><b>user</b> role sees only their own profile: mint one key per app (named <code>username.app</code>, inheriting your default limits), watch their own usage, change their password.</li>
+          <li><b>admin</b> role sees everything and manages accounts, routes, keys and users.</li>
+        </ul>
+      </div>
+
+      <div class="tabblock">
+        <h3>Usage</h3>
+        <div class="sub">Durable per-app / per-route / per-day token ledger</div>
+        <ul class="dash">
+          <li>Claude routes show a <span class="sb ok">REAL</span> badge (token counts come straight from stream-json); Gemini routes show <span class="sb idle">~EST</span> (estimated at ~4 chars/token).</li>
+          <li><b>API-equivalent value</b> prices your flat-rate usage at API list prices from the editable <code>packages/provider/pricing.json</code> — it's a "what this would have cost on the metered API" figure, not a real bill. Your subscriptions are flat-rate.</li>
+        </ul>
+      </div>
+
+      <div class="tabblock">
+        <h3>Tester</h3>
+        <div class="sub">Fire requests without leaving the browser</div>
+        <p>SSE or blocking mode, tools JSON, <code>json_object</code>/<code>json_schema</code> modes, side-by-side A/B route compare, and copy-as-cURL. Authorizes off your login — no key needed; calls attribute to you in Usage.</p>
+      </div>
+
+      <div class="tabblock">
+        <h3>Requests</h3>
+        <div class="sub">Opt-in full-exchange capture</div>
+        <p>The last 50 full exchanges — prompt, output, and per-stage timings.</p>
+        <ul class="dash">
+          <li>Capture is <b>opt-in</b>: default is metadata-only. Flip it on to record bodies.</li>
+          <li>The buffer is <b>memory-only</b> and <b>cleared on restart or when you toggle it off</b>. Nothing hits disk.</li>
+        </ul>
+      </div>
+
+      <div class="tabblock">
+        <h3>Connect</h3>
+        <div class="sub">Mint API keys + copy-paste snippets</div>
+        <p>Base URL, ready-made Hermes / curl / JS / Python snippets, and the <b>key manager</b>: mint named <code>sk-bridge-…</code> keys (secret shown once), set per-key limits (requests/min, tokens/day, $/month), assign a key to an account with hard or soft (failover) pinning, and revoke. As admin you manage everyone's keys here; teammates mint their own from their profile.</p>
+      </div>
+    </section>
+
+    <!-- 6 ─────────────────────────────────────── -->
+    <section id="matrix">
+      <div class="eyebrow">06 · Honest limits</div>
+      <h2>What it can &amp; can't do</h2>
+      <p class="lede">No surprises in production — here's the real capability surface.</p>
+
+      <div class="scrollx">
+        <table>
+          <thead><tr><th></th><th>Capability</th><th>Detail</th></tr></thead>
+          <tbody class="grp-works">
+            <tr><td class="tag t-ok">Works</td><td>Streaming</td><td>Real SSE deltas in OpenAI <code>chat.completion.chunk</code> format, smoothed by a bounded pacer.</td></tr>
+            <tr><td class="tag t-ok">Works</td><td>Tool calls</td><td><code>tool_choice</code> <code>none</code> / <code>required</code> / named-function, with one corrective retry; raw JSON never leaks as content.</td></tr>
+            <tr><td class="tag t-ok">Works</td><td>JSON mode</td><td><code>json_object</code> and <code>json_schema</code> enforced server-side with one corrective retry.</td></tr>
+            <tr><td class="tag t-ok">Works</td><td>Real token usage</td><td>Exact input/cache/output counts on Claude routes (from stream-json).</td></tr>
+            <tr><td class="tag t-ok">Works</td><td>Per-app usage ledger</td><td>Durable JSONL, split by <code>X-App-Id</code> / route / day.</td></tr>
+            <tr><td class="tag t-ok">Works</td><td>Circuit breaker</td><td>Quota exhaustion → <code>429 + Retry-After</code>; opens after 2 consecutive hits, no CLI spawns while open.</td></tr>
+            <tr><td class="tag t-ok">Works</td><td>Burst queue</td><td>Short FIFO queue (depth 4, 30&nbsp;s) absorbs bursts before returning <code>429 engine_busy</code>.</td></tr>
+            <tr><td class="tag t-ok">Works</td><td>Abort</td><td>A client hang-up or Kill-run terminates the underlying CLI process immediately.</td></tr>
+            <tr><td class="tag t-ok">Works</td><td>Local-tool lockdown</td><td>Claude runs locked down — bridge requests can't touch your local filesystem.</td></tr>
+          </tbody>
+          <tbody class="grp-lim">
+            <tr><td class="tag t-lim">Limits</td><td>Claude overhead</td><td>Claude routes carry ~15k tokens/request of Claude Code harness overhead — visible in the real usage counts.</td></tr>
+            <tr><td class="tag t-lim">Limits</td><td>Prompt size</td><td>gemini/agy prompts capped at 200&nbsp;KB; very long conversations should use Claude routes.</td></tr>
+            <tr><td class="tag t-lim">Limits</td><td>Tool-call reliability</td><td>Prompt-engineered, weaker than native API tool calling. Fine for side-calls; keep tool-heavy agent main loops on native providers.</td></tr>
+            <tr><td class="tag t-lim">Limits</td><td>Concurrency</td><td>One CLI run per engine at a time (subscription-friendly).</td></tr>
+            <tr><td class="tag t-lim">Limits</td><td>Spawn latency</td><td>~1–4&nbsp;s CLI spawn cost per request.</td></tr>
+          </tbody>
+          <tbody class="grp-no">
+            <tr><td class="tag t-no">No</td><td>Images</td><td>Rejected with <code>400</code> — honestly unsupported, not silently degraded.</td></tr>
+            <tr><td class="tag t-no">No</td><td>Embeddings</td><td>No embeddings endpoint.</td></tr>
+            <tr><td class="tag t-no">No</td><td>Sampling params</td><td><code>temperature</code>/<code>top_p</code>/<code>max_tokens</code>/<code>stop</code> ignored and echoed back in <code>bridge_ignored_params</code>.</td></tr>
+            <tr><td class="tag t-no">No</td><td>n &gt; 1</td><td>Multiple completions per request rejected.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- 7 ─────────────────────────────────────── -->
+    <section id="breaks">
+      <div class="eyebrow">07 · Firefighting</div>
+      <h2>When something breaks</h2>
+      <div class="scrollx">
+        <table>
+          <thead><tr><th>Symptom</th><th>Cause &amp; fix</th></tr></thead>
+          <tbody>
+            <tr><td><code>401</code> in the Tester<br><span class="mono" style="font-size:11px;color:var(--faint)">Missing or invalid bearer token</span></td><td>You skipped pasting the key. Go to the <b>Connect</b> tab and paste it into the key field.</td></tr>
+            <tr><td><code>429 rate_limit_error</code><br><span class="mono" style="font-size:11px;color:var(--faint)">circuit open</span></td><td>That engine's quota is exhausted. Wait for the <code>Retry-After</code> window, or reset the breaker in <b>Overview</b>. Use a different engine's route meanwhile.</td></tr>
+            <tr><td><code>429 engine_busy</code></td><td>The per-engine slot (1) plus its queue (depth 4) are full — it's protecting your subscription. Retry after <code>Retry-After</code>.</td></tr>
+            <tr><td>Engine shows <span class="sb down">DOWN</span></td><td>The CLI binary isn't on PATH for the launcher. Set <code>CLAUDE_PATH</code> / <code>GEMINI_PATH</code> and <code>npm run bridge:restart</code>.</td></tr>
+            <tr><td>A reply looks wrong</td><td>Flip <b>capture ON</b> in Requests, reproduce it, inspect the exact prompt / output / stage timings, then flip capture off (the buffer clears).</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <h3>Where the logs live</h3>
+      <pre class="code">npm run bridge:logs --follow     <span class="c"># tail the provider log</span>
+.bridge-runtime/*.log            <span class="c"># provider.log + friends on disk</span></pre>
+    </section>
+
+    <!-- 8 ─────────────────────────────────────── -->
+    <section id="hood">
+      <div class="eyebrow">08 · Mental model</div>
+      <h2>Under the hood in 60 seconds</h2>
+      <p>One process owns everything — there's no HTTP hop between the API surface and the engines. That's why every dashboard button works: the process that renders the Kill button is the same one holding the CLI child to kill.</p>
+      <div class="diagram">
+<pre>  <span class="hp">client</span>  ─POST /v1/chat/completions─►  <span class="hl">provider :9011</span>
+                                        │
+     ┌──────────────────────────────────┘
+     ▼
+  <span class="ho">auth</span> ─► <span class="ho">validate</span> ─► <span class="ho">route</span> ─► <span class="ho">breaker</span> ─► <span class="ho">queue</span>
+                                              │
+                                              ▼
+                                   ┌─ <span class="hl">claude</span> adapter ─► spawn `claude -p
+                                   │     --output-format stream-json`
+                                   └─ <span class="hl">agy</span>    adapter ─► spawn `agy --print`
+                                              │
+  <span class="hp">client</span>  ◄────────── SSE chunks ◄────── pacer</pre>
+      </div>
+      <p style="font-size:13px;color:var(--body)">Want the full lifecycle — prompt flattening, the error-to-HTTP taxonomy, the on-disk layout? Read <code>docs/HOW-IT-WORKS.md</code>.</p>
+    </section>
+
+  </main>
+</div>
+
+<div class="foot">
+  <span>AI CLI Bridge · Operator Guide</span>
+  <span>localhost :9011 · loopback only</span>
+</div>
+<div class="stencil">ai-cli-bridge</div>
+
+</body>
+</html>

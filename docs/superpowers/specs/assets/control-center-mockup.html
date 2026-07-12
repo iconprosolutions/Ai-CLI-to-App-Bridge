@@ -1,0 +1,655 @@
+<title>Bridge Control Center · Mockup</title>
+<style>
+  :root{
+    --canvas:#ffffff; --canvas-dark:#010120;
+    --hairline:#ebebeb; --dark-soft:#26263a; --dark-fill:#313641;
+    --ink:#000000; --body:#717182; --faint:#999999; --on-dark:#ffffff; --on-dark-soft:#b9bcd6;
+    --orange:#fc4c02; --magenta:#ef2cc1; --peri:#bdbbff; --mint:#c8f6f9;
+    --tint-mint:#dff7fb; --tint-peri:#ecebff; --tint-peach:#ffe7d8;
+    --grad:linear-gradient(96deg,#fc4c02,#ef2cc1 54%,#bdbbff);
+    --ok:#1a7f4b; --warn:#b2590a; --down:#c0392b;
+    --ok-d:#3ddc84; --warn-d:#f5b53d; --down-d:#ff6b6b;
+    --r-xs:3.25px; --r-sm:4px; --r-md:8px;
+    --sans:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',sans-serif;
+    --mono:ui-monospace,'SF Mono',SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{background:var(--canvas);color:var(--ink);font-family:var(--sans);font-size:15px;line-height:1.45;letter-spacing:-.011em;-webkit-font-smoothing:antialiased}
+  .num{font-variant-numeric:tabular-nums}
+  .mono{font-family:var(--mono)}
+  .eyebrow{font-family:var(--mono);text-transform:uppercase;font-size:11px;font-weight:500;letter-spacing:.055em;color:var(--body)}
+  a{color:inherit}
+  button{font:inherit;cursor:pointer}
+
+  /* ── App shell header ─────────────────────────── */
+  .shell{position:sticky;top:0;z-index:50;background:var(--canvas-dark);color:var(--on-dark)}
+  .shell .inner{max-width:1280px;margin:0 auto;padding:0 32px}
+  .shell-top{display:flex;align-items:center;gap:12px;padding:14px 0 10px;flex-wrap:wrap}
+  .logo-dot{width:9px;height:9px;border-radius:9999px;background:var(--grad);flex:0 0 auto}
+  .wordmark{font-family:var(--mono);text-transform:uppercase;letter-spacing:.12em;font-size:11px;font-weight:500}
+  .wordmark small{opacity:.55;letter-spacing:.08em}
+  .spacer{flex:1}
+  .verdict{display:inline-flex;align-items:center;gap:8px;background:var(--dark-soft);border:1px solid var(--dark-fill);border-radius:var(--r-sm);padding:5px 10px}
+  .verdict .vk{font-family:var(--mono);font-size:9.5px;text-transform:uppercase;letter-spacing:.1em;color:var(--on-dark-soft)}
+  .verdict .vv{font-family:var(--mono);font-size:10.5px;font-weight:600;text-transform:uppercase;letter-spacing:.05em}
+  .verdict .vv.ok{color:var(--ok-d)} .verdict .vv.warn{color:var(--warn-d)} .verdict .vv.down{color:var(--down-d)}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--on-dark-soft);position:relative;flex:0 0 auto}
+  .dot.ok{background:var(--ok-d)} .dot.warn{background:var(--warn-d)} .dot.down{background:var(--down-d)}
+  .dot.ok::after{content:"";position:absolute;inset:-4px;border-radius:50%;border:1.5px solid var(--ok-d);opacity:.5;animation:ring 2.2s ease-out infinite}
+  @keyframes ring{0%{transform:scale(.5);opacity:.6}70%{transform:scale(1.7);opacity:0}100%{opacity:0}}
+  .mockbadge{font-family:var(--mono);font-size:9px;font-weight:600;text-transform:uppercase;letter-spacing:.1em;color:var(--canvas-dark);background:var(--warn-d);border-radius:var(--r-sm);padding:4px 8px}
+  .livebtn{display:inline-flex;align-items:center;gap:8px;font-family:var(--mono);font-size:10px;text-transform:uppercase;letter-spacing:.08em;font-weight:500;color:var(--on-dark);background:var(--dark-soft);border:1px solid var(--dark-fill);border-radius:var(--r-sm);padding:6px 12px}
+  .livebtn .pl{width:7px;height:7px;border-radius:50%;background:var(--ok-d);animation:blink 1.4s steps(2,end) infinite}
+  @keyframes blink{50%{opacity:.25}}
+
+  .tabs{display:flex;gap:4px;overflow-x:auto}
+  .tab{font-family:var(--mono);font-size:10.5px;font-weight:500;text-transform:uppercase;letter-spacing:.07em;color:var(--on-dark-soft);background:transparent;border:none;border-bottom:2px solid transparent;padding:10px 14px 12px;white-space:nowrap}
+  .tab:hover{color:var(--on-dark)}
+  .tab.active{color:var(--on-dark);border-bottom-color:var(--on-dark)}
+  .tab .cnt{display:inline-block;margin-left:6px;font-size:9px;background:var(--dark-soft);border-radius:var(--r-sm);padding:1px 5px;color:var(--on-dark-soft)}
+
+  /* ── Content area ──────────────────────────────── */
+  .wrap{max-width:1280px;margin:0 auto;padding:28px 32px 0}
+  .view{display:none}
+  .view.active{display:block}
+  .sec-head{display:flex;align-items:baseline;gap:16px;margin:26px 0 14px;flex-wrap:wrap}
+  .sec-head:first-child{margin-top:0}
+  .sec-head h2{font-size:22px;font-weight:500;letter-spacing:-.02em;margin:0}
+  .sec-head .note{font-family:var(--mono);font-size:10px;color:var(--faint);margin-left:auto;text-transform:uppercase;letter-spacing:.04em}
+
+  /* alert banner */
+  .banner{display:flex;align-items:center;gap:12px;border:1px solid #f0d4b8;background:#fdf4e7;border-radius:var(--r-sm);padding:12px 16px;margin-bottom:20px;flex-wrap:wrap}
+  .banner .bi{width:8px;height:8px;border-radius:50%;background:var(--warn);flex:0 0 auto}
+  .banner .bt{font-size:14px}
+  .banner .bt strong{font-weight:500}
+  .banner .bactions{margin-left:auto;display:flex;gap:8px}
+
+  /* engine cards */
+  .engines{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  .ecard{border:1px solid var(--hairline);border-radius:var(--r-sm);padding:18px 20px}
+  .ecard .erow{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .ecard .ename{font-size:17px;font-weight:500}
+  .ecard .emodel{font-family:var(--mono);font-size:10.5px;color:var(--faint)}
+  .sbadge{font-family:var(--mono);font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;padding:3px 8px;border-radius:var(--r-sm);display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
+  .sbadge i{width:6px;height:6px;border-radius:50%;background:currentColor}
+  .sbadge.ok{color:var(--ok);background:#e8f5ee} .sbadge.warn{color:var(--warn);background:#fbeede} .sbadge.down{color:var(--down);background:#fae9e7} .sbadge.idle{color:var(--body);background:var(--hairline)}
+  .ekv{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;margin:12px 0;font-size:13px}
+  .ekv .k{font-family:var(--mono);font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--body);padding-top:2px}
+  .pips{display:flex;gap:5px;align-items:center}
+  .pip{height:10px;width:34px;border-radius:2px;background:var(--hairline)}
+  .pip.on{background:var(--ink)}
+  .ustrip{display:flex;gap:2px;align-items:flex-end;height:20px;margin:4px 0 10px}
+  .ub{width:5px;border-radius:1px;background:var(--ok);height:14px}
+  .ub.w{background:var(--warn);height:16px} .ub.b{background:var(--down);height:17px} .ub.i{background:var(--hairline);height:9px}
+  .ecard .eactions{display:flex;gap:8px;flex-wrap:wrap;border-top:1px solid var(--hairline);padding-top:12px;margin-top:4px}
+  .abtn{font-family:var(--mono);font-size:10px;font-weight:500;text-transform:uppercase;letter-spacing:.05em;color:var(--ink);background:var(--canvas);border:1px solid var(--hairline);border-radius:var(--r-xs);padding:7px 12px}
+  .abtn:hover{border-color:var(--ink)}
+  .abtn.danger{color:var(--down)}
+  .abtn.primary{color:var(--on-dark);background:var(--ink);border-color:var(--ink)}
+  .abtn:disabled{opacity:.4;cursor:default}
+  .abtn:disabled:hover{border-color:var(--hairline)}
+
+  /* KPI tiles */
+  .tiles{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-top:12px}
+  .tile{border-radius:var(--r-sm);padding:20px;border:1px solid transparent}
+  .tile.mint{background:var(--tint-mint)} .tile.peach{background:var(--tint-peach)} .tile.peri{background:var(--tint-peri)} .tile.plain{background:var(--canvas);border-color:var(--hairline)}
+  .tile .tl{font-family:var(--mono);font-size:10px;text-transform:uppercase;letter-spacing:.08em;opacity:.6}
+  .tile .big{font-size:30px;font-weight:500;letter-spacing:-.03em;line-height:1;margin-top:10px}
+  .tile .big small{font-size:14px;opacity:.55;letter-spacing:0}
+  .tile .sub{font-family:var(--mono);font-size:10.5px;opacity:.55;margin-top:8px}
+
+  /* tables */
+  .table{border:1px solid var(--hairline);border-radius:var(--r-sm);overflow:hidden}
+  .scrollx{overflow-x:auto}
+  .thead,.trow{display:grid;align-items:center;gap:12px;padding:10px 16px}
+  .thead{background:var(--hairline);font-family:var(--mono);font-size:9.5px;text-transform:uppercase;letter-spacing:.08em;color:var(--body)}
+  .trow{border-top:1px solid var(--hairline);background:var(--canvas);font-size:13.5px}
+  .trow .sub2{font-family:var(--mono);font-size:10.5px;color:var(--faint)}
+  .nbadge{font-family:var(--mono);font-size:9.5px;text-transform:uppercase;letter-spacing:.05em;color:var(--ink);background:var(--hairline);border-radius:var(--r-sm);padding:3px 8px;display:inline-block}
+  .chip{font-family:var(--mono);font-size:10px;color:var(--ink);background:var(--hairline);border-radius:var(--r-sm);padding:2px 7px;display:inline-block;margin:2px 3px 2px 0}
+  .estb{font-family:var(--mono);font-size:8.5px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;padding:2px 5px;border-radius:var(--r-sm);vertical-align:1px;margin-left:5px}
+  .estb.real{color:var(--ok);background:#e8f5ee} .estb.est{color:var(--body);background:var(--hairline)}
+
+  /* toggle */
+  .tog{position:relative;width:34px;height:19px;border-radius:9999px;background:var(--hairline);border:none;transition:background .15s;flex:0 0 auto}
+  .tog::after{content:"";position:absolute;top:2.5px;left:3px;width:14px;height:14px;border-radius:50%;background:var(--canvas);border:1px solid #d5d5d5;transition:left .15s}
+  .tog.on{background:var(--ok)}
+  .tog.on::after{left:16px;border-color:var(--ok)}
+
+  /* segmented control */
+  .seg{display:inline-flex;background:var(--hairline);padding:4px;border-radius:var(--r-sm);gap:2px}
+  .seg button{font-family:var(--mono);font-size:10px;font-weight:500;text-transform:uppercase;letter-spacing:.05em;color:var(--body);background:transparent;border:none;border-radius:var(--r-xs);padding:6px 13px}
+  .seg button.active{color:var(--on-dark);background:var(--ink)}
+
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:24px;align-items:start}
+  .grid2-13{display:grid;grid-template-columns:1fr 1.6fr;gap:24px;align-items:start}
+  .panel{border:1px solid var(--hairline);border-radius:var(--r-sm);padding:20px}
+  .panel h3{font-size:15px;font-weight:500;margin:0 0 12px}
+
+  .field{margin-bottom:12px}
+  .field label{display:block;font-family:var(--mono);font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--body);margin-bottom:6px}
+  .field input,.field select,.field textarea{width:100%;font:inherit;font-size:13.5px;color:var(--ink);background:var(--canvas);border:1px solid var(--hairline);border-radius:var(--r-sm);padding:9px 11px}
+  .field textarea{min-height:84px;resize:vertical;font-family:var(--mono);font-size:12.5px}
+  .field input:focus,.field select:focus,.field textarea:focus{outline:none;border-color:var(--ink)}
+  details.adv{border:1px solid var(--hairline);border-radius:var(--r-sm);padding:0;margin-bottom:12px}
+  details.adv summary{font-family:var(--mono);font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--body);padding:10px 12px;cursor:pointer;user-select:none}
+  details.adv .adv-body{padding:2px 12px 12px}
+
+  .console{border:1px solid var(--dark-soft);border-radius:var(--r-sm);overflow:hidden;background:var(--canvas-dark);display:flex;flex-direction:column;min-height:200px}
+  .console .cbar{display:flex;align-items:center;justify-content:space-between;padding:8px 12px;border-bottom:1px solid var(--dark-soft)}
+  .console .ctag{font-family:var(--mono);font-size:9.5px;font-weight:500;letter-spacing:.1em;text-transform:uppercase;color:var(--on-dark-soft)}
+  .console .cmeta{font-family:var(--mono);font-size:10px;color:var(--on-dark-soft);opacity:.7}
+  .console .cbody{flex:1;padding:13px;font-family:var(--mono);font-size:12.5px;line-height:1.6;color:#dfe2f5;white-space:pre-wrap;overflow-wrap:anywhere;overflow-y:auto;max-height:320px}
+
+  .dsb{font-family:var(--mono);font-size:9.5px;font-weight:600;padding:2px 7px;border-radius:var(--r-sm)}
+  .dsb.s2{color:var(--ok);background:#e8f5ee} .dsb.s4{color:var(--warn);background:#fbeede} .dsb.s5{color:var(--down);background:#fae9e7} .dsb.run{color:#4746a8;background:var(--tint-peri)}
+
+  /* usage bars */
+  .bars{display:flex;align-items:flex-end;gap:6px;height:110px;padding:14px 4px 6px}
+  .bar{flex:1;display:flex;flex-direction:column-reverse;gap:2px}
+  .bar i{display:block;border-radius:2px 2px 0 0}
+  .bar .bc{background:var(--ink)} .bar .bg{background:var(--peri)}
+  .bar-x{display:flex;gap:6px;padding:0 4px}
+  .bar-x span{flex:1;text-align:center;font-family:var(--mono);font-size:8.5px;color:var(--faint)}
+  .legend{display:flex;gap:18px;margin-top:10px;font-family:var(--mono);font-size:10.5px;color:var(--body)}
+  .legend i{width:9px;height:9px;border-radius:2px;display:inline-block;margin-right:6px;vertical-align:middle}
+
+  /* requests inspector */
+  .reqlist{border:1px solid var(--hairline);border-radius:var(--r-sm);overflow:hidden}
+  .reqitem{display:grid;grid-template-columns:52px 1fr auto auto;gap:10px;align-items:center;padding:10px 14px;border-top:1px solid var(--hairline);font-size:12.5px;cursor:pointer;background:var(--canvas);border-left:2px solid transparent}
+  .reqitem:first-child{border-top:none}
+  .reqitem:hover{background:#fafafa}
+  .reqitem.sel{border-left-color:var(--ink);background:#fafafa}
+  .reqitem .rt{font-family:var(--mono);font-size:10px;color:var(--faint)}
+  .stages{display:flex;height:14px;border-radius:2px;overflow:hidden;margin:8px 0 4px}
+  .stages i{display:block;height:100%}
+  .st-q{background:var(--hairline)} .st-s{background:var(--peri)} .st-w{background:var(--mint)} .st-o{background:var(--ink)}
+  .stage-leg{display:flex;gap:14px;flex-wrap:wrap;font-family:var(--mono);font-size:9.5px;color:var(--body);margin-bottom:14px}
+  .stage-leg i{width:8px;height:8px;border-radius:2px;display:inline-block;margin-right:5px;vertical-align:middle}
+  .dtabs{display:flex;gap:4px;border-bottom:1px solid var(--hairline);margin-bottom:0}
+  .dtab{font-family:var(--mono);font-size:9.5px;font-weight:500;text-transform:uppercase;letter-spacing:.06em;color:var(--body);background:none;border:none;border-bottom:2px solid transparent;padding:8px 10px}
+  .dtab.active{color:var(--ink);border-bottom-color:var(--ink)}
+  .privacy{font-family:var(--mono);font-size:10.5px;color:var(--body);display:flex;gap:8px;align-items:center;margin-top:10px}
+
+  /* connect */
+  .kv{display:flex;align-items:center;gap:10px;margin-bottom:10px}
+  .kv .k{font-family:var(--mono);font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--body);width:70px;flex:0 0 auto}
+  .kv code{font-family:var(--mono);font-size:12px;background:var(--canvas);border:1px solid var(--hairline);border-radius:var(--r-sm);padding:6px 10px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  pre.code{margin:0;padding:14px;font-family:var(--mono);font-size:11.5px;line-height:1.65;color:#d8dcf2;white-space:pre;overflow-x:auto}
+
+  .foot{max-width:1280px;margin:0 auto;padding:40px 32px 0;display:flex;justify-content:space-between;font-family:var(--mono);font-size:9.5px;text-transform:uppercase;letter-spacing:.08em;color:var(--faint)}
+  .stencil{font-weight:500;letter-spacing:-.04em;color:var(--hairline);font-size:clamp(54px,14vw,180px);line-height:.9;text-align:center;padding:24px 0 40px;user-select:none}
+
+  @media(max-width:960px){.engines,.grid2,.grid2-13{grid-template-columns:1fr}.tiles{grid-template-columns:repeat(2,1fr)}}
+  @media(max-width:600px){.wrap,.shell .inner,.foot{padding-left:16px;padding-right:16px}.tiles{grid-template-columns:1fr}}
+  @media(prefers-reduced-motion:reduce){*,*::after{animation:none !important;transition:none !important}}
+</style>
+
+<header class="shell">
+  <div class="inner">
+    <div class="shell-top">
+      <span class="logo-dot"></span><span class="wordmark">AI CLI Bridge <small>· Control Center</small></span>
+      <span class="mockbadge">Mockup · fake data</span>
+      <span class="spacer"></span>
+      <span class="verdict"><span class="dot down"></span><span class="vk">Claude</span><span class="vv down">Blocked</span></span>
+      <span class="verdict"><span class="dot ok"></span><span class="vk">Gemini</span><span class="vv ok">Ready</span></span>
+      <span class="verdict"><span class="vk">Inflight</span><span class="vv num" style="color:var(--on-dark)">1 / 2</span></span>
+      <button class="livebtn"><span class="pl"></span>Live</button>
+    </div>
+    <nav class="tabs">
+      <button class="tab active" data-view="overview">Overview</button>
+      <button class="tab" data-view="routes">Routes<span class="cnt">6</span></button>
+      <button class="tab" data-view="usage">Usage</button>
+      <button class="tab" data-view="tester">Tester</button>
+      <button class="tab" data-view="requests">Requests<span class="cnt">1 live</span></button>
+      <button class="tab" data-view="connect">Connect</button>
+    </nav>
+  </div>
+</header>
+
+<!-- ═══════════ OVERVIEW ═══════════ -->
+<main class="wrap view active" id="view-overview">
+  <div class="banner">
+    <span class="bi"></span>
+    <span class="bt"><strong>Claude circuit open</strong> — quota exhausted 4 min ago. Requests fail fast with 429. Auto half-open probe in 11 min.</span>
+    <span class="bactions"><button class="abtn">Probe now</button><button class="abtn primary">Reset breaker</button></span>
+  </div>
+
+  <div class="sec-head"><h2>Engines</h2><span class="note">breaker · quota · slots · 24h uptime</span></div>
+  <div class="engines">
+    <div class="ecard">
+      <div class="erow">
+        <span class="ename">Claude</span>
+        <span class="emodel">claude · 3 routes</span>
+        <span class="spacer"></span>
+        <span class="sbadge down"><i></i>Circuit open</span>
+      </div>
+      <div class="ekv">
+        <span class="k">Quota</span><span>Exhausted — CLI reported limit reached <span class="sub2">(14:32)</span></span>
+        <span class="k">Slots</span><span class="pips"><span class="pip"></span><span class="sub2" style="margin-left:6px">0/1 — blocked</span></span>
+        <span class="k">Last error</span><span class="sub2">429 quota · bridge-claude-sonnet-4.6-northstar · 4m ago</span>
+      </div>
+      <div class="ustrip"><i class="ub"></i><i class="ub"></i><i class="ub"></i><i class="ub"></i><i class="ub"></i><i class="ub"></i><i class="ub"></i><i class="ub"></i><i class="ub"></i><i class="ub"></i><i class="ub"></i><i class="ub"></i><i class="ub"></i><i class="ub"></i><i class="ub"></i><i class="ub"></i><i class="ub"></i><i class="ub"></i><i class="ub w"></i><i class="ub"></i><i class="ub"></i><i class="ub"></i><i class="ub"></i><i class="ub"></i><i class="ub"></i><i class="ub"></i><i class="ub"></i><i class="ub b"></i><i class="ub b"></i><i class="ub b"></i></div>
+      <div class="eactions">
+        <button class="abtn primary">Reset breaker</button>
+        <button class="abtn">Probe</button>
+        <button class="abtn" disabled>Kill run</button>
+        <button class="abtn">Disable engine</button>
+      </div>
+    </div>
+    <div class="ecard">
+      <div class="erow">
+        <span class="ename">Gemini</span>
+        <span class="emodel">agy · 3 routes</span>
+        <span class="spacer"></span>
+        <span class="sbadge warn"><i></i>Busy</span>
+      </div>
+      <div class="ekv">
+        <span class="k">Quota</span><span>OK</span>
+        <span class="k">Slots</span><span class="pips"><span class="pip on"></span><span class="sub2" style="margin-left:6px">1/1 — running 38s</span></span>
+        <span class="k">Last error</span><span class="sub2">none in window</span>
+      </div>
+      <div class="ustrip"><i class="ub"></i><i class="ub"></i><i class="ub"></i><i class="ub"></i><i class="ub"></i><i class="ub"></i><i class="ub"></i><i class="ub"></i><i class="ub"></i><i class="ub"></i><i class="ub"></i><i class="ub"></i><i class="ub"></i><i class="ub"></i><i class="ub"></i><i class="ub"></i><i class="ub"></i><i class="ub"></i><i class="ub"></i><i class="ub"></i><i class="ub"></i><i class="ub"></i><i class="ub"></i><i class="ub"></i><i class="ub"></i><i class="ub"></i><i class="ub"></i><i class="ub"></i><i class="ub"></i><i class="ub"></i></div>
+      <div class="eactions">
+        <button class="abtn" disabled>Reset breaker</button>
+        <button class="abtn">Probe</button>
+        <button class="abtn danger">Kill run · req 8f2c1d</button>
+        <button class="abtn">Disable engine</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="sec-head"><h2>Today</h2><span class="note">in-memory window + usage ledger</span></div>
+  <div class="tiles">
+    <div class="tile mint"><div class="tl">Requests</div><div class="big num">128</div><div class="sub">96.9% success · 4 errors</div></div>
+    <div class="tile peach"><div class="tl">Latency</div><div class="big num">4.1<small>s p50</small></div><div class="sub">12.7s p95 · streaming first-byte 1.9s</div></div>
+    <div class="tile peri"><div class="tl">Tokens today</div><div class="big num">412<small>k</small></div><div class="sub">341k prompt · 71k completion</div></div>
+    <div class="tile plain"><div class="tl">API-equivalent value</div><div class="big num">$4.87</div><div class="sub">what today would cost on the API</div></div>
+  </div>
+
+  <div class="sec-head"><h2>Live feed</h2><span class="note">newest first · SSE push</span></div>
+  <div class="table scrollx" style="min-width:0">
+    <div style="min-width:720px">
+      <div class="thead" style="grid-template-columns:64px 1.6fr 90px 90px 80px 80px 70px">
+        <span>Time</span><span>Route</span><span>App</span><span>Status</span><span>Latency</span><span>Tokens</span><span></span>
+      </div>
+      <div class="trow" style="grid-template-columns:64px 1.6fr 90px 90px 80px 80px 70px">
+        <span class="sub2 num">14:36:02</span><span>Gemini 3.5 Flash High · Forge<div class="sub2">hermes-main</div></span><span class="nbadge">hermes</span><span><span class="dsb run">running</span></span><span class="sub2 num">38s…</span><span class="sub2 num">—</span><span><button class="abtn danger" style="padding:4px 8px">Kill</button></span>
+      </div>
+      <div class="trow" style="grid-template-columns:64px 1.6fr 90px 90px 80px 80px 70px">
+        <span class="sub2 num">14:35:48</span><span>Claude Sonnet 4.6 · Northstar<div class="sub2">circuit open — failed fast</div></span><span class="nbadge">hermes</span><span><span class="dsb s4">429</span></span><span class="sub2 num">3ms</span><span class="sub2 num">0</span><span></span>
+      </div>
+      <div class="trow" style="grid-template-columns:64px 1.6fr 90px 90px 80px 80px 70px">
+        <span class="sub2 num">14:34:11</span><span>Gemini 3.5 Flash Medium · Pulse</span><span class="nbadge">obsidian</span><span><span class="dsb s2">200</span></span><span class="sub2 num">5.2s</span><span class="sub2 num">3.1k</span><span></span>
+      </div>
+      <div class="trow" style="grid-template-columns:64px 1.6fr 90px 90px 80px 80px 70px">
+        <span class="sub2 num">14:32:40</span><span>Claude Sonnet 4.6 · Northstar<div class="sub2">quota exhausted → breaker opened</div></span><span class="nbadge">hermes</span><span><span class="dsb s4">429</span></span><span class="sub2 num">9.8s</span><span class="sub2 num">2.4k</span><span></span>
+      </div>
+      <div class="trow" style="grid-template-columns:64px 1.6fr 90px 90px 80px 80px 70px">
+        <span class="sub2 num">14:31:07</span><span>Claude Haiku 4.5 · Spark</span><span class="nbadge">dashboard</span><span><span class="dsb s2">200</span></span><span class="sub2 num">2.9s</span><span class="sub2 num">1.2k</span><span></span>
+      </div>
+      <div class="trow" style="grid-template-columns:64px 1.6fr 90px 90px 80px 80px 70px">
+        <span class="sub2 num">14:29:55</span><span>Gemini 3.1 Pro High · Atlas</span><span class="nbadge">hermes</span><span><span class="dsb s2">200</span></span><span class="sub2 num">11.4s</span><span class="sub2 num">9.7k</span><span></span>
+      </div>
+    </div>
+  </div>
+</main>
+
+<!-- ═══════════ ROUTES ═══════════ -->
+<main class="wrap view" id="view-routes">
+  <div class="sec-head"><h2>Routes</h2><span class="note">edits write routes.json · hot-reload, no restart</span>
+  </div>
+  <div class="table scrollx">
+    <div style="min-width:860px">
+      <div class="thead" style="grid-template-columns:1.7fr 80px 1.2fr 1.3fr 70px 90px 150px">
+        <span>Route</span><span>Engine</span><span>Upstream model</span><span>Aliases</span><span>On</span><span>Calls 7d</span><span>Actions</span>
+      </div>
+      <div class="trow" style="grid-template-columns:1.7fr 80px 1.2fr 1.3fr 70px 90px 150px">
+        <span>Northstar<div class="sub2">bridge-claude-sonnet-4.6-northstar</div></span>
+        <span><span class="nbadge">claude</span></span>
+        <span class="sub2">claude-sonnet-4-6</span>
+        <span><span class="chip">claude-sonnet</span><span class="chip">bridge-smart</span><span class="chip">+2</span></span>
+        <span><button class="tog on" aria-label="enabled"></button></span>
+        <span class="sub2 num">2,481</span>
+        <span><button class="abtn">Edit</button> <button class="abtn danger">Delete</button></span>
+      </div>
+      <div class="trow" style="grid-template-columns:1.7fr 80px 1.2fr 1.3fr 70px 90px 150px">
+        <span>Spark<div class="sub2">bridge-claude-haiku-4.5-spark</div></span>
+        <span><span class="nbadge">claude</span></span>
+        <span class="sub2">claude-haiku-4-5</span>
+        <span><span class="chip">claude-haiku</span></span>
+        <span><button class="tog on" aria-label="enabled"></button></span>
+        <span class="sub2 num">914</span>
+        <span><button class="abtn">Edit</button> <button class="abtn danger">Delete</button></span>
+      </div>
+      <div class="trow" style="grid-template-columns:1.7fr 80px 1.2fr 1.3fr 70px 90px 150px">
+        <span>Oracle<div class="sub2">bridge-claude-opus-4.5-oracle</div></span>
+        <span><span class="nbadge">claude</span></span>
+        <span class="sub2">claude-opus-4-5</span>
+        <span><span class="chip">claude-opus</span><span class="chip">bridge-deep</span></span>
+        <span><button class="tog" aria-label="disabled"></button></span>
+        <span class="sub2 num">37</span>
+        <span><button class="abtn">Edit</button> <button class="abtn danger">Delete</button></span>
+      </div>
+      <div class="trow" style="grid-template-columns:1.7fr 80px 1.2fr 1.3fr 70px 90px 150px">
+        <span>Pulse <span class="chip" style="background:var(--tint-mint)">default</span><div class="sub2">bridge-agy-gemini-3.5-flash-medium-pulse</div></span>
+        <span><span class="nbadge">gemini</span></span>
+        <span class="sub2">Gemini 3.5 Flash (Medium)</span>
+        <span><span class="chip">gemini-flash</span><span class="chip">bridge-fast</span><span class="chip">+3</span></span>
+        <span><button class="tog on" aria-label="enabled"></button></span>
+        <span class="sub2 num">3,102</span>
+        <span><button class="abtn">Edit</button> <button class="abtn danger">Delete</button></span>
+      </div>
+      <div class="trow" style="grid-template-columns:1.7fr 80px 1.2fr 1.3fr 70px 90px 150px">
+        <span>Forge<div class="sub2">bridge-agy-gemini-3.5-flash-high-forge</div></span>
+        <span><span class="nbadge">gemini</span></span>
+        <span class="sub2">Gemini 3.5 Flash (High)</span>
+        <span></span>
+        <span><button class="tog on" aria-label="enabled"></button></span>
+        <span class="sub2 num">640</span>
+        <span><button class="abtn">Edit</button> <button class="abtn danger">Delete</button></span>
+      </div>
+      <div class="trow" style="grid-template-columns:1.7fr 80px 1.2fr 1.3fr 70px 90px 150px">
+        <span>Atlas<div class="sub2">bridge-agy-gemini-3.1-pro-high-atlas</div></span>
+        <span><span class="nbadge">gemini</span></span>
+        <span class="sub2">Gemini 3.1 Pro (High)</span>
+        <span><span class="chip">gemini-pro</span><span class="chip">bridge-long</span></span>
+        <span><button class="tog on" aria-label="enabled"></button></span>
+        <span class="sub2 num">211</span>
+        <span><button class="abtn">Edit</button> <button class="abtn danger">Delete</button></span>
+      </div>
+    </div>
+  </div>
+
+  <div class="grid2" style="margin-top:26px">
+    <div class="panel">
+      <h3>Add route</h3>
+      <div class="field"><label>Engine</label><select><option>claude</option><option>gemini</option></select></div>
+      <div class="field"><label>Upstream model</label><select><option>claude-opus-4-8 (discovered)</option><option>claude-sonnet-4-5</option></select></div>
+      <div class="field"><label>Route id</label><input value="bridge-claude-opus-4.8-titan"></div>
+      <div class="field"><label>Aliases (comma-separated)</label><input placeholder="claude-opus-48, bridge-frontier"></div>
+      <button class="abtn primary">Add route</button>
+    </div>
+    <div class="panel">
+      <h3>Discovered models</h3>
+      <div class="ekv" style="margin-top:0">
+        <span class="k">claude</span>
+        <span>
+          <span class="chip">claude-sonnet-4-6 <span class="estb real">routed</span></span>
+          <span class="chip">claude-haiku-4-5 <span class="estb real">routed</span></span>
+          <span class="chip">claude-opus-4-8 <span class="estb est">new</span></span>
+        </span>
+        <span class="k">gemini</span>
+        <span>
+          <span class="chip">3.5 Flash Med <span class="estb real">routed</span></span>
+          <span class="chip">3.1 Pro High <span class="estb real">routed</span></span>
+          <span class="chip">3.1 Pro Low <span class="estb" style="color:var(--warn);background:#fbeede">quota</span></span>
+        </span>
+      </div>
+      <div class="privacy" style="margin-top:14px">Last probed 2h ago. Probing spends ~1 CLI call per candidate model.</div>
+      <button class="abtn" style="margin-top:10px">Probe gemini now (≈5 calls)</button>
+    </div>
+  </div>
+</main>
+
+<!-- ═══════════ USAGE ═══════════ -->
+<main class="wrap view" id="view-usage">
+  <div class="sec-head">
+    <h2>Usage</h2>
+    <div class="seg"><button>Today</button><button class="active">7 days</button><button>30 days</button><button>All</button></div>
+    <span class="note">ledger: .bridge-runtime/usage/*.jsonl · survives restarts</span>
+  </div>
+
+  <div class="tiles">
+    <div class="tile peri"><div class="tl">Total tokens</div><div class="big num">4.2<small>M</small></div><div class="sub">3.4M prompt · 0.8M completion</div></div>
+    <div class="tile mint"><div class="tl">API-equivalent value</div><div class="big num">$38.12</div><div class="sub">vs $0 marginal on subscription</div></div>
+    <div class="tile peach"><div class="tl">Top app</div><div class="big">hermes</div><div class="sub">61% of tokens · 4,318 calls</div></div>
+    <div class="tile plain"><div class="tl">Error rate</div><div class="big num">2.1%</div><div class="sub">129 quota · 12 timeout · 8 other</div></div>
+  </div>
+
+  <div class="grid2" style="margin-top:26px">
+    <div>
+      <div class="sec-head" style="margin-top:0"><h2 style="font-size:17px">By app</h2><span class="note">X-App-Id header</span></div>
+      <div class="table scrollx">
+        <div style="min-width:520px">
+          <div class="thead" style="grid-template-columns:1.2fr 70px 90px 90px 90px 70px">
+            <span>App</span><span>Calls</span><span>Prompt</span><span>Compl.</span><span>API-equiv</span><span>Err</span>
+          </div>
+          <div class="trow" style="grid-template-columns:1.2fr 70px 90px 90px 90px 70px">
+            <span>hermes<span class="estb real">real</span></span><span class="sub2 num">4,318</span><span class="sub2 num">2.1M</span><span class="sub2 num">490k</span><span class="sub2 num">$23.40</span><span class="sub2 num">1.8%</span>
+          </div>
+          <div class="trow" style="grid-template-columns:1.2fr 70px 90px 90px 90px 70px">
+            <span>obsidian<span class="estb est">~est</span></span><span class="sub2 num">1,204</span><span class="sub2 num">840k</span><span class="sub2 num">210k</span><span class="sub2 num">$9.11</span><span class="sub2 num">2.4%</span>
+          </div>
+          <div class="trow" style="grid-template-columns:1.2fr 70px 90px 90px 90px 70px">
+            <span>graphify<span class="estb est">~est</span></span><span class="sub2 num">512</span><span class="sub2 num">380k</span><span class="sub2 num">88k</span><span class="sub2 num">$4.02</span><span class="sub2 num">3.9%</span>
+          </div>
+          <div class="trow" style="grid-template-columns:1.2fr 70px 90px 90px 90px 70px">
+            <span>dashboard<span class="estb est">~est</span></span><span class="sub2 num">96</span><span class="sub2 num">41k</span><span class="sub2 num">19k</span><span class="sub2 num">$0.61</span><span class="sub2 num">0%</span>
+          </div>
+          <div class="trow" style="grid-template-columns:1.2fr 70px 90px 90px 90px 70px">
+            <span>default<span class="estb est">~est</span></span><span class="sub2 num">231</span><span class="sub2 num">102k</span><span class="sub2 num">31k</span><span class="sub2 num">$0.98</span><span class="sub2 num">1.3%</span>
+          </div>
+        </div>
+      </div>
+      <div class="privacy">“real” = token counts reported by the CLI · “~est” = chars/4 heuristic. $ uses the editable pricing map (API list prices) — your subscriptions are flat-rate; this shows what the same usage would have cost on the API.</div>
+    </div>
+    <div>
+      <div class="sec-head" style="margin-top:0"><h2 style="font-size:17px">Tokens per day</h2><span class="note">by engine</span></div>
+      <div class="panel" style="padding-bottom:14px">
+        <div class="bars">
+          <div class="bar"><i class="bc" style="height:22px"></i><i class="bg" style="height:31px"></i></div>
+          <div class="bar"><i class="bc" style="height:35px"></i><i class="bg" style="height:24px"></i></div>
+          <div class="bar"><i class="bc" style="height:18px"></i><i class="bg" style="height:42px"></i></div>
+          <div class="bar"><i class="bc" style="height:41px"></i><i class="bg" style="height:28px"></i></div>
+          <div class="bar"><i class="bc" style="height:52px"></i><i class="bg" style="height:35px"></i></div>
+          <div class="bar"><i class="bc" style="height:12px"></i><i class="bg" style="height:20px"></i></div>
+          <div class="bar"><i class="bc" style="height:44px"></i><i class="bg" style="height:39px"></i></div>
+        </div>
+        <div class="bar-x"><span>Jun 25</span><span>26</span><span>27</span><span>28</span><span>29</span><span>30</span><span>Jul 1</span></div>
+        <div class="legend"><span><i style="background:var(--ink)"></i>claude</span><span><i style="background:var(--peri)"></i>gemini</span></div>
+      </div>
+      <div class="sec-head"><h2 style="font-size:17px">By route</h2></div>
+      <div class="table">
+        <div class="thead" style="grid-template-columns:1.6fr 90px 90px">
+          <span>Route</span><span>Calls</span><span>Tokens</span>
+        </div>
+        <div class="trow" style="grid-template-columns:1.6fr 90px 90px"><span class="sub2">Pulse · gemini flash med</span><span class="sub2 num">3,102</span><span class="sub2 num">1.6M</span></div>
+        <div class="trow" style="grid-template-columns:1.6fr 90px 90px"><span class="sub2">Northstar · claude sonnet</span><span class="sub2 num">2,481</span><span class="sub2 num">1.9M</span></div>
+        <div class="trow" style="grid-template-columns:1.6fr 90px 90px"><span class="sub2">Spark · claude haiku</span><span class="sub2 num">914</span><span class="sub2 num">0.4M</span></div>
+      </div>
+    </div>
+  </div>
+</main>
+
+<!-- ═══════════ TESTER ═══════════ -->
+<main class="wrap view" id="view-tester">
+  <div class="sec-head"><h2>Tester</h2><span class="note">POST /v1/chat/completions · SSE &amp; blocking</span></div>
+  <div class="grid2">
+    <div>
+      <div class="field"><label>Route A</label>
+        <select><option>Northstar · claude-sonnet-4-6 · ⛔ circuit open</option><option selected>Pulse · Gemini 3.5 Flash (Medium) · ✅ ready</option><option>Atlas · Gemini 3.1 Pro (High) · ✅ ready</option></select>
+      </div>
+      <div class="field"><label>Route B — compare <button class="tog on" style="vertical-align:-4px;margin-left:6px" aria-label="compare on"></button></label>
+        <select><option selected>Forge · Gemini 3.5 Flash (High) · ✅ ready</option></select>
+      </div>
+      <div class="field"><label>Prompt</label><textarea>Summarize the trade-offs between SSE and WebSockets for a local dashboard in 3 bullets.</textarea></div>
+      <details class="adv"><summary>System prompt</summary><div class="adv-body"><textarea style="width:100%;min-height:60px;font-family:var(--mono);font-size:12px;border:1px solid var(--hairline);border-radius:4px;padding:8px"></textarea></div></details>
+      <details class="adv"><summary>Tools (JSON) — off</summary><div class="adv-body"><textarea style="width:100%;min-height:60px;font-family:var(--mono);font-size:12px;border:1px solid var(--hairline);border-radius:4px;padding:8px" placeholder='[{"type":"function","function":{"name":"…"}}]'></textarea></div></details>
+      <div class="field"><label>Response format</label>
+        <div class="seg"><button class="active">Text</button><button>json_object</button><button>json_schema</button></div>
+      </div>
+      <div class="field"><label>Transport</label>
+        <div class="seg"><button class="active">SSE stream</button><button>Blocking</button></div>
+      </div>
+      <div style="display:flex;gap:10px;align-items:center">
+        <button class="abtn primary" style="padding:10px 24px;font-size:12px">Run</button>
+        <button class="abtn" disabled>Stop</button>
+        <button class="abtn">Copy as cURL</button>
+        <span class="mono" style="font-size:10.5px;color:var(--faint)">Ready</span>
+      </div>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:12px">
+      <div class="console">
+        <div class="cbar"><span class="ctag">A · Pulse</span><span class="cmeta">200 · streamed · 4.8s · 512 tok · stop</span></div>
+        <div class="cbody">- SSE is one-directional (server→client), which matches a dashboard: telemetry flows down, commands go up as plain POSTs.
+- WebSockets add bidirectional framing you don't need, plus reconnect/heartbeat logic you must write yourself; SSE reconnects natively via `retry:`.
+- Behind one local port with HTTP/1.1, SSE costs one held connection — fine for a single-user console.</div>
+      </div>
+      <div class="console">
+        <div class="cbar"><span class="ctag">B · Forge</span><span class="cmeta">200 · streamed · 6.1s · 588 tok · stop</span></div>
+        <div class="cbody">- SSE: simpler, auto-reconnect, plays well with proxies; one-way only.
+- WebSockets: full duplex and lower per-message overhead, but heavier to operate for a local tool.
+- For this dashboard, SSE + POST actions is the pragmatic choice.</div>
+      </div>
+      <div class="panel" style="padding:12px 16px">
+        <div class="eyebrow" style="margin-bottom:8px">History (this session)</div>
+        <div class="sub2 mono" style="font-size:11px;line-height:1.9">
+          14:36 · A/B compare · pulse vs forge · 200/200<br>
+          14:22 · northstar · json_object · 200 · 3.1s<br>
+          14:18 · northstar · tools(2) · tool_calls · 8.4s
+        </div>
+      </div>
+    </div>
+  </div>
+</main>
+
+<!-- ═══════════ REQUESTS ═══════════ -->
+<main class="wrap view" id="view-requests">
+  <div class="sec-head">
+    <h2>Requests</h2>
+    <span style="display:inline-flex;align-items:center;gap:8px"><button class="tog on" id="capTog" aria-label="capture toggle"></button><span class="eyebrow" style="color:var(--ink)">Capture bodies: on</span></span>
+    <span class="note">last 50 · in-memory only · cleared on restart · never written to disk</span>
+  </div>
+
+  <div id="cap-on">
+  <div class="grid2-13">
+    <div class="reqlist">
+      <div class="reqitem"><span class="rt num">14:36:02</span><span>Forge · hermes<div class="sub2">summarize trade-offs…</div></span><span class="dsb run">running</span><span class="sub2 num">38s</span></div>
+      <div class="reqitem sel"><span class="rt num">14:32:40</span><span>Northstar · hermes<div class="sub2">refactor the pacer…</div></span><span class="dsb s4">429</span><span class="sub2 num">9.8s</span></div>
+      <div class="reqitem"><span class="rt num">14:34:11</span><span>Pulse · obsidian<div class="sub2">extract action items…</div></span><span class="dsb s2">200</span><span class="sub2 num">5.2s</span></div>
+      <div class="reqitem"><span class="rt num">14:31:07</span><span>Spark · dashboard<div class="sub2">Reply with exactly…</div></span><span class="dsb s2">200</span><span class="sub2 num">2.9s</span></div>
+      <div class="reqitem"><span class="rt num">14:29:55</span><span>Atlas · hermes<div class="sub2">scan this project…</div></span><span class="dsb s2">200</span><span class="sub2 num">11.4s</span></div>
+    </div>
+    <div class="panel">
+      <div class="erow" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <span style="font-weight:500">req 7a91be · Northstar → claude-sonnet-4-6</span>
+        <span class="dsb s4">429 quota</span>
+        <span class="spacer"></span>
+        <span class="sub2 mono">14:32:40 · hermes</span>
+      </div>
+      <div class="stages" aria-hidden="true"><i class="st-q" style="width:2%"></i><i class="st-s" style="width:1%"></i><i class="st-w" style="width:76%"></i><i class="st-o" style="width:21%"></i></div>
+      <div class="stage-leg">
+        <span><i style="background:var(--hairline)"></i>queued 180ms</span>
+        <span><i style="background:var(--peri)"></i>spawn 65ms</span>
+        <span><i style="background:var(--mint)"></i>CLI wait 7.4s</span>
+        <span><i style="background:var(--ink)"></i>output → error 2.2s</span>
+      </div>
+      <div class="dtabs">
+        <button class="dtab active">Sent prompt</button>
+        <button class="dtab">CLI output</button>
+        <button class="dtab">Parsed result</button>
+        <button class="dtab">Error</button>
+      </div>
+      <div class="console" style="border-radius:0 0 4px 4px;border-top:none;min-height:170px">
+        <div class="cbar"><span class="ctag">flattened prompt · 2,381 tokens est</span><span class="cmeta">copy</span></div>
+        <div class="cbody">[SYSTEM]
+You have access to the following tools: …
+
+[USER]
+Refactor the pacer so a client abort stops emission immediately…
+
+[ASSISTANT]
+Looking at createSmoothPacer, the queue keeps draining because…</div>
+      </div>
+    </div>
+  </div>
+  </div>
+
+  <div id="cap-off" style="display:none">
+    <div class="panel" style="text-align:center;padding:48px 20px">
+      <div class="eyebrow" style="margin-bottom:10px">Capture is off</div>
+      <div style="max-width:52ch;margin:0 auto;color:var(--body);font-size:14px">Only metadata (route, status, latency, token estimates) is being recorded. Turn on capture to keep the last 50 full request/response bodies in memory for debugging. Nothing is ever written to disk.</div>
+    </div>
+  </div>
+</main>
+
+<!-- ═══════════ CONNECT ═══════════ -->
+<main class="wrap view" id="view-connect">
+  <div class="sec-head"><h2>Connect an app</h2><span class="note">route id = model name</span></div>
+  <div class="grid2">
+    <div>
+      <div class="kv"><span class="k">Base URL</span><code>http://127.0.0.1:9011/v1</code><button class="abtn">Copy</button></div>
+      <div class="kv"><span class="k">Auth</span><code>Authorization: Bearer &lt;key&gt;</code><button class="abtn">Copy</button></div>
+      <div class="kv"><span class="k">Default</span><code>bridge-agy-gemini-3.5-flash-medium-pulse</code><button class="abtn">Copy</button></div>
+      <div class="kv"><span class="k">App id</span><code>X-App-Id: &lt;your-app&gt;</code><button class="abtn">Copy</button></div>
+      <p class="mono" style="font-size:11px;color:var(--body);line-height:1.7;margin-top:14px">Point any OpenAI-compatible client at the base URL. Send X-App-Id so the Usage tab can attribute tokens per app.</p>
+    </div>
+    <div>
+      <div class="seg" style="margin-bottom:12px"><button class="active" data-snip="hermes">Hermes</button><button data-snip="curl">curl</button><button data-snip="js">OpenAI JS</button><button data-snip="python">Python</button></div>
+      <div class="console" style="min-height:0">
+        <div class="cbar"><span class="ctag" id="snip-name">~/.hermes/config.yaml</span><span class="cmeta">copy</span></div>
+        <pre class="code" id="snip-body">providers:
+  ai-cli-bridge:
+    type: openai
+    base_url: http://127.0.0.1:9011/v1
+    api_key: ${AI_CLI_BRIDGE_API_KEY}
+    models:
+      - bridge-agy-gemini-3.5-flash-medium-pulse
+      - bridge-claude-sonnet-4.6-northstar</pre>
+      </div>
+    </div>
+  </div>
+</main>
+
+<footer>
+  <div class="foot"><span>AI CLI Bridge · Control Center</span><span>design mockup · all data is fake</span></div>
+  <div class="stencil">ai-cli-bridge</div>
+</footer>
+
+<script>
+  // Tab switching
+  document.querySelectorAll('.tab').forEach(function(t){
+    t.addEventListener('click', function(){
+      document.querySelectorAll('.tab').forEach(function(x){ x.classList.toggle('active', x===t); });
+      document.querySelectorAll('.view').forEach(function(v){ v.classList.toggle('active', v.id==='view-'+t.dataset.view); });
+      window.scrollTo({top:0});
+    });
+  });
+  // Capture toggle demo — flips Requests tab between on/off states
+  var cap = document.getElementById('capTog');
+  cap.addEventListener('click', function(){
+    var on = cap.classList.toggle('on');
+    cap.parentElement.querySelector('.eyebrow').textContent = 'Capture bodies: ' + (on ? 'on' : 'off');
+    document.getElementById('cap-on').style.display = on ? '' : 'none';
+    document.getElementById('cap-off').style.display = on ? 'none' : '';
+  });
+  // Cosmetic: seg + dtab active states
+  document.querySelectorAll('.seg').forEach(function(s){
+    s.addEventListener('click', function(e){
+      var b=e.target.closest('button'); if(!b) return;
+      s.querySelectorAll('button').forEach(function(x){ x.classList.toggle('active', x===b); });
+    });
+  });
+  document.querySelectorAll('.dtabs').forEach(function(s){
+    s.addEventListener('click', function(e){
+      var b=e.target.closest('.dtab'); if(!b) return;
+      s.querySelectorAll('.dtab').forEach(function(x){ x.classList.toggle('active', x===b); });
+    });
+  });
+  // Connect snippets
+  var SNIPS={
+    hermes:{n:'~/.hermes/config.yaml',b:'providers:\n  ai-cli-bridge:\n    type: openai\n    base_url: http://127.0.0.1:9011/v1\n    api_key: ${AI_CLI_BRIDGE_API_KEY}\n    models:\n      - bridge-agy-gemini-3.5-flash-medium-pulse\n      - bridge-claude-sonnet-4.6-northstar'},
+    curl:{n:'POST /v1/chat/completions',b:'curl http://127.0.0.1:9011/v1/chat/completions \\\n  -H "Authorization: Bearer <key>" \\\n  -H "X-App-Id: my-app" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"model":"bridge-agy-gemini-3.5-flash-medium-pulse",\n       "messages":[{"role":"user","content":"Hello"}]}\''},
+    js:{n:'openai · node',b:'import OpenAI from "openai";\n\nconst client = new OpenAI({\n  baseURL: "http://127.0.0.1:9011/v1",\n  apiKey: process.env.AI_CLI_BRIDGE_API_KEY,\n  defaultHeaders: { "X-App-Id": "my-app" },\n});'},
+    python:{n:'openai · python',b:'from openai import OpenAI\n\nclient = OpenAI(\n    base_url="http://127.0.0.1:9011/v1",\n    api_key=os.environ["AI_CLI_BRIDGE_API_KEY"],\n    default_headers={"X-App-Id": "my-app"},\n)'}
+  };
+  document.querySelectorAll('[data-snip]').forEach(function(b){
+    b.addEventListener('click', function(){
+      var s=SNIPS[b.dataset.snip]; if(!s) return;
+      document.getElementById('snip-name').textContent=s.n;
+      document.getElementById('snip-body').textContent=s.b;
+    });
+  });
+</script>

@@ -1,0 +1,7 @@
+{
+  "name": "@bridge/core",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Shared core for ai-cli-bridge: CLI runner, error taxonomy, ANSI handling, auth, context store, sessions.",
+  "main": "index.js"
+}

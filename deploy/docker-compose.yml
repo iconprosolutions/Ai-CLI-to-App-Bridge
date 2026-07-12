@@ -1,0 +1,38 @@
+# Bridge Server Edition — LAN-only deployment (e.g. the Ugreen NAS).
+# BIND_HOST=0.0.0.0 is container-internal; the NAS firewall / LAN is the trust
+# boundary. Do NOT expose this port to the internet — put an HTTPS reverse proxy
+# in front if you ever must.
+services:
+  bridge:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: ai-cli-bridge:latest
+    container_name: ai-cli-bridge
+    restart: unless-stopped
+    ports:
+      - "9011:9011"
+    environment:
+      - PROVIDER_PORT=9011
+      - BIND_HOST=0.0.0.0
+      # Dashboard data endpoints require an admin key (Bearer or ?key=).
+      # Keep =1 whenever the port is reachable beyond the LAN (e.g. through a
+      # Cloudflare tunnel); the static UI stays public, the data does not.
+      - DASHBOARD_AUTH=${DASHBOARD_AUTH:-1}
+      # Let Orbit (claude-os hub) embed the dashboard in an iframe. LAN-only;
+      # remove this line if the port is ever exposed beyond the LAN.
+      - FRAME_ANCESTORS=http://localhost:5199 http://127.0.0.1:5199 http://localhost:7878 http://127.0.0.1:7878
+      # Uncomment to pin a fixed admin key instead of the auto-generated one:
+      # - PROVIDER_API_KEY=${PROVIDER_API_KEY}
+    volumes:
+      # The entire durable state: credentials.json (named keys), accounts.json
+      # (pool config) + per-account credential dirs under accounts/, the usage
+      # ledger, and connection.json. Back this one directory up and you have
+      # everything. routes.json + pricing.json ship baked into the image; mount
+      # them here too only if you customize them.
+      - ../data/runtime:/app/.bridge-runtime
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9011/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
