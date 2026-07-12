@@ -69,6 +69,8 @@ function parseAgyQuotaSummary(raw) {
 // Effective view: a window whose stored reset time has passed is 100%
 // available again — restarts and closed windows read correctly without a
 // fresh poll (Orbit's trick).
+// NOTE: per-window `fresh` = "reset boundary passed", unrelated to snapshot
+// recency (that's get()'s staleMinutes).
 function effective(limits, now = Date.now()) {
   return (limits || []).map((l) => {
     const fresh = l.resetsAt > 0 && l.resetsAt <= now;

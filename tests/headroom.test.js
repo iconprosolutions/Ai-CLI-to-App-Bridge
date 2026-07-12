@@ -138,6 +138,12 @@ function ok(cond, msg) { assert(cond, msg); passed += 1; console.log(`  ok - ${m
       busy: [{ group: 'weekly', kind: 'weekly_all', label: 'Weekly', percent: 80 }],
       idle: [{ group: 'weekly', kind: 'weekly_all', label: 'Weekly', percent: 5 }],
     };
+    // Pins are contracts: a hard pin to a headroom-drained account still
+    // serves (drain thresholds only shape UNPINNED selection).
+    const hardDrained = p7.select('claude', { pin: 'assigned', model: 'm', headroom: (e, n) => spScen[n] });
+    ok(hardDrained.ok === true && hardDrained.account.name === 'assigned',
+      'H2: hard pin serves a drained account (drain never vetoes a pin)');
+
     // Open the assigned account's breaker so the soft pin is truly unusable
     // (drain alone doesn't disqualify a soft pin — it serves until it fails).
     const selAssigned = p7.select('claude', { pin: 'assigned' });
